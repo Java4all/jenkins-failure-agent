@@ -1,373 +1,464 @@
-# Jenkins Failure Analysis Agent Configuration
-# Copy this file to config.yaml and update with your settings
+# =============================================================================
+# Jenkins Failure Analysis Agent - Complete Configuration Reference
+# =============================================================================
+#
+# Copy this file to config.yaml and customize for your environment.
+#
+# Environment Variable Substitution:
+#   ${VAR}           - expands to env var value (empty if not set)
+#   ${VAR:-default}  - expands to env var value or 'default' if not set
+#
+# Recommended: Put credentials in .env file and reference them here with ${VAR}
+#
+# =============================================================================
 
 # =============================================================================
 # JENKINS CONFIGURATION
 # =============================================================================
 jenkins:
-  # Jenkins server URL
-  url: "https://jenkins.example.com"
+  # Jenkins server URL (required)
+  url: "${JENKINS_URL:-https://jenkins.example.com}"
   
-  # Authentication (use API token, not password)
-  username: "your-jenkins-username"
-  api_token: "your-jenkins-api-token"
+  # Authentication - use API token, not password
+  # Generate at: Jenkins -> Your Username -> Configure -> API Token
+  username: "${JENKINS_USERNAME:-admin}"
+  api_token: "${JENKINS_API_TOKEN}"
   
-  # SSL verification (set to false for self-signed certs)
+  # SSL certificate verification (set false for self-signed certs)
   verify_ssl: true
   
   # Connection timeout in seconds
   timeout: 30
   
-  # Jobs to monitor (leave empty to allow all)
+  # Jobs to monitor - leave empty to allow all jobs
+  # Supports wildcards (*) and folder paths
   monitored_jobs: []
   # monitored_jobs:
   #   - "backend-api"
   #   - "frontend-app"
-  #   - "data-pipeline/*"  # Supports wildcards
+  #   - "folder/subfolder/*"
+  #   - "data-pipeline/*"
 
 # =============================================================================
 # AI MODEL CONFIGURATION
 # =============================================================================
 ai:
-  # Provider type: "openai_compatible" (works with Ollama, vLLM, LocalAI, etc.)
+  # Provider type (currently only openai_compatible is supported)
+  # Works with: Ollama, vLLM, LocalAI, LM Studio, OpenAI, Azure OpenAI
   provider: "openai_compatible"
   
-  # ----- OLLAMA CONFIGURATION -----
-  # Local Ollama instance
-  base_url: "http://localhost:11434/v1"
-  model: "llama3:8b"
-  api_key: "ollama"  # Ollama doesn't require a real key, but the client needs one
+  # API endpoint URL
+  # -----------------
+  # Ollama (local):           http://localhost:11434/v1
+  # Ollama (Docker):          http://host.docker.internal:11434/v1
+  # Ollama (container):       http://ollama:11434/v1
+  # vLLM:                     http://your-vllm-server:8000/v1
+  # LocalAI:                  http://localhost:8080/v1
+  # LM Studio:                http://localhost:1234/v1
+  # OpenAI:                   https://api.openai.com/v1
+  # Azure OpenAI:             https://your-resource.openai.azure.com/openai/deployments/your-deployment
+  base_url: "${AI_BASE_URL:-http://host.docker.internal:11434/v1}"
   
-  # ----- vLLM CONFIGURATION -----
-  # base_url: "http://your-vllm-server:8000/v1"
-  # model: "meta-llama/Llama-3-70b-chat-hf"
-  # api_key: "your-vllm-api-key"
+  # Model name/identifier
+  # ---------------------
+  # Ollama:     llama3:8b, llama3:70b, codellama:34b, mixtral:8x7b
+  # vLLM:       meta-llama/Llama-3-70b-chat-hf
+  # OpenAI:     gpt-4-turbo, gpt-4o, gpt-3.5-turbo
+  model: "${AI_MODEL:-llama3:8b}"
   
-  # ----- LocalAI CONFIGURATION -----
-  # base_url: "http://localhost:8080/v1"
-  # model: "llama3-70b"
-  # api_key: "localai"
-  
-  # ----- LM Studio CONFIGURATION -----
-  # base_url: "http://localhost:1234/v1"
-  # model: "local-model"
-  # api_key: "lm-studio"
-  
-  # ----- Custom Private API -----
-  # base_url: "https://your-private-llm-api.internal/v1"
-  # model: "your-fine-tuned-model"
-  # api_key: "your-api-key"
+  # API key (Ollama doesn't require a real key, but the client needs one)
+  api_key: "${AI_API_KEY:-ollama}"
   
   # Model parameters
-  temperature: 0.1  # Low temperature for more deterministic analysis
+  # ----------------
+  # Temperature: 0.0-1.0 (lower = more deterministic, higher = more creative)
+  temperature: 0.1
+  
+  # Maximum tokens in response
   max_tokens: 4096
   
-  # Request timeout
+  # Request timeout in seconds (increase for larger models)
   timeout: 120
   
-  # Retry configuration
+  # Retry settings
   max_retries: 3
   retry_delay: 5
 
 # =============================================================================
-# GIT INTEGRATION
+# GITHUB / GITHUB ENTERPRISE CONFIGURATION
 # =============================================================================
-git:
-  enabled: true
-  
-  # Number of recent commits to analyze
-  lookback_commits: 10
-  
-  # Clone repos locally for analysis (if workspace not available)
-  clone_repos: false
-  clone_directory: "/tmp/jenkins-agent-repos"
-  
-  # GitHub/GitLab API for enhanced analysis (optional)
-  api:
-    enabled: false
-    # For GitHub
-    # provider: "github"
-    # url: "https://api.github.com"
-    # token: "ghp_your_token"
-    
-    # For GitLab
-    # provider: "gitlab"
-    # url: "https://gitlab.example.com/api/v4"
-    # token: "glpat-your_token"
-
-# =============================================================================
-# GITHUB ENTERPRISE - SOURCE CODE FETCHING
-# =============================================================================
-# Fetch Jenkinsfile and shared library source code for deeper analysis.
-# This is critical for analyzing custom Groovy libraries and pipeline code.
+# Used for fetching Jenkinsfile and shared library source code
 github:
+  # Enable GitHub integration
   enabled: true
   
-  # GitHub API base URL
-  # GitHub.com:          https://api.github.com
-  # GitHub Enterprise:   https://github.yourcompany.com/api/v3
-  base_url: "https://api.github.com"
+  # API base URL
+  # ------------
+  # GitHub.com:        https://api.github.com
+  # GitHub Enterprise: https://github.yourcompany.com/api/v3
+  base_url: "${GITHUB_BASE_URL:-https://api.github.com}"
   
-  # Personal access token with repo read access
-  # Create at: GitHub → Settings → Developer settings → Personal access tokens
+  # Personal access token
   # Required scopes: repo (read)
-  token: ""
+  # Generate at: GitHub -> Settings -> Developer settings -> Personal access tokens
+  token: "${GITHUB_TOKEN}"
+  
+  # SSL certificate verification
+  verify_ssl: true
   
   # Request timeout in seconds
   timeout: 30
   
-  # Cache fetched files to reduce API calls
+  # Cache settings for API responses
   cache_enabled: true
-  cache_ttl_seconds: 300  # 5 minutes
+  cache_ttl_seconds: 300
   
-  # Map library names (from @Library declarations) to repositories
-  # This tells the agent where to find your shared library code
-  # 
-  # Example: If your Jenkinsfile has @Library('my-pipeline-lib')
-  # and the code is in https://github.yourcompany.com/platform/jenkins-shared-lib
-  # then add: "my-pipeline-lib": "platform/jenkins-shared-lib"
+  # Default branch when not specified in @Library('name')
+  default_branch: main
+  
+  # ==========================================================================
+  # LIBRARY MAPPINGS (Important!)
+  # ==========================================================================
+  # Map @Library('name') declarations to GitHub repositories
+  #
+  # Format: "library-name": "org/repo-name"
+  #
+  # The branch/tag is parsed automatically from the Jenkinsfile:
+  #   @Library('my-lib')        -> uses default_branch
+  #   @Library('my-lib@v2.0')   -> uses v2.0 tag/branch
+  #   @Library('my-lib@main')   -> uses main branch
+  #
   library_mappings:
-    # "my-pipeline-lib": "org/jenkins-shared-library"
-    # "common-steps": "platform/common-pipeline-steps"
-    # "deploy-lib": "devops/deployment-library"
-  
-  # Project repository mappings (optional)
-  # Map Jenkins job names to source repositories
-  # project_mappings:
-  #   "backend-api": "org/backend-api"
-  #   "frontend-app": "org/frontend-app"
+    # Examples - replace with your actual libraries:
+    "my-pipeline-lib": "your-org/jenkins-shared-library"
+    "common-steps": "platform-team/common-pipeline-steps"
+    "devops-lib": "devops/jenkins-devops-library"
+    # Add more as needed...
 
 # =============================================================================
-# LOG PARSING CONFIGURATION
+# SCM INTEGRATION - PR/MR COMMENTS
 # =============================================================================
-parsing:
-  # Maximum log size to process (in bytes)
-  max_log_size: 10485760  # 10MB
-  
-  # Number of lines to include around errors for context
-  error_context_lines: 10
-  
-  # Patterns to identify as errors (regex)
-  error_patterns:
-    - "\\[ERROR\\]"
-    - "\\[FATAL\\]"
-    - "Exception:"
-    - "Error:"
-    - "FAILED"
-    - "BUILD FAILURE"
-    - "AssertionError"
-    - "TypeError"
-    - "RuntimeError"
-    - "ConnectionError"
-    - "Traceback \\(most recent call last\\)"
-  
-  # Patterns to filter out (noise reduction)
-  ignore_patterns:
-    - "Downloading:"
-    - "Downloaded:"
-    - "Progress:"
-    - "\\[INFO\\] Download"
-
-# =============================================================================
-# FAILURE CATEGORIZATION
-# =============================================================================
-categories:
-  compilation_error:
-    patterns:
-      - "cannot find symbol"
-      - "compilation failed"
-      - "syntax error"
-      - "SyntaxError"
-      - "ModuleNotFoundError"
-      - "ImportError"
-    priority: "HIGH"
-    
-  test_failure:
-    patterns:
-      - "FAILED"
-      - "AssertionError"
-      - "test.*failed"
-      - "Expected.*but got"
-    priority: "HIGH"
-    
-  infrastructure:
-    patterns:
-      - "Connection refused"
-      - "timeout"
-      - "No space left on device"
-      - "Out of memory"
-      - "Cannot allocate memory"
-      - "Permission denied"
-    priority: "CRITICAL"
-    
-  dependency:
-    patterns:
-      - "Could not resolve dependencies"
-      - "package not found"
-      - "version conflict"
-      - "npm ERR!"
-      - "pip.*error"
-    priority: "MEDIUM"
-    
-  configuration:
-    patterns:
-      - "missing required"
-      - "configuration error"
-      - "invalid.*config"
-      - "environment variable.*not set"
-    priority: "MEDIUM"
-
-# =============================================================================
-# NOTIFICATIONS
-# =============================================================================
-notifications:
-  # Slack integration
-  slack:
-    enabled: false
-    webhook_url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
-    channel: "#ci-failures"
-    mention_on_critical: true  # @channel for critical failures
-    
-  # Microsoft Teams integration
-  teams:
-    enabled: false
-    webhook_url: "https://outlook.office.com/webhook/YOUR/WEBHOOK/URL"
-    
-  # Email notifications
-  email:
-    enabled: false
-    smtp_server: "smtp.example.com"
-    smtp_port: 587
-    username: "notifications@example.com"
-    password: "your-password"
-    from_address: "jenkins-agent@example.com"
-    to_addresses:
-      - "team@example.com"
-
-# =============================================================================
-# SCM INTEGRATION (GitHub/GitLab PR Comments)
-# =============================================================================
-# Post analysis results as PR/MR comments and set commit status checks.
-# This closes the feedback loop by putting analysis where developers see it.
+# Post analysis results as comments on Pull Requests / Merge Requests
 scm:
-  enabled: false
+  # Enable SCM integration
+  enabled: "${SCM_ENABLED:-false}"
   
   # Provider: "github" or "gitlab"
-  provider: "github"
+  provider: "${SCM_PROVIDER:-github}"
   
   # API URL
+  # -------
   # GitHub.com:        https://api.github.com
   # GitHub Enterprise: https://github.yourcompany.com/api/v3
   # GitLab.com:        https://gitlab.com/api/v4
-  # GitLab self-hosted: https://gitlab.yourcompany.com/api/v4
-  api_url: "https://api.github.com"
+  # GitLab Self-Host:  https://gitlab.yourcompany.com/api/v4
+  api_url: "${SCM_API_URL:-https://api.github.com}"
   
-  # Personal access token with repo/PR write access
-  # GitHub: Create at Settings → Developer settings → Personal access tokens
-  #         Required scopes: repo (for private repos), public_repo (for public)
-  # GitLab: Create at Settings → Access Tokens
-  #         Required scopes: api
-  token: ""
+  # Access token with PR/MR comment permissions
+  token: "${SCM_TOKEN}"
   
-  # SSL verification
+  # SSL certificate verification
   verify_ssl: true
   
-  # Auto-post analysis to PRs when triggered with PR info
+  # Automatically post analysis results to PR/MR
   auto_comment: true
   
-  # Update existing comment instead of posting new ones
-  # Uses a hidden marker to find previous comments from this tool
+  # Update existing comment instead of creating new one
   update_existing: true
   
-  # Set commit status check (shows as check in PR)
+  # Set commit status (success/failure/pending)
   set_commit_status: true
 
 # =============================================================================
 # REPORTER CONFIGURATION
 # =============================================================================
-# Control where analysis results are posted.
+# Control where and how results are reported
 reporter:
   # Update Jenkins build description with analysis summary
-  # Shows tier badge, retry assessment, and quick fix in Jenkins UI
   update_jenkins_description: true
   
-  # Post analysis to PR/MR (requires scm.enabled = true)
+  # Post results to PR/MR (requires scm.enabled: true)
   post_to_pr: true
   
-  # Post to Slack (requires notifications.slack.enabled = true)
+  # Post results to Slack (requires notifications.slack configured)
   post_to_slack: false
   
   # Generate report files
   generate_reports: true
-  report_formats:
-    - "json"
-    - "markdown"
-
-# =============================================================================
-# REPORTING
-# =============================================================================
-reporting:
-  # Output directory for reports
-  output_directory: "./reports"
   
   # Report formats to generate
-  formats:
-    - "json"
-    - "markdown"
-    # - "html"
-  
-  # Keep reports for N days (0 = forever)
-  retention_days: 30
-  
-  # Include in reports
-  include:
-    console_log_snippet: true
-    stack_traces: true
-    git_diff: true
-    ai_analysis: true
-    recommendations: true
+  # Options: json, markdown, html
+  report_formats:
+    - json
+    - markdown
+    # - html
 
 # =============================================================================
-# HISTORY & LEARNING
+# SERVER CONFIGURATION
 # =============================================================================
-history:
-  enabled: true
-  
-  # Database for storing failure history
-  database: "sqlite:///jenkins_failures.db"
-  
-  # Use history to improve analysis
-  use_similar_failures: true
-  similarity_threshold: 0.8
-  
-  # Track resolution patterns
-  track_resolutions: true
-
-# =============================================================================
-# SERVER MODE CONFIGURATION
-# =============================================================================
+# HTTP API server settings
 server:
+  # Bind address (0.0.0.0 = all interfaces)
   host: "0.0.0.0"
+  
+  # Port number
   port: 8080
   
-  # API authentication
-  api_key_enabled: true
-  api_key: "your-secure-api-key-here"
+  # API key authentication
+  # ----------------------
+  # If set, all requests must include header: X-API-Key: your-key
+  # WARNING: If set, the Web UI will NOT work (it doesn't send auth headers)
+  # Leave empty for UI access, or use a reverse proxy for auth
+  api_key: "${SERVER_API_KEY:-}"
   
-  # CORS settings
+  # CORS allowed origins (for browser-based clients)
   cors_origins:
-    - "https://jenkins.example.com"
-    - "http://localhost:*"
+    - "http://localhost:3000"
+    - "http://localhost:8080"
   
-  # Rate limiting
-  rate_limit: 100  # requests per minute
+  # Rate limit (requests per minute per client)
+  rate_limit: 100
 
 # =============================================================================
-# LOGGING
+# ANALYSIS CONFIGURATION
+# =============================================================================
+analysis:
+  # Maximum log lines to analyze (truncates from middle if exceeded)
+  max_log_lines: 5000
+  
+  # Enable deep investigation mode for complex failures
+  # When enabled, uses MCP tools for multi-step analysis
+  enable_deep_investigation: true
+  
+  # Maximum iterations for deep investigation agent loop
+  max_investigation_iterations: 15
+  
+  # Confidence threshold to prefer agentic results over scripted
+  agentic_confidence_threshold: 0.6
+  
+  # ==========================================================================
+  # DEEP INVESTIGATION TRIGGERS
+  # ==========================================================================
+  # Failure categories that automatically trigger deep investigation
+  # These are typically complex failures requiring source code analysis
+  #
+  # Available categories:
+  #   - compilation_error    : Build/compile failures
+  #   - test_failure         : Unit/integration test failures
+  #   - infrastructure       : Jenkins/agent/executor issues
+  #   - dependency           : Maven/Gradle/npm dependency issues
+  #   - configuration        : Misconfig, missing env vars
+  #   - timeout              : Build/step timeouts
+  #   - network              : Connection failures, DNS issues
+  #   - permission           : Access denied, auth failures
+  #   - resource             : Out of memory, disk space
+  #   - groovy_library       : Shared library method/class issues
+  #   - groovy_cps           : CPS transformation errors
+  #   - groovy_sandbox       : Sandbox/security restrictions
+  #   - groovy_serialization : NotSerializableException
+  #   - credential_error     : Missing/invalid credentials
+  #   - agent_error          : Agent connection/offline issues
+  #   - plugin_error         : Jenkins plugin issues
+  #   - unknown              : Unclassified failures
+  #
+  deep_investigation_categories:
+    - groovy_library
+    - groovy_cps
+    - groovy_sandbox
+    - groovy_serialization
+    - plugin_error
+  
+  # ==========================================================================
+  # DEEP INVESTIGATION ERROR PATTERNS
+  # ==========================================================================
+  # Regex patterns that trigger deep investigation regardless of category
+  deep_investigation_patterns:
+    - "MissingMethodException"
+    - "MissingPropertyException"
+    - "NoSuchMethodError"
+    - "ClassNotFoundException"
+    - "No signature of method"
+    - "NotSerializableException"
+    - "unclassified field"
+    - "Scripts not permitted to use"
+
+# =============================================================================
+# GIT CONFIGURATION
+# =============================================================================
+# Git repository analysis settings
+git:
+  # Enable git integration for commit correlation
+  enabled: true
+  
+  # Number of recent commits to analyze for correlation
+  lookback_commits: 10
+  
+  # Clone repositories for deeper analysis (requires disk space)
+  clone_repos: false
+  
+  # Directory for cloned repositories
+  clone_directory: "/tmp/jenkins-agent-repos"
+  
+  # Shallow clone depth (reduces disk/network usage)
+  clone_depth: 50
+
+# =============================================================================
+# LOG PARSING CONFIGURATION
+# =============================================================================
+parsing:
+  # Maximum log size to process (bytes)
+  # Logs larger than this are truncated
+  max_log_size: 10485760  # 10MB
+  
+  # Lines of context around errors
+  error_context_lines: 10
+  
+  # ==========================================================================
+  # CUSTOM ERROR PATTERNS
+  # ==========================================================================
+  # Additional regex patterns to detect as errors
+  # These supplement the built-in patterns
+  error_patterns: []
+  # error_patterns:
+  #   - "CUSTOM_ERROR:"
+  #   - "\\[FATAL\\]"
+  #   - "MyCompanyException"
+  
+  # ==========================================================================
+  # IGNORE PATTERNS
+  # ==========================================================================
+  # Regex patterns to filter out from logs (reduces noise)
+  ignore_patterns:
+    - "^Downloading:"
+    - "^Downloaded:"
+    - "^Progress:"
+    - "^Fetching upstream changes"
+    # Add your custom ignore patterns:
+    # - "^\\[INFO\\] Download"
+    # - "^Pulling docker image"
+
+# =============================================================================
+# NOTIFICATIONS CONFIGURATION
+# =============================================================================
+notifications:
+  # Slack integration
+  slack:
+    # Enable Slack notifications
+    enabled: false
+    
+    # Webhook URL (create at: Slack -> Apps -> Incoming Webhooks)
+    webhook_url: "${SLACK_WEBHOOK_URL:-}"
+    
+    # Default channel (overrides webhook default)
+    channel: "#jenkins-failures"
+    
+    # Bot username
+    username: "Jenkins Failure Agent"
+    
+    # Include detailed analysis in message
+    include_details: true
+    
+    # Only notify for certain categories
+    notify_categories:
+      - infrastructure
+      - credential_error
+      - agent_error
+    
+    # Minimum confidence to notify (0.0-1.0)
+    min_confidence: 0.5
+  
+  # Microsoft Teams integration (future)
+  teams:
+    enabled: false
+    webhook_url: "${TEAMS_WEBHOOK_URL:-}"
+  
+  # Email integration (future)
+  email:
+    enabled: false
+    smtp_host: ""
+    smtp_port: 587
+    from_address: ""
+    to_addresses: []
+
+# =============================================================================
+# FAILURE CATEGORIES CUSTOMIZATION
+# =============================================================================
+# Customize category labels and priorities (optional)
+categories:
+  # Custom labels for each category (used in reports)
+  labels:
+    compilation_error: "Build Failure"
+    test_failure: "Test Failure"
+    infrastructure: "Infrastructure Issue"
+    dependency: "Dependency Problem"
+    configuration: "Configuration Error"
+    timeout: "Timeout"
+    network: "Network Issue"
+    permission: "Permission Denied"
+    resource: "Resource Exhausted"
+    groovy_library: "Shared Library Error"
+    groovy_cps: "CPS Transformation Error"
+    groovy_sandbox: "Sandbox Restriction"
+    groovy_serialization: "Serialization Error"
+    credential_error: "Credential Issue"
+    agent_error: "Agent Problem"
+    plugin_error: "Plugin Error"
+    unknown: "Unknown"
+  
+  # Priority order for triage (higher = more urgent)
+  priorities:
+    infrastructure: 100
+    credential_error: 90
+    agent_error: 85
+    plugin_error: 80
+    groovy_library: 70
+    groovy_cps: 70
+    groovy_sandbox: 70
+    configuration: 60
+    dependency: 50
+    compilation_error: 40
+    test_failure: 30
+    network: 25
+    timeout: 20
+    resource: 15
+    permission: 10
+    unknown: 0
+
+# =============================================================================
+# LOGGING CONFIGURATION
 # =============================================================================
 logging:
-  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  # Log level: DEBUG, INFO, WARNING, ERROR
+  level: INFO
+  
+  # Log format
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-  file: "./logs/agent.log"
-  max_size: 10485760  # 10MB
+  
+  # Log to file (in addition to stdout)
+  file: ""
+  # file: "/var/log/jenkins-agent/agent.log"
+  
+  # Maximum log file size before rotation (bytes)
+  max_file_size: 10485760  # 10MB
+  
+  # Number of backup files to keep
   backup_count: 5
+
+# =============================================================================
+# HISTORY & CACHING
+# =============================================================================
+history:
+  # Enable analysis history storage
+  enabled: true
+  
+  # Storage backend: "memory" or "file"
+  backend: "memory"
+  
+  # File path for file backend
+  file_path: "/app/data/history.json"
+  
+  # Maximum entries to keep
+  max_entries: 1000
+  
+  # Retention period in days
+  retention_days: 30

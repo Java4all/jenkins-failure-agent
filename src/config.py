@@ -265,8 +265,40 @@ def load_config(config_path: Optional[str] = None) -> Config:
     )
 
 
+def _expand_env_vars(value: Any) -> Any:
+    """Recursively expand environment variables in config values.
+    
+    Supports:
+      ${VAR}          - expands to env var or empty string
+      ${VAR:-default} - expands to env var or default if not set
+    """
+    import re
+    
+    if isinstance(value, str):
+        # Pattern: ${VAR} or ${VAR:-default}
+        pattern = r'\$\{([^}:]+)(?::-([^}]*))?\}'
+        
+        def replacer(match):
+            var_name = match.group(1)
+            default = match.group(2) if match.group(2) is not None else ""
+            return os.environ.get(var_name, default)
+        
+        return re.sub(pattern, replacer, value)
+    
+    elif isinstance(value, dict):
+        return {k: _expand_env_vars(v) for k, v in value.items()}
+    
+    elif isinstance(value, list):
+        return [_expand_env_vars(item) for item in value]
+    
+    return value
+
+
 def _apply_env_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
     """Apply environment variable overrides to config."""
+    
+    # First, expand ${VAR} references in config values
+    config = _expand_env_vars(config)
     
     env_mappings = {
         "JENKINS_URL": ("jenkins", "url"),

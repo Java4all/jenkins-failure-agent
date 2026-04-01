@@ -1,21 +1,20 @@
-# Jenkins Failure Analysis Agent - Local Docker Configuration
+# Jenkins Failure Analysis Agent - Configuration
 # 
-# This config is pre-configured to work with docker-compose.yml
-# Modify the jenkins section to point to your Jenkins instance
+# All credentials are loaded from .env file via ${VAR} references
+# Edit .env for your settings - this file rarely needs changes
+#
+# =============================================================================
 
 jenkins:
-  # Your Jenkins URL (use host.docker.internal for local Jenkins outside Docker)
-  url: "${JENKINS_URL:-http://jenkins:8080}"
-  username: "${JENKINS_USERNAME:-admin}"
-  api_token: "${JENKINS_API_TOKEN:-}"
-  
-  # Connection settings
+  url: "${JENKINS_URL}"
+  username: "${JENKINS_USERNAME}"
+  api_token: "${JENKINS_API_TOKEN}"
+  verify_ssl: ${JENKINS_VERIFY_SSL:-true}
   timeout: 30
-  verify_ssl: false
 
 ai:
-  # Ollama running in Docker (pre-configured)
-  base_url: "${AI_BASE_URL:-http://ollama:11434/v1}"
+  provider: "openai_compatible"
+  base_url: "${AI_BASE_URL:-http://host.docker.internal:11434/v1}"
   model: "${AI_MODEL:-llama3:8b}"
   api_key: "${AI_API_KEY:-ollama}"
   
@@ -26,6 +25,54 @@ ai:
   max_retries: 3
   retry_delay: 2
 
+github:
+  enabled: true
+  base_url: "${GITHUB_BASE_URL:-https://api.github.com}"
+  token: "${GITHUB_TOKEN}"
+  verify_ssl: ${GITHUB_VERIFY_SSL:-true}
+  default_branch: main
+  
+  # ==========================================================================
+  # Library Mappings - Map @Library('name') to GitHub repos
+  # ==========================================================================
+  # This is the ONLY section you need to edit in this file
+  #
+  # Format: "library-name": "org/repo"
+  # The @branch part is parsed automatically from Jenkinsfile
+  #
+  library_mappings:
+    # Example: @Library('my-pipeline-lib@stable') _
+    #          maps to -> your-org/jenkins-shared-library @ stable branch
+    "my-pipeline-lib": "your-org/jenkins-shared-library"
+    "common-steps": "platform-team/common-pipeline-steps"
+    # Add your libraries here...
+
+scm:
+  enabled: "${SCM_ENABLED:-false}"
+  provider: "${SCM_PROVIDER:-github}"
+  api_url: "${SCM_API_URL}"
+  token: "${SCM_TOKEN}"
+  verify_ssl: ${SCM_VERIFY_SSL:-true}
+  auto_comment: true
+  set_commit_status: true
+
+reporter:
+  update_jenkins_description: true
+  post_to_pr: true
+  formats:
+    - json
+    - markdown
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  # api_key left empty = no auth required (UI works)
+  # set SERVER_API_KEY in .env if you want API protection
+
+analysis:
+  max_log_lines: 5000
+  enable_deep_investigation: true
+
 git:
   enabled: true
   lookback_commits: 10
@@ -35,27 +82,8 @@ parsing:
   error_context_lines: 10
   max_log_size: 10485760  # 10MB
   
-  # Custom patterns (optional)
+  # Custom patterns to ignore in logs (optional)
   ignore_patterns:
     - "^Downloading:"
     - "^Downloaded:"
     - "^Progress:"
-
-notifications:
-  slack:
-    enabled: false
-    webhook_url: "${SLACK_WEBHOOK_URL:-}"
-    channel: "#ci-failures"
-    mention_on_high_priority: true
-
-server:
-  host: "0.0.0.0"
-  port: 8080
-  api_key: "${SERVER_API_KEY:-}"  # Optional: protect API endpoints
-
-reports:
-  output_dir: "/app/reports"
-  formats:
-    - json
-    - markdown
-  retention_days: 30

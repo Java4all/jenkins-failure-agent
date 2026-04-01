@@ -152,10 +152,12 @@ def create_app(config: Config) -> FastAPI:
     
     # API key validation
     async def verify_api_key(x_api_key: Optional[str] = Header(None)):
-        if not config.server.api_key_enabled or not config.server.api_key:
+        # Skip validation if API key is not configured or empty
+        server_api_key = config.server.api_key.strip() if config.server.api_key else ""
+        if not server_api_key:
             return True
         
-        if not x_api_key or x_api_key != config.server.api_key:
+        if not x_api_key or x_api_key != server_api_key:
             raise HTTPException(status_code=401, detail="Invalid API key")
         return True
     
