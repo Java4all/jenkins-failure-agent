@@ -47,10 +47,10 @@ help:
 	@echo "  make pull-model-deep              - Pull recommended model for deep analysis"
 	@echo "  make list-models                  - List available models"
 	@echo ""
-	@echo "Docker Hub (for sharing pre-built images):"
-	@echo "  make docker-build DOCKER_REPO=user/repo  - Build image"
-	@echo "  make docker-push DOCKER_REPO=user/repo   - Push to Docker Hub"
-	@echo "  make docker-release DOCKER_REPO=user/repo - Build + Push"
+	@echo "Docker Hub (multi-arch: amd64 + arm64):"
+	@echo "  make docker-setup-buildx            - One-time setup for multi-arch"
+	@echo "  make docker-release DOCKER_REPO=u/r - Build + Push (amd64 + arm64)"
+	@echo "  make docker-build-local DOCKER_REPO=u/r - Build local only (no push)"
 
 # =============================================================================
 # Setup
@@ -392,14 +392,16 @@ status:
 	docker-compose ps
 
 # =============================================================================
-# Docker Hub - Push/Pull Pre-built Images
+# Docker Hub - Push/Pull Pre-built Images (Multi-Architecture)
 # =============================================================================
 # 
+# Builds for both linux/amd64 (Intel/AMD) and linux/arm64 (Apple Silicon, ARM)
+#
 # Usage:
 #   1. On Windows (build machine):
 #      make docker-login
-#      make docker-build DOCKER_REPO=yourusername/jenkins-failure-agent
-#      make docker-push DOCKER_REPO=yourusername/jenkins-failure-agent
+#      make docker-setup-buildx    # One-time setup for multi-arch
+#      make docker-release DOCKER_REPO=yourusername/jenkins-failure-agent
 #
 #   2. On MacBook (run machine):
 #      export AGENT_IMAGE=yourusername/jenkins-failure-agent:latest
@@ -409,35 +411,58 @@ status:
 # Docker Hub repository (override with: make docker-push DOCKER_REPO=myuser/myrepo)
 DOCKER_REPO ?= yourusername/jenkins-failure-agent
 DOCKER_TAG ?= latest
+PLATFORMS ?= linux/amd64,linux/arm64
 
 docker-login:
 	docker login
 
-docker-build:
-	@echo "Building image: $(DOCKER_REPO):$(DOCKER_TAG)"
-	docker build -t $(DOCKER_REPO):$(DOCKER_TAG) .
-	docker tag $(DOCKER_REPO):$(DOCKER_TAG) $(DOCKER_REPO):v1.4.0
+# One-time setup for multi-arch builds
+docker-setup-buildx:
+	@echo "Setting up Docker Buildx for multi-architecture builds..."
+	docker buildx create --name multiarch --driver docker-container --use 2>/dev/null || docker buildx use multiarch
+	docker buildx inspect --bootstrap
 	@echo ""
-	@echo "[OK] Built $(DOCKER_REPO):$(DOCKER_TAG)"
-	@echo "[OK] Tagged $(DOCKER_REPO):v1.4.0"
+	@echo "[OK] Buildx ready for platforms: $(PLATFORMS)"
+
+# Build multi-arch and push (requires docker-setup-buildx first)
+docker-build:
+	@echo "Building multi-arch image: $(DOCKER_REPO):$(DOCKER_TAG)"
+	@echo "Platforms: $(PLATFORMS)"
+	@echo ""
+	docker buildx build \
+		--platform $(PLATFORMS) \
+		-t $(DOCKER_REPO):$(DOCKER_TAG) \
+		-t $(DOCKER_REPO):v1.4.0 \
+		--push \
+		.
+	@echo ""
+	@echo "[OK] Built and pushed $(DOCKER_REPO):$(DOCKER_TAG)"
+	@echo "[OK] Built and pushed $(DOCKER_REPO):v1.4.0"
+	@echo "[OK] Platforms: $(PLATFORMS)"
+
+# Build for single platform (local testing, no push)
+docker-build-local:
+	@echo "Building local image: $(DOCKER_REPO):$(DOCKER_TAG)"
+	docker build -t $(DOCKER_REPO):$(DOCKER_TAG) .
+	@echo ""
+	@echo "[OK] Built $(DOCKER_REPO):$(DOCKER_TAG) (local only)"
 
 docker-push:
-	@echo "Pushing to Docker Hub..."
-	docker push $(DOCKER_REPO):$(DOCKER_TAG)
-	docker push $(DOCKER_REPO):v1.4.0
+	@echo "Note: Use 'make docker-build' which builds and pushes multi-arch images"
+	@echo "For multi-arch, build and push must happen together."
 	@echo ""
-	@echo "[OK] Pushed $(DOCKER_REPO):$(DOCKER_TAG)"
-	@echo "[OK] Pushed $(DOCKER_REPO):v1.4.0"
-	@echo ""
-	@echo "To use on another machine:"
-	@echo "  export AGENT_IMAGE=$(DOCKER_REPO):$(DOCKER_TAG)"
-	@echo "  make start-prebuilt-external"
+	@echo "Run: make docker-build DOCKER_REPO=$(DOCKER_REPO)"
 
 docker-pull:
 	@echo "Pulling from Docker Hub..."
 	docker pull $(DOCKER_REPO):$(DOCKER_TAG)
 	@echo "[OK] Pulled $(DOCKER_REPO):$(DOCKER_TAG)"
 
-# Build and push in one command
-docker-release: docker-build docker-push
+# Build and push multi-arch in one command
+docker-release: docker-setup-buildx docker-build
+	@echo ""
 	@echo "[OK] Release complete!"
+	@echo ""
+	@echo "To use on another machine (Intel or ARM):"
+	@echo "  export AGENT_IMAGE=$(DOCKER_REPO):$(DOCKER_TAG)"
+	@echo "  make start-prebuilt-external"
