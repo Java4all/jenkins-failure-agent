@@ -26,6 +26,8 @@ services:
     container_name: jenkins-failure-agent
     ports:
       - "8080:8080"
+    env_file:
+      - .env
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - agent_data:/app/data

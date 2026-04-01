@@ -30,6 +30,8 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: jenkins-failure-agent
+    env_file:
+      - .env
     ports:
       - "8080:8080"
     volumes:
@@ -108,6 +110,8 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: jenkins-failure-agent-cli
+    env_file:
+      - .env
     profiles:
       - cli
     volumes:
