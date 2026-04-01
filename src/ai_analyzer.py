@@ -55,198 +55,6 @@ CATEGORY_TO_TIER = {
 }
 
 
-def generate_smart_recommendations(
-    category: str, 
-    root_cause: str, 
-    failed_stage: str = None,
-    failed_method: str = None
-) -> List["Recommendation"]:
-    """Generate actionable recommendations based on error category and content."""
-    
-    recommendations = []
-    root_lower = root_cause.lower() if root_cause else ""
-    
-    # Category-specific recommendations
-    if category == "CREDENTIAL_ERROR":
-        if "could not find" in root_lower or "not found" in root_lower:
-            # Try to extract credential ID
-            import re
-            cred_match = re.search(r"['\"]([^'\"]+)['\"]", root_cause)
-            cred_id = cred_match.group(1) if cred_match else "the-credential-id"
-            recommendations.append(Recommendation(
-                priority="HIGH",
-                action=f"Create credential '{cred_id}' in Jenkins: Manage Jenkins → Credentials → Add Credentials",
-                rationale="The referenced credential does not exist in Jenkins",
-            ))
-        else:
-            recommendations.append(Recommendation(
-                priority="HIGH", 
-                action="Verify credential exists and has correct permissions in Jenkins Credentials store",
-                rationale="Credential-related error detected",
-            ))
-    
-    elif category == "DEPENDENCY":
-        if "npm" in root_lower:
-            recommendations.append(Recommendation(
-                priority="HIGH",
-                action="Run 'npm install' to install missing dependencies, or check package.json for typos",
-                rationale="NPM dependency resolution failed",
-            ))
-        elif "maven" in root_lower or "pom" in root_lower:
-            recommendations.append(Recommendation(
-                priority="HIGH",
-                action="Check pom.xml for correct dependency coordinates, run 'mvn dependency:resolve' locally",
-                rationale="Maven dependency resolution failed",
-            ))
-        elif "pip" in root_lower or "python" in root_lower:
-            recommendations.append(Recommendation(
-                priority="HIGH",
-                action="Check requirements.txt, run 'pip install -r requirements.txt' locally to verify",
-                rationale="Python dependency issue",
-            ))
-        else:
-            recommendations.append(Recommendation(
-                priority="HIGH",
-                action="Check dependency declarations and verify all required packages are available",
-                rationale="Dependency resolution failed",
-            ))
-    
-    elif category == "COMPILATION_ERROR":
-        if "cannot find symbol" in root_lower or "undefined" in root_lower:
-            recommendations.append(Recommendation(
-                priority="HIGH",
-                action="Check for missing imports, typos in variable/method names, or missing dependencies",
-                rationale="Symbol not found during compilation",
-            ))
-        elif "syntax" in root_lower:
-            recommendations.append(Recommendation(
-                priority="HIGH",
-                action="Fix syntax error - check for missing brackets, semicolons, or quotes near the reported line",
-                rationale="Syntax error in source code",
-            ))
-        else:
-            recommendations.append(Recommendation(
-                priority="HIGH",
-                action="Fix compilation error in source code - check the error message for file and line number",
-                rationale="Code failed to compile",
-            ))
-    
-    elif category == "TEST_FAILURE":
-        recommendations.append(Recommendation(
-            priority="HIGH",
-            action="Review failing test(s), run locally with 'mvn test' or equivalent to reproduce",
-            rationale="Test assertions failed - likely a bug in code or outdated test expectations",
-        ))
-    
-    elif category == "GROOVY_CPS":
-        recommendations.append(Recommendation(
-            priority="HIGH",
-            action="Add @NonCPS annotation to the method, or refactor to avoid non-serializable operations in CPS context",
-            rationale="CPS transformation failed - method cannot be transformed for pipeline execution",
-        ))
-    
-    elif category == "GROOVY_SANDBOX":
-        # Try to extract method signature
-        import re
-        method_match = re.search(r"method\s+(\S+)", root_cause)
-        if method_match:
-            recommendations.append(Recommendation(
-                priority="HIGH",
-                action=f"Approve script in Jenkins: Manage Jenkins → In-process Script Approval, or use @NonCPS",
-                rationale=f"Sandbox blocked method: {method_match.group(1)}",
-            ))
-        else:
-            recommendations.append(Recommendation(
-                priority="HIGH",
-                action="Check In-process Script Approval in Jenkins for pending approvals",
-                rationale="Groovy sandbox security restriction",
-            ))
-    
-    elif category == "GROOVY_LIBRARY":
-        method_info = f" in method '{failed_method}'" if failed_method else ""
-        recommendations.append(Recommendation(
-            priority="HIGH",
-            action=f"Check shared library code{method_info} - verify method exists and parameters match",
-            rationale="Shared library error - method may be missing or have wrong signature",
-        ))
-    
-    elif category == "NETWORK":
-        if "timeout" in root_lower:
-            recommendations.append(Recommendation(
-                priority="HIGH",
-                action="Increase timeout value, or check network connectivity to external service",
-                rationale="Network operation timed out",
-            ))
-        else:
-            recommendations.append(Recommendation(
-                priority="HIGH",
-                action="Check network connectivity, firewall rules, and external service availability",
-                rationale="Network communication failed",
-            ))
-        recommendations.append(Recommendation(
-            priority="MEDIUM",
-            action="Retry the build - this may be a transient network issue",
-            rationale="Network errors are often temporary",
-        ))
-    
-    elif category == "TIMEOUT":
-        recommendations.append(Recommendation(
-            priority="HIGH",
-            action="Increase timeout value in Jenkinsfile or pipeline configuration",
-            rationale="Operation exceeded time limit",
-        ))
-        recommendations.append(Recommendation(
-            priority="MEDIUM",
-            action="Investigate why operation is slow - check for resource contention or external dependencies",
-            rationale="Understanding root cause may prevent future timeouts",
-        ))
-    
-    elif category == "AGENT_ERROR":
-        recommendations.append(Recommendation(
-            priority="HIGH",
-            action="Check agent/node availability: Manage Jenkins → Nodes, verify label matches an online node",
-            rationale="No agent available to run the build",
-        ))
-    
-    elif category == "PLUGIN_ERROR":
-        recommendations.append(Recommendation(
-            priority="HIGH",
-            action="Check plugin is installed and up to date: Manage Jenkins → Plugins",
-            rationale="Jenkins plugin error",
-        ))
-    
-    elif category == "CONFIGURATION":
-        recommendations.append(Recommendation(
-            priority="HIGH",
-            action="Review job configuration, environment variables, and parameters",
-            rationale="Configuration mismatch detected",
-        ))
-    
-    elif category == "INFRASTRUCTURE":
-        recommendations.append(Recommendation(
-            priority="HIGH",
-            action="Check infrastructure: disk space, memory, Docker daemon, external services",
-            rationale="Infrastructure-related failure",
-        ))
-        recommendations.append(Recommendation(
-            priority="MEDIUM",
-            action="Retry the build - infrastructure issues are often transient",
-            rationale="May be a temporary resource issue",
-        ))
-    
-    # Default fallback
-    if not recommendations:
-        stage_info = f" in stage '{failed_stage}'" if failed_stage else ""
-        method_info = f" (method: {failed_method})" if failed_method else ""
-        recommendations.append(Recommendation(
-            priority="HIGH",
-            action=f"Investigate the error{stage_info}{method_info}: {root_cause[:150]}",
-            rationale="Review the error message and stack trace for more details",
-        ))
-    
-    return recommendations
-
-
 @dataclass
 class RetryAssessment:
     """Assessment of whether the build is safe to retry."""
@@ -308,33 +116,43 @@ IMPORTANT: Respond ONLY with valid JSON, no other text. Use this exact format:
   "is_retriable": true or false,
   "confidence": 0.0 to 1.0,
   "failed_stage": "stage name or null",
-  "failed_method": "method/function name that was running when it failed, or null",
-  "fix_suggestion": "Specific actionable fix - see examples below",
-  "details": "Additional context about the failure"
+  "failed_method": "method/function name or null",
+  "recommendations": [
+    {
+      "priority": "HIGH or MEDIUM or LOW",
+      "action": "Specific action to fix THIS error",
+      "details": "Step-by-step instructions, commands, or code"
+    }
+  ]
 }
 
 CRITICAL FOR root_cause:
 - Copy the ACTUAL error text from the log (lines starting with >>> in EXTRACTED ERRORS)
 - DO NOT write "Error 1" or "line 6747" - that's just a label
-- Example: "java.lang.NullPointerException: Cannot invoke method getName() on null"
 
-CRITICAL FOR fix_suggestion - BE SPECIFIC AND ACTIONABLE:
-- BAD: "Review the error" or "Check the logs" (useless!)
-- GOOD: "Add null check before calling getName() in MyClass.groovy line 45"
-- GOOD: "Install missing dependency: npm install lodash@4.17.21"
-- GOOD: "Create credential 'docker-registry-creds' in Jenkins credentials store"
-- GOOD: "Add @NonCPS annotation to the closure in deployService() method"
-- GOOD: "Fix syntax error: missing closing brace on line 123"
-- GOOD: "Increase timeout from 60s to 300s for slow network operation"
-- GOOD: "Grant Jenkins user write permission to /var/lib/docker"
+CRITICAL FOR recommendations - ANALYZE THE ERROR AND BE SPECIFIC:
+- Extract specifics from the error: credential IDs, package names, file paths, line numbers
+- For credential errors: identify the credential ID and type (AWS, GCP, Azure, Docker, GitHub, Maven, etc.)
+- For dependency errors: specify exact package name and suggested version
+- For code errors: reference specific file, line number, method from stack trace
+- For timeout: suggest specific new timeout value based on the operation type
+- Provide 1-3 recommendations ordered by priority
 
-The fix_suggestion should tell the user EXACTLY what to do, including file names, line numbers, or specific values when available.
+GOOD recommendation examples (context-specific):
+- {"priority": "HIGH", "action": "Create AWS credential 'prod-aws-deploy'", "details": "Go to Jenkins > Credentials > Add > AWS Credentials. The ECS deployment requires this for S3 artifact upload."}
+- {"priority": "HIGH", "action": "Install missing package: @babel/core@7.22.0", "details": "Run: npm install @babel/core@7.22.0 --save-dev"}
+- {"priority": "HIGH", "action": "Fix NullPointerException in UserService.java:156", "details": "Add null check: if (user != null && user.getName() != null)"}
+- {"priority": "MEDIUM", "action": "Increase Docker build timeout to 30 minutes", "details": "In Jenkinsfile line 45, change timeout(10) to timeout(30)"}
+
+BAD recommendations (NEVER use generic phrases):
+- "Review the error" / "Check the logs" / "Investigate the issue"
+- "Fix the code" / "Update credentials" / "Check configuration"
 
 WHERE TO LOOK FOR ERRORS:
 1. Lines starting with >>> in EXTRACTED ERRORS section
 2. Exception messages and stack traces  
-3. Lines containing ERROR, FATAL, FAILED, Exception in the raw log
-4. The LAST error message before the build ends"""
+3. Lines containing ERROR, FATAL, FAILED
+4. The LAST error before build ends"""
 
 
 GROOVY_SPECIALIZED_PROMPT = """
@@ -737,31 +555,56 @@ class AIAnalyzer:
         retry_assessment = RetryAssessment(
             is_retriable=is_retriable,
             confidence=confidence,
-            reason=data.get("fix_suggestion", ""),
+            reason="",
         )
         
-        # Build recommendations
+        # Parse recommendations from AI response
         recommendations = []
-        fix_suggestion = data.get("fix_suggestion", "")
+        ai_recommendations = data.get("recommendations", [])
         
-        # Check if fix_suggestion is useless
-        useless_phrases = ["review", "check the", "see above", "investigate", "look at"]
-        is_useless = not fix_suggestion or any(p in fix_suggestion.lower() for p in useless_phrases)
+        if isinstance(ai_recommendations, list):
+            for rec in ai_recommendations:
+                if isinstance(rec, dict):
+                    action = rec.get("action", "")
+                    # Filter out useless recommendations
+                    useless_phrases = ["review the", "check the", "see above", "investigate", "look at", "examine"]
+                    is_useless = not action or any(p in action.lower() for p in useless_phrases)
+                    
+                    if action and not is_useless:
+                        recommendations.append(Recommendation(
+                            priority=rec.get("priority", "MEDIUM"),
+                            action=action,
+                            rationale=rec.get("details", ""),
+                        ))
         
-        if fix_suggestion and not is_useless:
-            recommendations.append(Recommendation(
-                priority="HIGH",
-                action=fix_suggestion,
-                rationale=data.get("details", ""),
-            ))
-        else:
-            # Generate smart recommendations based on category
-            recommendations = generate_smart_recommendations(
-                category=category,
-                root_cause=data.get("root_cause", ""),
-                failed_stage=data.get("failed_stage"),
-                failed_method=data.get("failed_method"),
-            )
+        # Fallback to fix_suggestion if no recommendations (backward compatibility)
+        if not recommendations:
+            fix_suggestion = data.get("fix_suggestion", "")
+            if fix_suggestion:
+                useless_phrases = ["review", "check the", "see above", "investigate", "look at"]
+                is_useless = any(p in fix_suggestion.lower() for p in useless_phrases)
+                if not is_useless:
+                    recommendations.append(Recommendation(
+                        priority="HIGH",
+                        action=fix_suggestion,
+                        rationale=data.get("details", ""),
+                    ))
+        
+        # Last resort fallback - use simple recommendation with actual error
+        if not recommendations:
+            root_cause_text = data.get("root_cause", "")
+            if root_cause_text and len(root_cause_text) > 10:
+                recommendations.append(Recommendation(
+                    priority="HIGH",
+                    action=f"Fix: {root_cause_text[:200]}",
+                    rationale="Based on the primary error from the log",
+                ))
+            else:
+                recommendations.append(Recommendation(
+                    priority="HIGH",
+                    action="Check the build log for error details",
+                    rationale="AI could not generate specific recommendations",
+                ))
         
         return AnalysisResult(
             build_info={
@@ -822,13 +665,28 @@ class AIAnalyzer:
                     summary = s
                     break
         
-        # Generate smart recommendations
-        recommendations = generate_smart_recommendations(
-            category=category,
-            root_cause=primary_error,
-            failed_stage=failed_stage,
-            failed_method=failed_method,
-        )
+        # Simple recommendation based on actual error
+        recommendations = []
+        if primary_error and len(primary_error) > 10:
+            # Build context string
+            context_parts = []
+            if failed_stage:
+                context_parts.append(f"stage '{failed_stage}'")
+            if failed_method:
+                context_parts.append(f"method '{failed_method}'")
+            context = f" in {' → '.join(context_parts)}" if context_parts else ""
+            
+            recommendations.append(Recommendation(
+                priority="HIGH",
+                action=f"Fix the error{context}: {primary_error[:300]}",
+                rationale=f"Error extracted from build log. Category: {category}",
+            ))
+        else:
+            recommendations.append(Recommendation(
+                priority="HIGH",
+                action="Review the build log for error details",
+                rationale="AI analysis failed to parse - manual review needed",
+            ))
         
         return AnalysisResult(
             build_info={
