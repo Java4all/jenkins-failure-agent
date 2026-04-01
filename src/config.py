@@ -53,6 +53,8 @@ class GitHubConfig:
     token: str = ""
     # Request timeout in seconds
     timeout: int = 30
+    # SSL verification (set False for self-signed certs)
+    verify_ssl: bool = True
     # Cache settings
     cache_enabled: bool = True
     cache_ttl_seconds: int = 300
