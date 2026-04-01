@@ -118,6 +118,7 @@ def create_app(config: Config) -> FastAPI:
             base_url=config.github.base_url,
             token=config.github.token,
             timeout=config.github.timeout,
+            verify_ssl=config.github.verify_ssl,
             cache_enabled=config.github.cache_enabled,
             cache_ttl_seconds=config.github.cache_ttl_seconds,
         )
