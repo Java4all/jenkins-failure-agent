@@ -46,6 +46,11 @@ help:
 	@echo "  make pull-model MODEL=llama3:70b  - Pull a different model"
 	@echo "  make pull-model-deep              - Pull recommended model for deep analysis"
 	@echo "  make list-models                  - List available models"
+	@echo ""
+	@echo "Docker Hub (for sharing pre-built images):"
+	@echo "  make docker-build DOCKER_REPO=user/repo  - Build image"
+	@echo "  make docker-push DOCKER_REPO=user/repo   - Push to Docker Hub"
+	@echo "  make docker-release DOCKER_REPO=user/repo - Build + Push"
 
 # =============================================================================
 # Setup
@@ -385,3 +390,54 @@ health:
 
 status:
 	docker-compose ps
+
+# =============================================================================
+# Docker Hub - Push/Pull Pre-built Images
+# =============================================================================
+# 
+# Usage:
+#   1. On Windows (build machine):
+#      make docker-login
+#      make docker-build DOCKER_REPO=yourusername/jenkins-failure-agent
+#      make docker-push DOCKER_REPO=yourusername/jenkins-failure-agent
+#
+#   2. On MacBook (run machine):
+#      export AGENT_IMAGE=yourusername/jenkins-failure-agent:latest
+#      make start-prebuilt-external
+#
+
+# Docker Hub repository (override with: make docker-push DOCKER_REPO=myuser/myrepo)
+DOCKER_REPO ?= yourusername/jenkins-failure-agent
+DOCKER_TAG ?= latest
+
+docker-login:
+	docker login
+
+docker-build:
+	@echo "Building image: $(DOCKER_REPO):$(DOCKER_TAG)"
+	docker build -t $(DOCKER_REPO):$(DOCKER_TAG) .
+	docker tag $(DOCKER_REPO):$(DOCKER_TAG) $(DOCKER_REPO):v1.4.0
+	@echo ""
+	@echo "✓ Built $(DOCKER_REPO):$(DOCKER_TAG)"
+	@echo "✓ Tagged $(DOCKER_REPO):v1.4.0"
+
+docker-push:
+	@echo "Pushing to Docker Hub..."
+	docker push $(DOCKER_REPO):$(DOCKER_TAG)
+	docker push $(DOCKER_REPO):v1.4.0
+	@echo ""
+	@echo "✓ Pushed $(DOCKER_REPO):$(DOCKER_TAG)"
+	@echo "✓ Pushed $(DOCKER_REPO):v1.4.0"
+	@echo ""
+	@echo "To use on another machine:"
+	@echo "  export AGENT_IMAGE=$(DOCKER_REPO):$(DOCKER_TAG)"
+	@echo "  make start-prebuilt-external"
+
+docker-pull:
+	@echo "Pulling from Docker Hub..."
+	docker pull $(DOCKER_REPO):$(DOCKER_TAG)
+	@echo "✓ Pulled $(DOCKER_REPO):$(DOCKER_TAG)"
+
+# Build and push in one command
+docker-release: docker-build docker-push
+	@echo "✓ Release complete!"
