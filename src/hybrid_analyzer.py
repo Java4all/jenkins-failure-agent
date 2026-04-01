@@ -196,9 +196,16 @@ class HybridAnalyzer:
                 return True
         
         # Check if there are library-related errors in the log
-        if parsed_log.groovy_errors:
-            for error in parsed_log.groovy_errors:
-                if any(p.lower() in str(error).lower() for p in AGENTIC_ERROR_PATTERNS):
+        groovy_categories = {
+            FailureCategory.GROOVY_LIBRARY,
+            FailureCategory.GROOVY_CPS,
+            FailureCategory.GROOVY_SANDBOX,
+            FailureCategory.GROOVY_SERIALIZATION,
+        }
+        groovy_errors = [e for e in parsed_log.errors if e.category in groovy_categories]
+        if groovy_errors:
+            for error in groovy_errors:
+                if any(p.lower() in error.line.lower() for p in AGENTIC_ERROR_PATTERNS):
                     logger.info("Groovy errors in log trigger agentic mode")
                     return True
         
@@ -235,7 +242,7 @@ class HybridAnalyzer:
         Returns:
             HybridAnalysisResult with merged findings.
         """
-        logger.info(f"Starting hybrid analysis for {build_info.job}#{build_info.build_number}")
+        logger.info(f"Starting hybrid analysis for {build_info.job_name}#{build_info.build_number}")
         
         # Phase 1: Always run scripted analysis first (fast baseline)
         logger.info("Phase 1: Running scripted analysis")
@@ -281,7 +288,7 @@ class HybridAnalyzer:
         
         try:
             investigation = self.investigator.investigate(
-                job=build_info.job,
+                job=build_info.job_name,
                 build=build_info.build_number,
                 initial_error=primary_error or console_log_snippet[:500],
                 error_category=category,

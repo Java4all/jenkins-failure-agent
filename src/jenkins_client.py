@@ -317,9 +317,11 @@ class JenkinsClient:
           - "jobname"                           -> "jobname"
           - "folder/jobname"                    -> "folder/job/jobname"
           - "folder1/folder2/jobname"           -> "folder1/job/folder2/job/jobname"
-          - "job/folder/job/jobname"            -> "folder/job/jobname" (strips existing /job/)
+          - "job/folder/job/jobname"            -> "folder/job/jobname"
           - "/job/folder/job/jobname"           -> "folder/job/jobname"
           - Full URL                            -> extracts path
+        
+        Jenkins URL structure: /job/folder1/job/folder2/job/jobname/buildnum/
         """
         # Handle full URLs
         if job_name.startswith("http"):
@@ -330,15 +332,14 @@ class JenkinsClient:
         # Remove leading/trailing slashes
         job_name = job_name.strip("/")
         
-        # If path already contains /job/, extract the actual folder/job structure
-        if "/job/" in job_name or job_name.startswith("job/"):
-            # Split by /job/ and filter empty parts
-            parts = [p for p in job_name.split("/job/") if p and p != "job"]
-            # Rejoin without /job/ to get clean folder path
-            job_name = "/".join(parts)
+        # Replace all /job/ with just / to normalize
+        # Also handle job/ at the start
+        normalized = job_name.replace("/job/", "/")
+        if normalized.startswith("job/"):
+            normalized = normalized[4:]  # Remove leading "job/"
         
         # Now split by / and rejoin with /job/
-        parts = job_name.split("/")
+        parts = [p for p in normalized.split("/") if p]  # Filter empty parts
         return "/job/".join(parts)
     
     def test_connection(self) -> bool:
