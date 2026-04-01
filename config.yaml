@@ -82,6 +82,11 @@ parsing:
   error_context_lines: 10
   max_log_size: 10485760  # 10MB
   
+  # Shared library method execution prefix for tracking
+  # Pattern: "{prefix}: method_name"
+  # Example: "deploy-service-execution: deployToKubernetes"
+  method_execution_prefix: "${METHOD_EXECUTION_PREFIX:-}"
+  
   # Custom patterns to ignore in logs (optional)
   ignore_patterns:
     - "^Downloading:"

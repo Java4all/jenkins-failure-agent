@@ -58,6 +58,7 @@ class ParsedLog:
     errors: List[ErrorMatch] = field(default_factory=list)
     stack_traces: List[StackTrace] = field(default_factory=list)
     failed_stage: Optional[str] = None
+    failed_method: Optional[str] = None  # Shared library method that was running when failure occurred
     primary_category: FailureCategory = FailureCategory.UNKNOWN
     timestamps: List[Tuple[int, str]] = field(default_factory=list)
     summary: str = ""
@@ -272,6 +273,10 @@ class LogParser:
         self.context_lines = self.config.get("error_context_lines", 10)
         self.max_log_size = self.config.get("max_log_size", 10 * 1024 * 1024)
         
+        # Configurable prefix for method execution tracking
+        # Pattern: "{prefix}: method_name"
+        self.method_execution_prefix = self.config.get("method_execution_prefix", "")
+        
         # Compile custom patterns from config
         self.custom_patterns = {}
         for category_name, category_config in self.config.get("categories", {}).items():
@@ -283,23 +288,51 @@ class LogParser:
                 pass
     
     def parse(self, log_content: str) -> ParsedLog:
-        """Parse a Jenkins log and extract errors, stack traces, and patterns."""
+        """Parse a Jenkins log and extract errors, stack traces, and patterns.
         
-        # Truncate if too large
+        Strategy: Focus on the LAST stage since that's where errors usually are.
+        Jenkins logs pattern: [Pipeline] stage / [Pipeline] { (stage_name)
+        """
+        
+        # Truncate if too large - but keep the END (where errors are)
         if len(log_content) > self.max_log_size:
-            log_content = log_content[:self.max_log_size]
+            # Keep the last portion of the log, not the first!
+            log_content = log_content[-self.max_log_size:]
         
         lines = log_content.split("\n")
         result = ParsedLog(total_lines=len(lines))
         
-        # Extract errors
-        result.errors = self._extract_errors(lines)
+        # FIRST: Find the last stage - this is where the error likely is
+        last_stage_name, last_stage_start = self._find_last_stage(lines)
+        result.failed_stage = last_stage_name
         
-        # Extract stack traces
-        result.stack_traces = self._extract_stack_traces(log_content)
+        # Find the method that was running when failure occurred
+        result.failed_method = self._find_failed_method(lines)
         
-        # Detect failed stage
-        result.failed_stage = self._detect_failed_stage(log_content)
+        # Focus on lines from the last stage onwards (or last 500 lines if no stage found)
+        if last_stage_start >= 0:
+            focus_lines = lines[last_stage_start:]
+            focus_start_offset = last_stage_start
+        else:
+            # No stage found, focus on last 500 lines
+            focus_start = max(0, len(lines) - 500)
+            focus_lines = lines[focus_start:]
+            focus_start_offset = focus_start
+        
+        # Extract errors from the focused section first (prioritize end of log)
+        result.errors = self._extract_errors_from_end(focus_lines, focus_start_offset)
+        
+        # If no errors found in last stage, search the whole log
+        if not result.errors:
+            result.errors = self._extract_errors(lines)
+        
+        # Extract stack traces - focus on the focused section
+        focus_content = "\n".join(focus_lines)
+        result.stack_traces = self._extract_stack_traces(focus_content)
+        
+        # If no stack traces found, try the whole log
+        if not result.stack_traces:
+            result.stack_traces = self._extract_stack_traces(log_content)
         
         # Extract timestamps
         result.timestamps = self._extract_timestamps(lines)
@@ -311,6 +344,164 @@ class LogParser:
         result.summary = self._generate_summary(result)
         
         return result
+    
+    def _find_failed_method(self, lines: List[str]) -> Optional[str]:
+        """Find the shared library method that was running when failure occurred.
+        
+        Tracks method start/finish tags:
+        - Start: hh:mm:ss  method_name: method_name
+        - Finish: method_name :time-elapsed-seconds:NN
+        
+        Also tracks: {method_execution_prefix}: method_name (if configured)
+        
+        Returns the last method that started but didn't finish.
+        """
+        # Pattern for method start: timestamp followed by method_name: method_name
+        # e.g., "10:30:45  deployService: deployService"
+        start_pattern = re.compile(r'^\d{2}:\d{2}:\d{2}\s+([^:]+):\s*\1\s*$')
+        
+        # Pattern for method finish: method_name :time-elapsed-seconds:NN
+        finish_pattern = re.compile(r'^(.+?)\s*:time-elapsed-seconds:\d+')
+        
+        # Configurable execution prefix pattern (e.g., "some-deploy-service-execution: method_name")
+        execution_pattern = None
+        if self.method_execution_prefix:
+            # Escape special regex characters in the prefix
+            escaped_prefix = re.escape(self.method_execution_prefix)
+            execution_pattern = re.compile(rf'{escaped_prefix}:\s*(.+)$', re.IGNORECASE)
+        
+        started_methods = []  # Stack of (method_name, line_index)
+        finished_methods = set()
+        
+        for i, line in enumerate(lines):
+            line_stripped = line.strip()
+            
+            # Check for method start
+            start_match = start_pattern.match(line_stripped)
+            if start_match:
+                method_name = start_match.group(1).strip()
+                started_methods.append((method_name, i))
+                continue
+            
+            # Check for execution pattern (if configured)
+            if execution_pattern:
+                exec_match = execution_pattern.search(line_stripped)
+                if exec_match:
+                    method_name = exec_match.group(1).strip()
+                    started_methods.append((method_name, i))
+                    continue
+            
+            # Check for method finish
+            finish_match = finish_pattern.match(line_stripped)
+            if finish_match:
+                method_name = finish_match.group(1).strip()
+                finished_methods.add(method_name)
+        
+        # Find the last method that started but didn't finish
+        for method_name, line_idx in reversed(started_methods):
+            # Normalize for comparison (method names might have slight variations)
+            normalized = method_name.lower().replace(' ', '')
+            found_finish = False
+            for finished in finished_methods:
+                if finished.lower().replace(' ', '') == normalized:
+                    found_finish = True
+                    break
+            
+            if not found_finish:
+                return method_name
+        
+        # If all methods finished, return the last one that ran (might still be the issue)
+        if started_methods:
+            return started_methods[-1][0]
+        
+        return None
+    
+    def _find_last_stage(self, lines: List[str]) -> Tuple[Optional[str], int]:
+        """Find the last pipeline stage in the log.
+        
+        Jenkins stage patterns:
+        - [Pipeline] stage
+        - [Pipeline] { (Stage Name)
+        - [Pipeline] { (stage_name)
+        
+        Returns: (stage_name, line_index) or (None, -1) if not found
+        """
+        last_stage_name = None
+        last_stage_line = -1
+        
+        stage_pattern = re.compile(r'\[Pipeline\]\s*\{\s*\(([^)]+)\)')
+        stage_start_pattern = re.compile(r'\[Pipeline\]\s+stage')
+        
+        for i, line in enumerate(lines):
+            # Check for stage start
+            if stage_start_pattern.search(line):
+                # Next line usually has the stage name
+                if i + 1 < len(lines):
+                    name_match = stage_pattern.search(lines[i + 1])
+                    if name_match:
+                        last_stage_name = name_match.group(1).strip()
+                        last_stage_line = i
+            
+            # Also check current line for stage name pattern
+            name_match = stage_pattern.search(line)
+            if name_match:
+                last_stage_name = name_match.group(1).strip()
+                last_stage_line = i
+        
+        return last_stage_name, last_stage_line
+    
+    def _extract_errors_from_end(self, lines: List[str], line_offset: int = 0) -> List[ErrorMatch]:
+        """Extract errors, prioritizing those at the END of the log section.
+        
+        This reverses the search order so errors near the end are found first
+        and ranked higher.
+        """
+        errors = []
+        seen_errors = set()
+        
+        # Search from the END backwards
+        for i in range(len(lines) - 1, -1, -1):
+            line = lines[i]
+            
+            # Skip if we should ignore this line
+            if self._should_ignore(line):
+                continue
+            
+            # Check against all patterns
+            for category, patterns in self.DEFAULT_PATTERNS.items():
+                for pattern in patterns:
+                    if re.search(pattern, line):
+                        # Deduplicate similar errors
+                        error_key = (category, line.strip()[:100])
+                        if error_key in seen_errors:
+                            continue
+                        seen_errors.add(error_key)
+                        
+                        # Get context
+                        start = max(0, i - self.context_lines)
+                        end = min(len(lines), i + self.context_lines + 1)
+                        
+                        actual_line_num = i + line_offset + 1
+                        
+                        error = ErrorMatch(
+                            line_number=actual_line_num,
+                            line=line,
+                            pattern_matched=pattern,
+                            category=category,
+                            context_before=lines[start:i],
+                            context_after=lines[i + 1:end],
+                            severity=self._determine_severity(line),
+                        )
+                        errors.append(error)
+                        break
+            
+            # Stop after finding enough errors (prioritize recent ones)
+            if len(errors) >= 20:
+                break
+        
+        # Reverse so the most recent error is first
+        # (We found them in reverse order, so reverse again to get newest first)
+        return errors  # Keep reverse order - newest errors first!
     
     def _extract_errors(self, lines: List[str]) -> List[ErrorMatch]:
         """Extract error lines with context."""
@@ -560,6 +751,9 @@ class LogParser:
         
         if result.failed_stage:
             parts.append(f"Failed in stage: {result.failed_stage}")
+        
+        if result.failed_method:
+            parts.append(f"Failed in method: {result.failed_method}")
         
         parts.append(f"Primary category: {result.primary_category.value}")
         

@@ -314,6 +314,25 @@ parsing:
   error_context_lines: 10
   
   # ==========================================================================
+  # METHOD EXECUTION TRACKING
+  # ==========================================================================
+  # Prefix used in your shared library to track method execution
+  # This helps identify which library function was running when failure occurred
+  #
+  # If your library logs methods like:
+  #   "deploy-service-execution: deployToKubernetes"
+  #   "deploy-service-execution: buildDockerImage"
+  #
+  # Set: method_execution_prefix: "deploy-service-execution"
+  #
+  # The parser will track:
+  #   - Method start: timestamp + "method: method" OR "{prefix}: method"
+  #   - Method finish: "method :time-elapsed-seconds:NN"
+  #
+  # Leave empty if not using method tracking
+  method_execution_prefix: "${METHOD_EXECUTION_PREFIX:-}"
+  
+  # ==========================================================================
   # CUSTOM ERROR PATTERNS
   # ==========================================================================
   # Additional regex patterns to detect as errors

@@ -69,6 +69,9 @@ class ParsingConfig:
     error_context_lines: int = 10
     error_patterns: List[str] = field(default_factory=list)
     ignore_patterns: List[str] = field(default_factory=list)
+    # Prefix for shared library method execution tracking
+    # Pattern: "{prefix}: method_name"
+    method_execution_prefix: str = ""
 
 
 @dataclass
@@ -215,6 +218,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
             r"FAILED", r"BUILD FAILURE", r"AssertionError",
         ]),
         ignore_patterns=raw_config.get("parsing", {}).get("ignore_patterns", []),
+        method_execution_prefix=raw_config.get("parsing", {}).get("method_execution_prefix", ""),
     )
     
     notifications_cfg = NotificationsConfig(
