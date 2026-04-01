@@ -271,6 +271,8 @@ def _expand_env_vars(value: Any) -> Any:
     Supports:
       ${VAR}          - expands to env var or empty string
       ${VAR:-default} - expands to env var or default if not set
+    
+    Also converts boolean-like strings to actual booleans.
     """
     import re
     
@@ -283,7 +285,15 @@ def _expand_env_vars(value: Any) -> Any:
             default = match.group(2) if match.group(2) is not None else ""
             return os.environ.get(var_name, default)
         
-        return re.sub(pattern, replacer, value)
+        expanded = re.sub(pattern, replacer, value)
+        
+        # Convert boolean-like strings to actual booleans
+        if expanded.lower() in ('true', 'yes', '1'):
+            return True
+        elif expanded.lower() in ('false', 'no', '0'):
+            return False
+        
+        return expanded
     
     elif isinstance(value, dict):
         return {k: _expand_env_vars(v) for k, v in value.items()}
