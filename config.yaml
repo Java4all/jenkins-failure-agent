@@ -1,0 +1,61 @@
+# Jenkins Failure Analysis Agent - Local Docker Configuration
+# 
+# This config is pre-configured to work with docker-compose.yml
+# Modify the jenkins section to point to your Jenkins instance
+
+jenkins:
+  # Your Jenkins URL (use host.docker.internal for local Jenkins outside Docker)
+  url: "${JENKINS_URL:-http://jenkins:8080}"
+  username: "${JENKINS_USERNAME:-admin}"
+  api_token: "${JENKINS_API_TOKEN:-}"
+  
+  # Connection settings
+  timeout: 30
+  verify_ssl: false
+
+ai:
+  # Ollama running in Docker (pre-configured)
+  base_url: "${AI_BASE_URL:-http://ollama:11434/v1}"
+  model: "${AI_MODEL:-llama3:8b}"
+  api_key: "${AI_API_KEY:-ollama}"
+  
+  # Model parameters
+  temperature: 0.1
+  max_tokens: 4096
+  timeout: 120
+  max_retries: 3
+  retry_delay: 2
+
+git:
+  enabled: true
+  lookback_commits: 10
+  clone_depth: 50
+
+parsing:
+  error_context_lines: 10
+  max_log_size: 10485760  # 10MB
+  
+  # Custom patterns (optional)
+  ignore_patterns:
+    - "^Downloading:"
+    - "^Downloaded:"
+    - "^Progress:"
+
+notifications:
+  slack:
+    enabled: false
+    webhook_url: "${SLACK_WEBHOOK_URL:-}"
+    channel: "#ci-failures"
+    mention_on_high_priority: true
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  api_key: "${SERVER_API_KEY:-}"  # Optional: protect API endpoints
+
+reports:
+  output_dir: "/app/reports"
+  formats:
+    - json
+    - markdown
+  retention_days: 30

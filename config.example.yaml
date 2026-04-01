@@ -1,0 +1,373 @@
+# Jenkins Failure Analysis Agent Configuration
+# Copy this file to config.yaml and update with your settings
+
+# =============================================================================
+# JENKINS CONFIGURATION
+# =============================================================================
+jenkins:
+  # Jenkins server URL
+  url: "https://jenkins.example.com"
+  
+  # Authentication (use API token, not password)
+  username: "your-jenkins-username"
+  api_token: "your-jenkins-api-token"
+  
+  # SSL verification (set to false for self-signed certs)
+  verify_ssl: true
+  
+  # Connection timeout in seconds
+  timeout: 30
+  
+  # Jobs to monitor (leave empty to allow all)
+  monitored_jobs: []
+  # monitored_jobs:
+  #   - "backend-api"
+  #   - "frontend-app"
+  #   - "data-pipeline/*"  # Supports wildcards
+
+# =============================================================================
+# AI MODEL CONFIGURATION
+# =============================================================================
+ai:
+  # Provider type: "openai_compatible" (works with Ollama, vLLM, LocalAI, etc.)
+  provider: "openai_compatible"
+  
+  # ----- OLLAMA CONFIGURATION -----
+  # Local Ollama instance
+  base_url: "http://localhost:11434/v1"
+  model: "llama3:8b"
+  api_key: "ollama"  # Ollama doesn't require a real key, but the client needs one
+  
+  # ----- vLLM CONFIGURATION -----
+  # base_url: "http://your-vllm-server:8000/v1"
+  # model: "meta-llama/Llama-3-70b-chat-hf"
+  # api_key: "your-vllm-api-key"
+  
+  # ----- LocalAI CONFIGURATION -----
+  # base_url: "http://localhost:8080/v1"
+  # model: "llama3-70b"
+  # api_key: "localai"
+  
+  # ----- LM Studio CONFIGURATION -----
+  # base_url: "http://localhost:1234/v1"
+  # model: "local-model"
+  # api_key: "lm-studio"
+  
+  # ----- Custom Private API -----
+  # base_url: "https://your-private-llm-api.internal/v1"
+  # model: "your-fine-tuned-model"
+  # api_key: "your-api-key"
+  
+  # Model parameters
+  temperature: 0.1  # Low temperature for more deterministic analysis
+  max_tokens: 4096
+  
+  # Request timeout
+  timeout: 120
+  
+  # Retry configuration
+  max_retries: 3
+  retry_delay: 5
+
+# =============================================================================
+# GIT INTEGRATION
+# =============================================================================
+git:
+  enabled: true
+  
+  # Number of recent commits to analyze
+  lookback_commits: 10
+  
+  # Clone repos locally for analysis (if workspace not available)
+  clone_repos: false
+  clone_directory: "/tmp/jenkins-agent-repos"
+  
+  # GitHub/GitLab API for enhanced analysis (optional)
+  api:
+    enabled: false
+    # For GitHub
+    # provider: "github"
+    # url: "https://api.github.com"
+    # token: "ghp_your_token"
+    
+    # For GitLab
+    # provider: "gitlab"
+    # url: "https://gitlab.example.com/api/v4"
+    # token: "glpat-your_token"
+
+# =============================================================================
+# GITHUB ENTERPRISE - SOURCE CODE FETCHING
+# =============================================================================
+# Fetch Jenkinsfile and shared library source code for deeper analysis.
+# This is critical for analyzing custom Groovy libraries and pipeline code.
+github:
+  enabled: true
+  
+  # GitHub API base URL
+  # GitHub.com:          https://api.github.com
+  # GitHub Enterprise:   https://github.yourcompany.com/api/v3
+  base_url: "https://api.github.com"
+  
+  # Personal access token with repo read access
+  # Create at: GitHub → Settings → Developer settings → Personal access tokens
+  # Required scopes: repo (read)
+  token: ""
+  
+  # Request timeout in seconds
+  timeout: 30
+  
+  # Cache fetched files to reduce API calls
+  cache_enabled: true
+  cache_ttl_seconds: 300  # 5 minutes
+  
+  # Map library names (from @Library declarations) to repositories
+  # This tells the agent where to find your shared library code
+  # 
+  # Example: If your Jenkinsfile has @Library('my-pipeline-lib')
+  # and the code is in https://github.yourcompany.com/platform/jenkins-shared-lib
+  # then add: "my-pipeline-lib": "platform/jenkins-shared-lib"
+  library_mappings:
+    # "my-pipeline-lib": "org/jenkins-shared-library"
+    # "common-steps": "platform/common-pipeline-steps"
+    # "deploy-lib": "devops/deployment-library"
+  
+  # Project repository mappings (optional)
+  # Map Jenkins job names to source repositories
+  # project_mappings:
+  #   "backend-api": "org/backend-api"
+  #   "frontend-app": "org/frontend-app"
+
+# =============================================================================
+# LOG PARSING CONFIGURATION
+# =============================================================================
+parsing:
+  # Maximum log size to process (in bytes)
+  max_log_size: 10485760  # 10MB
+  
+  # Number of lines to include around errors for context
+  error_context_lines: 10
+  
+  # Patterns to identify as errors (regex)
+  error_patterns:
+    - "\\[ERROR\\]"
+    - "\\[FATAL\\]"
+    - "Exception:"
+    - "Error:"
+    - "FAILED"
+    - "BUILD FAILURE"
+    - "AssertionError"
+    - "TypeError"
+    - "RuntimeError"
+    - "ConnectionError"
+    - "Traceback \\(most recent call last\\)"
+  
+  # Patterns to filter out (noise reduction)
+  ignore_patterns:
+    - "Downloading:"
+    - "Downloaded:"
+    - "Progress:"
+    - "\\[INFO\\] Download"
+
+# =============================================================================
+# FAILURE CATEGORIZATION
+# =============================================================================
+categories:
+  compilation_error:
+    patterns:
+      - "cannot find symbol"
+      - "compilation failed"
+      - "syntax error"
+      - "SyntaxError"
+      - "ModuleNotFoundError"
+      - "ImportError"
+    priority: "HIGH"
+    
+  test_failure:
+    patterns:
+      - "FAILED"
+      - "AssertionError"
+      - "test.*failed"
+      - "Expected.*but got"
+    priority: "HIGH"
+    
+  infrastructure:
+    patterns:
+      - "Connection refused"
+      - "timeout"
+      - "No space left on device"
+      - "Out of memory"
+      - "Cannot allocate memory"
+      - "Permission denied"
+    priority: "CRITICAL"
+    
+  dependency:
+    patterns:
+      - "Could not resolve dependencies"
+      - "package not found"
+      - "version conflict"
+      - "npm ERR!"
+      - "pip.*error"
+    priority: "MEDIUM"
+    
+  configuration:
+    patterns:
+      - "missing required"
+      - "configuration error"
+      - "invalid.*config"
+      - "environment variable.*not set"
+    priority: "MEDIUM"
+
+# =============================================================================
+# NOTIFICATIONS
+# =============================================================================
+notifications:
+  # Slack integration
+  slack:
+    enabled: false
+    webhook_url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+    channel: "#ci-failures"
+    mention_on_critical: true  # @channel for critical failures
+    
+  # Microsoft Teams integration
+  teams:
+    enabled: false
+    webhook_url: "https://outlook.office.com/webhook/YOUR/WEBHOOK/URL"
+    
+  # Email notifications
+  email:
+    enabled: false
+    smtp_server: "smtp.example.com"
+    smtp_port: 587
+    username: "notifications@example.com"
+    password: "your-password"
+    from_address: "jenkins-agent@example.com"
+    to_addresses:
+      - "team@example.com"
+
+# =============================================================================
+# SCM INTEGRATION (GitHub/GitLab PR Comments)
+# =============================================================================
+# Post analysis results as PR/MR comments and set commit status checks.
+# This closes the feedback loop by putting analysis where developers see it.
+scm:
+  enabled: false
+  
+  # Provider: "github" or "gitlab"
+  provider: "github"
+  
+  # API URL
+  # GitHub.com:        https://api.github.com
+  # GitHub Enterprise: https://github.yourcompany.com/api/v3
+  # GitLab.com:        https://gitlab.com/api/v4
+  # GitLab self-hosted: https://gitlab.yourcompany.com/api/v4
+  api_url: "https://api.github.com"
+  
+  # Personal access token with repo/PR write access
+  # GitHub: Create at Settings → Developer settings → Personal access tokens
+  #         Required scopes: repo (for private repos), public_repo (for public)
+  # GitLab: Create at Settings → Access Tokens
+  #         Required scopes: api
+  token: ""
+  
+  # SSL verification
+  verify_ssl: true
+  
+  # Auto-post analysis to PRs when triggered with PR info
+  auto_comment: true
+  
+  # Update existing comment instead of posting new ones
+  # Uses a hidden marker to find previous comments from this tool
+  update_existing: true
+  
+  # Set commit status check (shows as check in PR)
+  set_commit_status: true
+
+# =============================================================================
+# REPORTER CONFIGURATION
+# =============================================================================
+# Control where analysis results are posted.
+reporter:
+  # Update Jenkins build description with analysis summary
+  # Shows tier badge, retry assessment, and quick fix in Jenkins UI
+  update_jenkins_description: true
+  
+  # Post analysis to PR/MR (requires scm.enabled = true)
+  post_to_pr: true
+  
+  # Post to Slack (requires notifications.slack.enabled = true)
+  post_to_slack: false
+  
+  # Generate report files
+  generate_reports: true
+  report_formats:
+    - "json"
+    - "markdown"
+
+# =============================================================================
+# REPORTING
+# =============================================================================
+reporting:
+  # Output directory for reports
+  output_directory: "./reports"
+  
+  # Report formats to generate
+  formats:
+    - "json"
+    - "markdown"
+    # - "html"
+  
+  # Keep reports for N days (0 = forever)
+  retention_days: 30
+  
+  # Include in reports
+  include:
+    console_log_snippet: true
+    stack_traces: true
+    git_diff: true
+    ai_analysis: true
+    recommendations: true
+
+# =============================================================================
+# HISTORY & LEARNING
+# =============================================================================
+history:
+  enabled: true
+  
+  # Database for storing failure history
+  database: "sqlite:///jenkins_failures.db"
+  
+  # Use history to improve analysis
+  use_similar_failures: true
+  similarity_threshold: 0.8
+  
+  # Track resolution patterns
+  track_resolutions: true
+
+# =============================================================================
+# SERVER MODE CONFIGURATION
+# =============================================================================
+server:
+  host: "0.0.0.0"
+  port: 8080
+  
+  # API authentication
+  api_key_enabled: true
+  api_key: "your-secure-api-key-here"
+  
+  # CORS settings
+  cors_origins:
+    - "https://jenkins.example.com"
+    - "http://localhost:*"
+  
+  # Rate limiting
+  rate_limit: 100  # requests per minute
+
+# =============================================================================
+# LOGGING
+# =============================================================================
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "./logs/agent.log"
+  max_size: 10485760  # 10MB
+  backup_count: 5

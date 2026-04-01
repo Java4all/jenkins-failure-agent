@@ -1,0 +1,1001 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jenkins Failure Analysis Agent</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        jenkins: { red: '#D33833', blue: '#335061', dark: '#1a1a2e', darker: '#16162a' }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        @keyframes pulse-glow { 0%, 100% { box-shadow: 0 0 5px rgba(34, 197, 94, 0.5); } 50% { box-shadow: 0 0 20px rgba(34, 197, 94, 0.8); } }
+        @keyframes spin-slow { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        @keyframes fade-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .status-healthy { animation: pulse-glow 2s infinite; }
+        .spin-slow { animation: spin-slow 2s linear infinite; }
+        .fade-in { animation: fade-in 0.3s ease-out; }
+        .gradient-text { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .scrollbar-thin::-webkit-scrollbar { width: 6px; }
+        .scrollbar-thin::-webkit-scrollbar-track { background: #1f2937; }
+        .scrollbar-thin::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 3px; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen">
+    <div id="root"></div>
+    
+    <script type="text/babel">
+        const { useState, useEffect, useCallback, useRef } = React;
+        
+        const API_BASE = window.location.port === '3000' 
+            ? 'http://localhost:8080' 
+            : `${window.location.protocol}//${window.location.hostname}:8080`;
+        
+        // =====================================================================
+        // Base Components
+        // =====================================================================
+        
+        function StatusBadge({ status, size = 'md' }) {
+            const colors = { healthy: 'bg-green-500', unhealthy: 'bg-red-500', loading: 'bg-yellow-500', unknown: 'bg-gray-500' };
+            const sizes = { sm: 'w-2 h-2', md: 'w-3 h-3', lg: 'w-4 h-4' };
+            return <span className={`inline-block rounded-full ${colors[status] || colors.unknown} ${sizes[size]} ${status === 'healthy' ? 'status-healthy' : ''}`}></span>;
+        }
+        
+        function Card({ children, className = '' }) {
+            return <div className={`bg-gray-800 rounded-xl shadow-lg border border-gray-700 ${className}`}>{children}</div>;
+        }
+        
+        function Button({ children, onClick, disabled, loading, className = '', variant = 'primary', size = 'md', type = 'button' }) {
+            const variants = {
+                primary: 'bg-indigo-600 hover:bg-indigo-700 text-white',
+                secondary: 'bg-gray-700 hover:bg-gray-600 text-white',
+                danger: 'bg-red-600 hover:bg-red-700 text-white',
+                ghost: 'bg-transparent hover:bg-gray-700 text-gray-300',
+                success: 'bg-green-600 hover:bg-green-700 text-white',
+            };
+            const sizes = { sm: 'px-3 py-1.5 text-sm', md: 'px-4 py-2', lg: 'px-6 py-3 text-lg' };
+            return (
+                <button type={type} onClick={onClick} disabled={disabled || loading}
+                    className={`rounded-lg font-medium transition-all duration-200 flex items-center justify-center gap-2
+                        ${variants[variant]} ${sizes[size]} ${disabled ? 'opacity-50 cursor-not-allowed' : ''} ${className}`}>
+                    {loading && <i className="fas fa-spinner fa-spin"></i>}
+                    {children}
+                </button>
+            );
+        }
+        
+        function Input({ label, value, onChange, placeholder, type = 'text', className = '', disabled = false, helpText = '' }) {
+            return (
+                <div className={className}>
+                    {label && <label className="block text-sm font-medium text-gray-400 mb-1">{label}</label>}
+                    <input type={type} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} disabled={disabled}
+                        className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent placeholder-gray-500 disabled:opacity-50" />
+                    {helpText && <p className="text-xs text-gray-500 mt-1">{helpText}</p>}
+                </div>
+            );
+        }
+        
+        function Checkbox({ label, checked, onChange, description = '' }) {
+            return (
+                <label className="flex items-start gap-3 cursor-pointer">
+                    <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)}
+                        className="w-4 h-4 mt-0.5 rounded border-gray-600 text-indigo-500 focus:ring-indigo-500 bg-gray-700" />
+                    <div>
+                        <span className="text-sm font-medium text-gray-300">{label}</span>
+                        {description && <p className="text-xs text-gray-500">{description}</p>}
+                    </div>
+                </label>
+            );
+        }
+        
+        function Tabs({ tabs, activeTab, onChange }) {
+            return (
+                <div className="flex border-b border-gray-700 overflow-x-auto">
+                    {tabs.map((tab) => (
+                        <button key={tab.id} onClick={() => onChange(tab.id)}
+                            className={`px-4 py-2 text-sm font-medium transition-colors relative whitespace-nowrap
+                                ${activeTab === tab.id ? 'text-indigo-400' : 'text-gray-400 hover:text-gray-200'}`}>
+                            {tab.icon && <i className={`${tab.icon} mr-2`}></i>}
+                            {tab.label}
+                            {tab.badge && <span className="ml-2 px-1.5 py-0.5 text-xs rounded-full bg-indigo-600">{tab.badge}</span>}
+                            {activeTab === tab.id && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-500"></div>}
+                        </button>
+                    ))}
+                </div>
+            );
+        }
+        
+        function Collapsible({ title, icon, children, defaultOpen = false, badge = null }) {
+            const [isOpen, setIsOpen] = useState(defaultOpen);
+            return (
+                <div className="border border-gray-700 rounded-lg overflow-hidden">
+                    <button onClick={() => setIsOpen(!isOpen)}
+                        className="w-full px-4 py-3 flex items-center justify-between bg-gray-800 hover:bg-gray-750 transition-colors">
+                        <div className="flex items-center gap-2">
+                            {icon && <i className={`${icon} text-gray-400`}></i>}
+                            <span className="font-medium">{title}</span>
+                            {badge && <span className="px-2 py-0.5 text-xs rounded-full bg-gray-700">{badge}</span>}
+                        </div>
+                        <i className={`fas fa-chevron-${isOpen ? 'up' : 'down'} text-gray-500`}></i>
+                    </button>
+                    {isOpen && <div className="p-4 bg-gray-800/50">{children}</div>}
+                </div>
+            );
+        }
+        
+        function Modal({ isOpen, onClose, title, children }) {
+            if (!isOpen) return null;
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60" onClick={onClose}>
+                    <div className="bg-gray-800 rounded-xl shadow-2xl max-w-2xl w-full max-h-[80vh] overflow-hidden fade-in" onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-700">
+                            <h3 className="text-lg font-semibold">{title}</h3>
+                            <button onClick={onClose} className="text-gray-400 hover:text-white"><i className="fas fa-times"></i></button>
+                        </div>
+                        <div className="p-6 overflow-y-auto max-h-[60vh]">{children}</div>
+                    </div>
+                </div>
+            );
+        }
+
+        // =====================================================================
+        // Health Panel - Extended
+        // =====================================================================
+        
+        function HealthPanel({ health }) {
+            const services = [
+                { key: 'agent', label: 'Agent', icon: 'fas fa-robot' },
+                { key: 'jenkins', label: 'Jenkins', icon: 'fab fa-jenkins' },
+                { key: 'ai', label: 'AI Model', icon: 'fas fa-brain' },
+                { key: 'github', label: 'GitHub', icon: 'fab fa-github' },
+                { key: 'scm', label: 'SCM (PR)', icon: 'fas fa-code-branch' },
+            ];
+            
+            return (
+                <Card className="p-4">
+                    <h3 className="text-lg font-semibold mb-3 flex items-center gap-2">
+                        <i className="fas fa-heartbeat text-red-400"></i>
+                        System Health
+                    </h3>
+                    <div className="grid grid-cols-2 gap-2">
+                        {services.map(({ key, label, icon }) => (
+                            <div key={key} className="flex items-center justify-between p-2 bg-gray-700/50 rounded-lg">
+                                <div className="flex items-center gap-2">
+                                    <i className={`${icon} text-gray-400 text-sm w-4`}></i>
+                                    <span className="text-sm text-gray-300">{label}</span>
+                                </div>
+                                <StatusBadge status={health[key] || 'unknown'} size="sm" />
+                            </div>
+                        ))}
+                    </div>
+                </Card>
+            );
+        }
+
+        // =====================================================================
+        // Full-Featured Analysis Form
+        // =====================================================================
+        
+        function AnalysisForm({ onSubmit, loading }) {
+            const [job, setJob] = useState('');
+            const [build, setBuild] = useState('');
+            const [latestFailed, setLatestFailed] = useState(false);
+            const [showAdvanced, setShowAdvanced] = useState(false);
+            
+            // Analysis mode
+            const [deepInvestigation, setDeepInvestigation] = useState(false);
+            
+            // Source code options
+            const [projectRepo, setProjectRepo] = useState('');
+            const [projectRef, setProjectRef] = useState('');
+            
+            // PR integration
+            const [prUrl, setPrUrl] = useState('');
+            const [prSha, setPrSha] = useState('');
+            
+            // Reporting options
+            const [updateJenkinsDesc, setUpdateJenkinsDesc] = useState(true);
+            const [postToPr, setPostToPr] = useState(true);
+            const [notifySlack, setNotifySlack] = useState(false);
+            
+            const handleSubmit = (e) => {
+                e.preventDefault();
+                if (!job) return;
+                
+                const payload = {
+                    job,
+                    latest_failed: latestFailed,
+                    deep: deepInvestigation,
+                    update_jenkins_description: updateJenkinsDesc,
+                    post_to_pr: postToPr,
+                    notify_slack: notifySlack,
+                };
+                
+                if (!latestFailed && build) payload.build = parseInt(build);
+                if (projectRepo) payload.project_repo = projectRepo;
+                if (projectRef) payload.project_ref = projectRef;
+                if (prUrl) payload.pr_url = prUrl;
+                if (prSha) payload.pr_sha = prSha;
+                
+                onSubmit(payload);
+            };
+            
+            return (
+                <Card className="p-6">
+                    <h3 className="text-xl font-semibold mb-4 flex items-center gap-2">
+                        <i className="fas fa-search text-indigo-400"></i>
+                        Analyze Build Failure
+                    </h3>
+                    
+                    <form onSubmit={handleSubmit} className="space-y-4">
+                        {/* Basic Fields */}
+                        <Input label="Job Name" value={job} onChange={setJob} placeholder="e.g., my-project/main" />
+                        
+                        <div className="flex items-end gap-3">
+                            <Input label="Build Number" value={build} onChange={setBuild} placeholder="123" 
+                                type="number" disabled={latestFailed} className="flex-1" />
+                            <div className="pb-2">
+                                <Checkbox label="Latest Failed" checked={latestFailed} onChange={setLatestFailed} />
+                            </div>
+                        </div>
+                        
+                        {/* Analysis Mode Toggle */}
+                        <div className={`p-4 rounded-lg border transition-all cursor-pointer
+                            ${deepInvestigation ? 'bg-purple-500/10 border-purple-500/50' : 'bg-gray-700/30 border-gray-600'}`}
+                            onClick={() => setDeepInvestigation(!deepInvestigation)}>
+                            <div className="flex items-start gap-3">
+                                <input type="checkbox" checked={deepInvestigation} onChange={() => {}}
+                                    className="w-4 h-4 mt-1 rounded border-purple-600 text-purple-500 focus:ring-purple-500 bg-gray-700" />
+                                <div>
+                                    <span className="text-sm font-medium text-purple-300">🔍 Deep Investigation Mode (Agentic)</span>
+                                    <p className="text-xs text-gray-400 mt-1">
+                                        Uses MCP tools to trace through library code: get_library_file, search_code, get_blame, analyze_error.
+                                        Best for MissingMethodException, library issues, and complex code failures.
+                                    </p>
+                                    {deepInvestigation && (
+                                        <div className="mt-2 flex flex-wrap gap-2">
+                                            {['get_console_log', 'get_library_file', 'search_code', 'parse_stack_trace'].map(t => (
+                                                <span key={t} className="px-2 py-0.5 bg-purple-500/20 text-purple-300 rounded text-xs">{t}</span>
+                                            ))}
+                                            <span className="text-xs text-gray-500">+ 27 more tools</span>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                        
+                        {/* Advanced Options */}
+                        <button type="button" onClick={() => setShowAdvanced(!showAdvanced)}
+                            className="text-sm text-gray-400 hover:text-gray-200 flex items-center gap-2">
+                            <i className={`fas fa-chevron-${showAdvanced ? 'up' : 'down'}`}></i>
+                            Advanced Options
+                        </button>
+                        
+                        {showAdvanced && (
+                            <div className="space-y-4 p-4 bg-gray-700/30 rounded-lg border border-gray-700">
+                                {/* Source Code */}
+                                <div>
+                                    <h4 className="text-sm font-medium text-gray-300 mb-2 flex items-center gap-2">
+                                        <i className="fab fa-github text-gray-400"></i> Source Code Fetching
+                                    </h4>
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <Input label="Project Repo" value={projectRepo} onChange={setProjectRepo} 
+                                            placeholder="org/repo" helpText="For Jenkinsfile" />
+                                        <Input label="Branch/Ref" value={projectRef} onChange={setProjectRef} placeholder="main" />
+                                    </div>
+                                </div>
+                                
+                                {/* PR Integration */}
+                                <div>
+                                    <h4 className="text-sm font-medium text-gray-300 mb-2 flex items-center gap-2">
+                                        <i className="fas fa-code-branch text-gray-400"></i> PR Integration
+                                    </h4>
+                                    <Input label="PR URL" value={prUrl} onChange={setPrUrl} 
+                                        placeholder="https://github.com/org/repo/pull/123" className="mb-3" />
+                                    <Input label="Commit SHA" value={prSha} onChange={setPrSha} 
+                                        placeholder="abc123..." helpText="For commit status" />
+                                </div>
+                                
+                                {/* Reporting */}
+                                <div>
+                                    <h4 className="text-sm font-medium text-gray-300 mb-2 flex items-center gap-2">
+                                        <i className="fas fa-bullhorn text-gray-400"></i> Reporting Actions
+                                    </h4>
+                                    <div className="space-y-2">
+                                        <Checkbox label="Update Jenkins Build Description" checked={updateJenkinsDesc} 
+                                            onChange={setUpdateJenkinsDesc} description="Add analysis summary to build page" />
+                                        <Checkbox label="Post Analysis to PR/MR" checked={postToPr} 
+                                            onChange={setPostToPr} description="Requires PR URL above" />
+                                        <Checkbox label="Send Slack Notification" checked={notifySlack} 
+                                            onChange={setNotifySlack} description="Requires Slack webhook in config" />
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                        
+                        {/* Submit */}
+                        <Button type="submit" disabled={!job || (!build && !latestFailed)} loading={loading} className="w-full" size="lg">
+                            {loading ? (
+                                <>Analyzing{deepInvestigation ? ' (Deep)' : ''}...</>
+                            ) : (
+                                <><i className={`fas ${deepInvestigation ? 'fa-microscope' : 'fa-play'} mr-2`}></i>
+                                {deepInvestigation ? 'Deep Analyze' : 'Analyze'}</>
+                            )}
+                        </Button>
+                    </form>
+                </Card>
+            );
+        }
+
+        // =====================================================================
+        // Result Badges & Components
+        // =====================================================================
+        
+        function CategoryBadge({ category }) {
+            const colors = {
+                'GROOVY_LIBRARY': 'bg-purple-500/20 text-purple-300 border-purple-500/50',
+                'GROOVY_CPS': 'bg-purple-500/20 text-purple-300 border-purple-500/50',
+                'GROOVY_SANDBOX': 'bg-orange-500/20 text-orange-300 border-orange-500/50',
+                'GROOVY_SERIALIZATION': 'bg-purple-500/20 text-purple-300 border-purple-500/50',
+                'CREDENTIAL_ERROR': 'bg-red-500/20 text-red-300 border-red-500/50',
+                'AGENT_ERROR': 'bg-yellow-500/20 text-yellow-300 border-yellow-500/50',
+                'PLUGIN_ERROR': 'bg-blue-500/20 text-blue-300 border-blue-500/50',
+                'TEST_FAILURE': 'bg-red-500/20 text-red-300 border-red-500/50',
+                'COMPILATION_ERROR': 'bg-red-500/20 text-red-300 border-red-500/50',
+                'CONFIGURATION': 'bg-yellow-500/20 text-yellow-300 border-yellow-500/50',
+                'INFRASTRUCTURE': 'bg-gray-500/20 text-gray-300 border-gray-500/50',
+                'NETWORK': 'bg-blue-500/20 text-blue-300 border-blue-500/50',
+                'TIMEOUT': 'bg-orange-500/20 text-orange-300 border-orange-500/50',
+                'DEPENDENCY': 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50',
+                'RESOURCE': 'bg-pink-500/20 text-pink-300 border-pink-500/50',
+            };
+            const color = colors[category] || 'bg-gray-500/20 text-gray-300 border-gray-500/50';
+            return <span className={`px-3 py-1 rounded-full text-sm font-medium border ${color}`}>{category?.replace(/_/g, ' ')}</span>;
+        }
+        
+        function TierBadge({ tier }) {
+            const tierInfo = {
+                'configuration': { emoji: '⚙️', label: 'Configuration', color: 'bg-orange-500/20 text-orange-300 border-orange-500/50', desc: 'End-user config issue' },
+                'pipeline_misuse': { emoji: '🔧', label: 'Pipeline/Code', color: 'bg-red-500/20 text-red-300 border-red-500/50', desc: 'Jenkinsfile or library issue' },
+                'external_system': { emoji: '🌐', label: 'External', color: 'bg-blue-500/20 text-blue-300 border-blue-500/50', desc: 'Network, deps, or infra' },
+                'unknown': { emoji: '❓', label: 'Unknown', color: 'bg-gray-500/20 text-gray-300 border-gray-500/50', desc: 'Needs investigation' },
+            };
+            const info = tierInfo[tier] || tierInfo.unknown;
+            return (
+                <span className={`px-3 py-1 rounded-full text-sm font-medium border ${info.color}`} title={info.desc}>
+                    {info.emoji} {info.label}
+                </span>
+            );
+        }
+        
+        function ModeBadge({ mode, toolCalls, enhanced }) {
+            const modeInfo = {
+                'scripted': { emoji: '⚡', label: 'Fast', color: 'bg-gray-600/50 text-gray-300', desc: 'Single LLM call' },
+                'agentic': { emoji: '🔍', label: 'Deep', color: 'bg-purple-600/50 text-purple-300', desc: 'Multi-step investigation' },
+                'hybrid': { emoji: '🧬', label: 'Hybrid', color: 'bg-blue-600/50 text-blue-300', desc: 'Best of both' },
+            };
+            const info = modeInfo[mode] || modeInfo.scripted;
+            return (
+                <div className="flex items-center gap-2" title={info.desc}>
+                    <span className={`px-2 py-1 rounded text-xs font-medium ${info.color}`}>{info.emoji} {info.label}</span>
+                    {enhanced && toolCalls > 0 && (
+                        <span className="text-xs text-purple-400 flex items-center gap-1">
+                            <i className="fas fa-tools"></i> {toolCalls} tools
+                        </span>
+                    )}
+                </div>
+            );
+        }
+        
+        function RetryBadge({ assessment }) {
+            if (!assessment) return null;
+            const { is_retriable, confidence, reason, recommended_wait_seconds, max_retries } = assessment;
+            
+            return (
+                <div className={`p-4 rounded-lg ${is_retriable ? 'bg-green-500/10 border border-green-500/30' : 'bg-red-500/10 border border-red-500/30'}`}>
+                    <div className="flex items-center gap-2 mb-2">
+                        <span className="text-2xl">{is_retriable ? '🔄' : '⛔'}</span>
+                        <span className={`text-lg font-semibold ${is_retriable ? 'text-green-300' : 'text-red-300'}`}>
+                            {is_retriable ? 'Safe to Retry' : 'Not Retriable'}
+                        </span>
+                        <span className="text-sm text-gray-400">({Math.round(confidence * 100)}% confidence)</span>
+                    </div>
+                    <p className="text-gray-300 text-sm">{reason}</p>
+                    {is_retriable && (recommended_wait_seconds > 0 || max_retries > 0) && (
+                        <div className="mt-2 flex gap-4 text-xs text-gray-400">
+                            {recommended_wait_seconds > 0 && <span><i className="fas fa-clock mr-1"></i>Wait {recommended_wait_seconds}s</span>}
+                            {max_retries > 0 && <span><i className="fas fa-redo mr-1"></i>Max {max_retries} retries</span>}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+        
+        function ConfidenceMeter({ confidence }) {
+            const percent = Math.round(confidence * 100);
+            const color = percent >= 80 ? 'bg-green-500' : percent >= 50 ? 'bg-yellow-500' : 'bg-red-500';
+            return (
+                <div className="flex items-center gap-2">
+                    <div className="flex-1 h-2 bg-gray-700 rounded-full overflow-hidden">
+                        <div className={`h-full ${color} transition-all`} style={{ width: `${percent}%` }}></div>
+                    </div>
+                    <span className="text-sm text-gray-400 w-12">{percent}%</span>
+                </div>
+            );
+        }
+
+        // =====================================================================
+        // Investigation Details (for deep mode)
+        // =====================================================================
+        
+        function InvestigationDetails({ result }) {
+            const { tool_calls_made, investigation_tokens, agentic_enhanced } = result;
+            
+            if (!agentic_enhanced) return null;
+            
+            return (
+                <Collapsible title="Investigation Details" icon="fas fa-microscope" badge={`${tool_calls_made} tools`}>
+                    <div className="space-y-3">
+                        <div className="grid grid-cols-2 gap-3">
+                            <div className="p-3 bg-gray-700/50 rounded-lg text-center">
+                                <i className="fas fa-tools text-purple-400 text-xl mb-1"></i>
+                                <p className="text-2xl font-bold text-purple-300">{tool_calls_made}</p>
+                                <p className="text-xs text-gray-400">Tool Calls</p>
+                            </div>
+                            <div className="p-3 bg-gray-700/50 rounded-lg text-center">
+                                <i className="fas fa-coins text-yellow-400 text-xl mb-1"></i>
+                                <p className="text-2xl font-bold text-yellow-300">{investigation_tokens || '~'}</p>
+                                <p className="text-xs text-gray-400">Tokens Used</p>
+                            </div>
+                        </div>
+                        <p className="text-sm text-gray-400">
+                            The agent traced through source code using MCP tools to find the exact root cause.
+                        </p>
+                    </div>
+                </Collapsible>
+            );
+        }
+
+        // =====================================================================
+        // Full Analysis Result Display
+        // =====================================================================
+        
+        function AnalysisResult({ result }) {
+            const [activeTab, setActiveTab] = useState('overview');
+            const [expandedRec, setExpandedRec] = useState(null);
+            const [showRawJson, setShowRawJson] = useState(false);
+            
+            if (!result) return null;
+            
+            const { 
+                build_info, failure_analysis, root_cause, recommendations, 
+                retry_assessment, groovy_analysis, config_analysis, metadata,
+                analysis_mode, agentic_enhanced, tool_calls_made, investigation_tokens,
+                jenkinsfile_fetched, libraries_fetched,
+                jenkins_description_updated, pr_comment_posted
+            } = result;
+            
+            const tabs = [
+                { id: 'overview', label: 'Overview', icon: 'fas fa-home' },
+                { id: 'recommendations', label: 'Fix', icon: 'fas fa-wrench', badge: recommendations?.length },
+                { id: 'details', label: 'Details', icon: 'fas fa-info-circle' },
+                { id: 'actions', label: 'Actions', icon: 'fas fa-check-circle' },
+            ];
+            
+            return (
+                <Card className="overflow-hidden fade-in">
+                    {/* Header */}
+                    <div className="p-6 border-b border-gray-700">
+                        <div className="flex flex-wrap items-start justify-between gap-4">
+                            <div>
+                                <h2 className="text-2xl font-bold flex items-center gap-3">
+                                    <i className="fas fa-bug text-red-400"></i>
+                                    {build_info?.job} #{build_info?.build_number}
+                                </h2>
+                                <div className="flex flex-wrap items-center gap-3 mt-2">
+                                    <ModeBadge mode={analysis_mode} toolCalls={tool_calls_made} enhanced={agentic_enhanced} />
+                                    <span className="text-sm text-gray-500">
+                                        {metadata?.analysis_duration_ms}ms • {metadata?.model_used}
+                                    </span>
+                                </div>
+                            </div>
+                            <div className="flex flex-col gap-2 items-end">
+                                <CategoryBadge category={failure_analysis?.category} />
+                                <TierBadge tier={failure_analysis?.tier} />
+                            </div>
+                        </div>
+                        
+                        {failure_analysis?.failed_stage && (
+                            <div className="mt-4 px-3 py-2 bg-gray-700/50 rounded-lg inline-flex items-center gap-2">
+                                <i className="fas fa-layer-group text-yellow-400"></i>
+                                <span className="text-gray-400">Failed Stage:</span>
+                                <span className="font-mono text-yellow-300">{failure_analysis.failed_stage}</span>
+                            </div>
+                        )}
+                    </div>
+                    
+                    {/* Tabs */}
+                    <Tabs tabs={tabs} activeTab={activeTab} onChange={setActiveTab} />
+                    
+                    {/* Tab Content */}
+                    <div className="p-6">
+                        {activeTab === 'overview' && (
+                            <div className="space-y-6">
+                                {/* Root Cause */}
+                                <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-lg">
+                                    <h4 className="font-semibold text-red-300 mb-2 flex items-center gap-2">
+                                        <i className="fas fa-crosshairs"></i> Root Cause
+                                    </h4>
+                                    <p className="text-lg">{root_cause?.summary}</p>
+                                </div>
+                                
+                                {/* Retry Assessment */}
+                                <RetryBadge assessment={retry_assessment} />
+                                
+                                {/* Confidence */}
+                                <div>
+                                    <span className="text-sm text-gray-400">Analysis Confidence</span>
+                                    <ConfidenceMeter confidence={failure_analysis?.confidence || 0} />
+                                </div>
+                                
+                                {/* Investigation Details (if deep mode) */}
+                                {agentic_enhanced && <InvestigationDetails result={result} />}
+                                
+                                {/* Quick Stats */}
+                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                                    {jenkinsfile_fetched && (
+                                        <div className="p-3 bg-gray-700/50 rounded-lg text-center">
+                                            <i className="fas fa-file-code text-green-400 text-xl mb-1"></i>
+                                            <p className="text-xs text-gray-400">Jenkinsfile</p>
+                                            <p className="text-sm text-green-300">Fetched</p>
+                                        </div>
+                                    )}
+                                    {libraries_fetched?.length > 0 && (
+                                        <div className="p-3 bg-gray-700/50 rounded-lg text-center">
+                                            <i className="fas fa-book text-blue-400 text-xl mb-1"></i>
+                                            <p className="text-xs text-gray-400">Libraries</p>
+                                            <p className="text-sm text-blue-300">{libraries_fetched.length} fetched</p>
+                                        </div>
+                                    )}
+                                    {jenkins_description_updated && (
+                                        <div className="p-3 bg-gray-700/50 rounded-lg text-center">
+                                            <i className="fab fa-jenkins text-orange-400 text-xl mb-1"></i>
+                                            <p className="text-xs text-gray-400">Jenkins</p>
+                                            <p className="text-sm text-orange-300">Updated</p>
+                                        </div>
+                                    )}
+                                    {pr_comment_posted && (
+                                        <div className="p-3 bg-gray-700/50 rounded-lg text-center">
+                                            <i className="fab fa-github text-white text-xl mb-1"></i>
+                                            <p className="text-xs text-gray-400">PR Comment</p>
+                                            <p className="text-sm text-white">Posted</p>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+                        
+                        {activeTab === 'recommendations' && (
+                            <div className="space-y-3">
+                                {recommendations?.length === 0 && (
+                                    <p className="text-gray-500 text-center py-8">No recommendations available</p>
+                                )}
+                                {recommendations?.map((rec, i) => (
+                                    <div key={i} className="p-4 bg-gray-700/50 rounded-lg cursor-pointer hover:bg-gray-700 transition-colors"
+                                        onClick={() => setExpandedRec(expandedRec === i ? null : i)}>
+                                        <div className="flex items-start justify-between gap-4">
+                                            <div className="flex items-start gap-3">
+                                                <span className={`px-2 py-1 text-xs rounded font-medium ${
+                                                    rec.priority === 'HIGH' ? 'bg-red-500/30 text-red-300' :
+                                                    rec.priority === 'MEDIUM' ? 'bg-yellow-500/30 text-yellow-300' :
+                                                    'bg-green-500/30 text-green-300'}`}>
+                                                    {rec.priority}
+                                                </span>
+                                                <div>
+                                                    <p className="text-gray-200">{rec.action}</p>
+                                                    {rec.estimated_effort && (
+                                                        <span className="text-xs text-gray-500"><i className="fas fa-clock mr-1"></i>{rec.estimated_effort}</span>
+                                                    )}
+                                                </div>
+                                            </div>
+                                            <i className={`fas fa-chevron-${expandedRec === i ? 'up' : 'down'} text-gray-500`}></i>
+                                        </div>
+                                        
+                                        {expandedRec === i && (
+                                            <div className="mt-4 pt-4 border-t border-gray-600 space-y-3">
+                                                {rec.rationale && (
+                                                    <div>
+                                                        <span className="text-sm text-gray-400">Why:</span>
+                                                        <p className="text-gray-300 mt-1">{rec.rationale}</p>
+                                                    </div>
+                                                )}
+                                                {rec.code_suggestion && (
+                                                    <div>
+                                                        <span className="text-sm text-gray-400">Suggested Code:</span>
+                                                        <pre className="mt-2 p-3 bg-gray-900 rounded-lg overflow-x-auto text-sm text-green-300 font-mono">
+                                                            {rec.code_suggestion}
+                                                        </pre>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                        
+                        {activeTab === 'details' && (
+                            <div className="space-y-4">
+                                {root_cause?.details && (
+                                    <Collapsible title="Full Analysis Details" icon="fas fa-file-alt" defaultOpen={true}>
+                                        <div className="whitespace-pre-wrap text-gray-300 text-sm">{root_cause.details}</div>
+                                    </Collapsible>
+                                )}
+                                
+                                {failure_analysis?.primary_error && (
+                                    <Collapsible title="Primary Error" icon="fas fa-exclamation-triangle">
+                                        <pre className="p-3 bg-gray-900 rounded-lg overflow-x-auto text-sm text-red-300 font-mono">
+                                            {failure_analysis.primary_error}
+                                        </pre>
+                                    </Collapsible>
+                                )}
+                                
+                                {root_cause?.affected_files?.length > 0 && (
+                                    <Collapsible title="Affected Files" icon="fas fa-folder-open" badge={root_cause.affected_files.length}>
+                                        <div className="flex flex-wrap gap-2">
+                                            {root_cause.affected_files.map((file, i) => (
+                                                <code key={i} className="px-2 py-1 bg-gray-700 rounded text-sm text-blue-300">{file}</code>
+                                            ))}
+                                        </div>
+                                    </Collapsible>
+                                )}
+                                
+                                {groovy_analysis && groovy_analysis.failure_type !== 'unknown' && (
+                                    <Collapsible title="Groovy Analysis" icon="fab fa-java">
+                                        <div className="space-y-2 text-sm">
+                                            <p><span className="text-gray-400">Type:</span> <span className="text-orange-300">{groovy_analysis.failure_type}</span></p>
+                                            {groovy_analysis.root_cause_function && (
+                                                <p><span className="text-gray-400">Function:</span> <code className="text-purple-300">{groovy_analysis.root_cause_function}</code></p>
+                                            )}
+                                            {groovy_analysis.library_name && (
+                                                <p><span className="text-gray-400">Library:</span> <code className="text-blue-300">{groovy_analysis.library_name}</code></p>
+                                            )}
+                                        </div>
+                                    </Collapsible>
+                                )}
+                                
+                                {config_analysis && config_analysis.primary_issue !== 'unknown' && (
+                                    <Collapsible title="Configuration Analysis" icon="fas fa-cog">
+                                        <div className="space-y-2 text-sm">
+                                            <p><span className="text-gray-400">Issue:</span> <span className="text-yellow-300">{config_analysis.primary_issue}</span></p>
+                                            {config_analysis.credential_issues?.length > 0 && (
+                                                <div className="mt-2">
+                                                    <span className="text-gray-400">Credentials:</span>
+                                                    <div className="flex flex-wrap gap-2 mt-1">
+                                                        {config_analysis.credential_issues.map((c, i) => (
+                                                            <span key={i} className="px-2 py-1 bg-red-500/20 text-red-300 rounded text-xs">{c.id}</span>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </Collapsible>
+                                )}
+                                
+                                {/* Raw JSON Toggle */}
+                                <div className="pt-4 border-t border-gray-700">
+                                    <button onClick={() => setShowRawJson(!showRawJson)}
+                                        className="text-sm text-gray-500 hover:text-gray-300 flex items-center gap-2">
+                                        <i className={`fas fa-code`}></i>
+                                        {showRawJson ? 'Hide' : 'Show'} Raw JSON
+                                    </button>
+                                    {showRawJson && (
+                                        <pre className="mt-3 p-4 bg-gray-900 rounded-lg overflow-x-auto text-xs text-gray-400 max-h-96">
+                                            {JSON.stringify(result, null, 2)}
+                                        </pre>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+                        
+                        {activeTab === 'actions' && (
+                            <div className="space-y-4">
+                                <h4 className="font-medium text-gray-300">Actions Performed</h4>
+                                <div className="grid gap-3">
+                                    <div className={`p-3 rounded-lg flex items-center gap-3 ${jenkins_description_updated ? 'bg-green-500/10 border border-green-500/30' : 'bg-gray-700/30'}`}>
+                                        <i className={`fas ${jenkins_description_updated ? 'fa-check-circle text-green-400' : 'fa-circle text-gray-500'}`}></i>
+                                        <div>
+                                            <p className="font-medium">Jenkins Build Description</p>
+                                            <p className="text-sm text-gray-400">{jenkins_description_updated ? 'Updated with analysis summary' : 'Not updated'}</p>
+                                        </div>
+                                    </div>
+                                    <div className={`p-3 rounded-lg flex items-center gap-3 ${pr_comment_posted ? 'bg-green-500/10 border border-green-500/30' : 'bg-gray-700/30'}`}>
+                                        <i className={`fas ${pr_comment_posted ? 'fa-check-circle text-green-400' : 'fa-circle text-gray-500'}`}></i>
+                                        <div>
+                                            <p className="font-medium">PR/MR Comment</p>
+                                            <p className="text-sm text-gray-400">{pr_comment_posted ? 'Analysis posted to PR' : 'No PR URL provided or posting disabled'}</p>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                {libraries_fetched?.length > 0 && (
+                                    <div className="mt-4">
+                                        <h4 className="font-medium text-gray-300 mb-2">Libraries Analyzed</h4>
+                                        <div className="flex flex-wrap gap-2">
+                                            {libraries_fetched.map((lib, i) => (
+                                                <span key={i} className="px-2 py-1 bg-blue-500/20 text-blue-300 rounded text-sm">{lib}</span>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+                                
+                                {/* Copy Actions */}
+                                <div className="mt-6 pt-4 border-t border-gray-700">
+                                    <h4 className="font-medium text-gray-300 mb-3">Quick Actions</h4>
+                                    <div className="flex flex-wrap gap-2">
+                                        <Button variant="secondary" size="sm" onClick={() => navigator.clipboard.writeText(root_cause?.summary || '')}>
+                                            <i className="fas fa-copy"></i> Copy Root Cause
+                                        </Button>
+                                        <Button variant="secondary" size="sm" onClick={() => navigator.clipboard.writeText(JSON.stringify(result, null, 2))}>
+                                            <i className="fas fa-code"></i> Copy JSON
+                                        </Button>
+                                        {build_info?.url && (
+                                            <Button variant="secondary" size="sm" onClick={() => window.open(build_info.url, '_blank')}>
+                                                <i className="fab fa-jenkins"></i> View Build
+                                            </Button>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </Card>
+            );
+        }
+
+        // =====================================================================
+        // History Panel
+        // =====================================================================
+        
+        function HistoryPanel({ history, onSelect, onClear }) {
+            if (!history || history.length === 0) {
+                return (
+                    <Card className="p-4">
+                        <h3 className="text-lg font-semibold mb-3 flex items-center gap-2">
+                            <i className="fas fa-history text-gray-400"></i> Recent Analyses
+                        </h3>
+                        <p className="text-gray-500 text-sm">No analyses yet. Run your first analysis above.</p>
+                    </Card>
+                );
+            }
+            
+            return (
+                <Card className="p-4">
+                    <div className="flex items-center justify-between mb-3">
+                        <h3 className="text-lg font-semibold flex items-center gap-2">
+                            <i className="fas fa-history text-gray-400"></i> Recent ({history.length})
+                        </h3>
+                        <button onClick={onClear} className="text-xs text-gray-500 hover:text-red-400 transition-colors">
+                            <i className="fas fa-trash mr-1"></i> Clear
+                        </button>
+                    </div>
+                    <div className="space-y-2 max-h-80 overflow-y-auto scrollbar-thin">
+                        {history.map((item, i) => (
+                            <div key={i} onClick={() => onSelect(item)}
+                                className="p-3 rounded-lg bg-gray-700/50 hover:bg-gray-700 cursor-pointer transition-colors">
+                                <div className="flex items-center justify-between mb-1">
+                                    <span className="font-medium truncate text-sm max-w-[150px]">{item.build_info?.job}</span>
+                                    <span className="text-xs text-gray-500">#{item.build_info?.build_number}</span>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <span className="text-xs px-2 py-0.5 rounded bg-gray-600 truncate max-w-[100px]">
+                                        {item.failure_analysis?.category?.replace(/_/g, ' ')}
+                                    </span>
+                                    <ModeBadge mode={item.analysis_mode || 'scripted'} />
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </Card>
+            );
+        }
+
+        // =====================================================================
+        // Main App
+        // =====================================================================
+        
+        function App() {
+            const [health, setHealth] = useState({ agent: 'loading', ai: 'loading', jenkins: 'loading', github: 'unknown', scm: 'unknown' });
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState(null);
+            const [result, setResult] = useState(null);
+            const [history, setHistory] = useState(() => {
+                try { return JSON.parse(localStorage.getItem('analysisHistory') || '[]'); }
+                catch { return []; }
+            });
+            
+            useEffect(() => {
+                checkHealth();
+                const interval = setInterval(checkHealth, 30000);
+                return () => clearInterval(interval);
+            }, []);
+            
+            useEffect(() => {
+                localStorage.setItem('analysisHistory', JSON.stringify(history.slice(0, 20)));
+            }, [history]);
+            
+            const checkHealth = async () => {
+                try {
+                    const res = await fetch(`${API_BASE}/health`);
+                    if (res.ok) {
+                        const data = await res.json();
+                        setHealth({
+                            agent: 'healthy',
+                            ai: data.ai_connected ? 'healthy' : 'unhealthy',
+                            jenkins: data.jenkins_connected ? 'healthy' : 'unhealthy',
+                            github: data.github_connected ? 'healthy' : 'unknown',
+                            scm: data.scm_connected ? 'healthy' : 'unknown',
+                        });
+                    } else {
+                        setHealth({ agent: 'unhealthy', ai: 'unknown', jenkins: 'unknown', github: 'unknown', scm: 'unknown' });
+                    }
+                } catch (e) {
+                    setHealth({ agent: 'unhealthy', ai: 'unknown', jenkins: 'unknown', github: 'unknown', scm: 'unknown' });
+                }
+            };
+            
+            const handleAnalyze = async (payload) => {
+                setLoading(true);
+                setError(null);
+                
+                try {
+                    const res = await fetch(`${API_BASE}/analyze`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    
+                    if (!res.ok) {
+                        const errData = await res.json().catch(() => ({}));
+                        throw new Error(errData.detail || `Analysis failed: ${res.status}`);
+                    }
+                    
+                    const data = await res.json();
+                    setResult(data);
+                    setHistory(prev => [data, ...prev.filter(h => 
+                        !(h.build_info?.job === data.build_info?.job && h.build_info?.build_number === data.build_info?.build_number)
+                    ).slice(0, 19)]);
+                } catch (e) {
+                    setError(e.message);
+                } finally {
+                    setLoading(false);
+                }
+            };
+            
+            return (
+                <div className="min-h-screen">
+                    {/* Header */}
+                    <header className="bg-gray-800 border-b border-gray-700 sticky top-0 z-50">
+                        <div className="max-w-7xl mx-auto px-4 py-4">
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-3">
+                                    <div className="w-10 h-10 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg flex items-center justify-center">
+                                        <i className="fas fa-robot text-white text-xl"></i>
+                                    </div>
+                                    <div>
+                                        <h1 className="text-xl font-bold gradient-text">Jenkins Failure Analysis</h1>
+                                        <p className="text-xs text-gray-500">AI-Powered Build Debugging • Hybrid Architecture v1.4</p>
+                                    </div>
+                                </div>
+                                <div className="flex items-center gap-3">
+                                    <a href={`${API_BASE}/docs`} target="_blank" className="text-gray-400 hover:text-white transition-colors" title="API Docs">
+                                        <i className="fas fa-book"></i>
+                                    </a>
+                                    <a href="https://github.com" target="_blank" className="text-gray-400 hover:text-white transition-colors">
+                                        <i className="fab fa-github text-xl"></i>
+                                    </a>
+                                </div>
+                            </div>
+                        </div>
+                    </header>
+                    
+                    {/* Main Content */}
+                    <main className="max-w-7xl mx-auto px-4 py-6">
+                        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                            {/* Left Sidebar */}
+                            <div className="space-y-6">
+                                <HealthPanel health={health} />
+                                <AnalysisForm onSubmit={handleAnalyze} loading={loading} />
+                                <HistoryPanel history={history} onSelect={setResult} onClear={() => setHistory([])} />
+                            </div>
+                            
+                            {/* Main Content Area */}
+                            <div className="lg:col-span-2 space-y-6">
+                                {/* Error */}
+                                {error && (
+                                    <Card className="p-4 border-red-500/50 bg-red-500/10 fade-in">
+                                        <div className="flex items-start gap-3">
+                                            <i className="fas fa-exclamation-circle text-red-400 mt-1"></i>
+                                            <div className="flex-1">
+                                                <h4 className="font-medium text-red-300">Analysis Failed</h4>
+                                                <p className="text-sm text-gray-300 mt-1">{error}</p>
+                                            </div>
+                                            <button onClick={() => setError(null)} className="text-gray-500 hover:text-gray-300">
+                                                <i className="fas fa-times"></i>
+                                            </button>
+                                        </div>
+                                    </Card>
+                                )}
+                                
+                                {/* Loading */}
+                                {loading && (
+                                    <Card className="p-8 fade-in">
+                                        <div className="text-center">
+                                            <div className="w-16 h-16 mx-auto mb-4 relative">
+                                                <i className="fas fa-cog text-4xl text-indigo-500 spin-slow"></i>
+                                            </div>
+                                            <h3 className="text-xl font-semibold mb-2">Analyzing Build...</h3>
+                                            <p className="text-gray-400 text-sm">
+                                                Processing logs and running AI analysis...
+                                            </p>
+                                        </div>
+                                    </Card>
+                                )}
+                                
+                                {/* Results */}
+                                {!loading && result && <AnalysisResult result={result} />}
+                                
+                                {/* Empty State */}
+                                {!loading && !result && !error && (
+                                    <Card className="p-12">
+                                        <div className="text-center">
+                                            <i className="fas fa-search text-6xl text-gray-600 mb-4"></i>
+                                            <h3 className="text-xl font-semibold text-gray-400 mb-2">Ready to Analyze</h3>
+                                            <p className="text-gray-500 max-w-md mx-auto mb-6">
+                                                Enter a Jenkins job name and build number to start analyzing failures.
+                                            </p>
+                                            <div className="flex justify-center gap-4 text-sm">
+                                                <div className="flex items-center gap-2 text-gray-500">
+                                                    <span className="w-2 h-2 bg-gray-500 rounded-full"></span>
+                                                    <span>⚡ Fast: Simple errors</span>
+                                                </div>
+                                                <div className="flex items-center gap-2 text-purple-400">
+                                                    <span className="w-2 h-2 bg-purple-500 rounded-full"></span>
+                                                    <span>🔍 Deep: Library issues</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </Card>
+                                )}
+                            </div>
+                        </div>
+                    </main>
+                    
+                    {/* Footer */}
+                    <footer className="border-t border-gray-800 mt-12 py-6">
+                        <div className="max-w-7xl mx-auto px-4 text-center text-sm text-gray-500">
+                            <p>Jenkins Failure Analysis Agent v1.4.0 • Hybrid Architecture (Scripted + Agentic MCP)</p>
+                            <p className="mt-1 text-xs">31 MCP Tools • 17 Failure Categories • 3-Tier Classification</p>
+                        </div>
+                    </footer>
+                </div>
+            );
+        }
+        
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>

@@ -1,0 +1,154 @@
+version: '3.8'
+
+# Jenkins Failure Analysis Agent - Pre-built Images + External Ollama
+# 
+# Use this when:
+#   - Ollama is already running on your host machine
+#   - You want to use pre-built images (no building required)
+#
+# Prerequisites:
+#   1. Install Ollama: https://ollama.ai/download
+#   2. Start Ollama: ollama serve
+#   3. Pull a model: ollama pull llama3:8b
+#
+# Usage:
+#   docker-compose -f docker-compose.prebuilt-external.yml up -d
+
+x-agent-common: &agent-common
+  image: ${AGENT_IMAGE:-ghcr.io/your-org/jenkins-failure-agent:latest}
+
+services:
+  # =============================================================================
+  # Jenkins Failure Analysis Agent (API Server)
+  # =============================================================================
+  agent:
+    <<: *agent-common
+    container_name: jenkins-failure-agent
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - agent_data:/app/data
+      - agent_reports:/app/reports
+    environment:
+      # AI Configuration - connects to Ollama on host
+      - AI_BASE_URL=${AI_BASE_URL:-http://host.docker.internal:11434/v1}
+      - AI_MODEL=${AI_MODEL:-llama3:8b}
+      - AI_API_KEY=${AI_API_KEY:-ollama}
+      - AI_TIMEOUT=${AI_TIMEOUT:-120}
+      
+      # Jenkins Configuration
+      - JENKINS_URL=${JENKINS_URL:-http://host.docker.internal:8080}
+      - JENKINS_USERNAME=${JENKINS_USERNAME:-admin}
+      - JENKINS_API_TOKEN=${JENKINS_API_TOKEN:-}
+      
+      # GitHub Configuration
+      - GITHUB_BASE_URL=${GITHUB_BASE_URL:-https://api.github.com}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITHUB_ENABLED=${GITHUB_ENABLED:-false}
+      
+      # SCM Configuration (PR comments)
+      - SCM_PROVIDER=${SCM_PROVIDER:-github}
+      - SCM_API_URL=${SCM_API_URL:-https://api.github.com}
+      - SCM_TOKEN=${SCM_TOKEN:-}
+      - SCM_ENABLED=${SCM_ENABLED:-false}
+      - SCM_AUTO_COMMENT=${SCM_AUTO_COMMENT:-true}
+      - SCM_SET_COMMIT_STATUS=${SCM_SET_COMMIT_STATUS:-true}
+      
+      # Reporter settings
+      - UPDATE_JENKINS_DESCRIPTION=${UPDATE_JENKINS_DESCRIPTION:-true}
+      - POST_TO_PR=${POST_TO_PR:-true}
+      
+      # Server settings
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8080
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    command: ["python", "agent.py", "serve", "--host", "0.0.0.0", "--port", "8080"]
+
+  # =============================================================================
+  # Web UI - Dashboard for Analysis
+  # =============================================================================
+  ui:
+    image: nginx:alpine
+    container_name: jenkins-failure-ui
+    ports:
+      - "3000:80"
+    volumes:
+      - ./ui/index.html:/usr/share/nginx/html/index.html:ro
+      - ./ui/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - agent
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:80 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # =============================================================================
+  # Agent CLI - For one-off analysis commands
+  # =============================================================================
+  agent-cli:
+    <<: *agent-common
+    container_name: jenkins-failure-agent-cli
+    profiles:
+      - cli
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - agent_reports:/app/reports
+    environment:
+      - AI_BASE_URL=${AI_BASE_URL:-http://host.docker.internal:11434/v1}
+      - AI_MODEL=${AI_MODEL:-llama3:8b}
+      - AI_API_KEY=${AI_API_KEY:-ollama}
+      - JENKINS_URL=${JENKINS_URL:-http://host.docker.internal:8080}
+      - JENKINS_USERNAME=${JENKINS_USERNAME:-admin}
+      - JENKINS_API_TOKEN=${JENKINS_API_TOKEN:-}
+      - GITHUB_BASE_URL=${GITHUB_BASE_URL:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - SCM_PROVIDER=${SCM_PROVIDER:-github}
+      - SCM_TOKEN=${SCM_TOKEN:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    entrypoint: ["python", "agent.py"]
+
+  # =============================================================================
+  # Jenkins (Optional) - For local testing
+  # =============================================================================
+  jenkins:
+    image: jenkins/jenkins:lts
+    container_name: jenkins
+    profiles:
+      - with-jenkins
+    ports:
+      - "8081:8080"
+      - "50000:50000"
+    volumes:
+      - jenkins_home:/var/jenkins_home
+    environment:
+      - JAVA_OPTS=-Djenkins.install.runSetupWizard=false
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/login"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  agent_data:
+    name: jenkins-agent-data
+  agent_reports:
+    name: jenkins-agent-reports
+  jenkins_home:
+    name: jenkins-agent-jenkins
+
+networks:
+  default:
+    name: jenkins-failure-agent-network

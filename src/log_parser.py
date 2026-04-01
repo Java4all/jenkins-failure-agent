@@ -1,0 +1,601 @@
+"""
+Log parser for extracting errors, stack traces, and patterns from Jenkins logs.
+"""
+
+import re
+from dataclasses import dataclass, field
+from typing import List, Dict, Any, Optional, Tuple
+from enum import Enum
+
+
+class FailureCategory(Enum):
+    COMPILATION_ERROR = "compilation_error"
+    TEST_FAILURE = "test_failure"
+    INFRASTRUCTURE = "infrastructure"
+    DEPENDENCY = "dependency"
+    CONFIGURATION = "configuration"
+    TIMEOUT = "timeout"
+    NETWORK = "network"
+    PERMISSION = "permission"
+    RESOURCE = "resource"
+    # Groovy/Pipeline specific categories
+    GROOVY_LIBRARY = "groovy_library"
+    GROOVY_CPS = "groovy_cps"
+    GROOVY_SANDBOX = "groovy_sandbox"
+    GROOVY_SERIALIZATION = "groovy_serialization"
+    CREDENTIAL_ERROR = "credential_error"
+    AGENT_ERROR = "agent_error"
+    PLUGIN_ERROR = "plugin_error"
+    UNKNOWN = "unknown"
+
+
+@dataclass
+class ErrorMatch:
+    """Represents a matched error in the log."""
+    line_number: int
+    line: str
+    pattern_matched: str
+    category: FailureCategory
+    context_before: List[str] = field(default_factory=list)
+    context_after: List[str] = field(default_factory=list)
+    severity: str = "ERROR"
+
+
+@dataclass
+class StackTrace:
+    """Represents a parsed stack trace."""
+    exception_type: str
+    message: str
+    frames: List[Dict[str, str]] = field(default_factory=list)
+    caused_by: Optional["StackTrace"] = None
+    raw_text: str = ""
+
+
+@dataclass
+class ParsedLog:
+    """Represents a fully parsed log with extracted information."""
+    total_lines: int
+    errors: List[ErrorMatch] = field(default_factory=list)
+    stack_traces: List[StackTrace] = field(default_factory=list)
+    failed_stage: Optional[str] = None
+    primary_category: FailureCategory = FailureCategory.UNKNOWN
+    timestamps: List[Tuple[int, str]] = field(default_factory=list)
+    summary: str = ""
+
+
+class LogParser:
+    """Parser for Jenkins build logs."""
+    
+    # Predefined error patterns by category
+    DEFAULT_PATTERNS = {
+        FailureCategory.COMPILATION_ERROR: [
+            r"(?i)cannot find symbol",
+            r"(?i)compilation failed",
+            r"(?i)build failed",
+            r"(?i)syntax error",
+            r"SyntaxError:",
+            r"ModuleNotFoundError:",
+            r"ImportError:",
+            r"(?i)undefined reference",
+            r"(?i)unresolved external symbol",
+            r"error: .*\.java:\d+:",
+            r"error TS\d+:",  # TypeScript
+            r"error\[E\d+\]:",  # Rust
+        ],
+        FailureCategory.TEST_FAILURE: [
+            r"(?i)test.*failed",
+            r"(?i)tests? failed",
+            r"AssertionError",
+            r"(?i)assertion failed",
+            r"Expected .* but got",
+            r"expected:<.*> but was:<.*>",
+            r"FAILED\s+\[",
+            r"✗|✘|❌",  # Failure markers
+            r"pytest.*FAILED",
+            r"FAIL:",
+        ],
+        FailureCategory.INFRASTRUCTURE: [
+            r"(?i)out of memory",
+            r"(?i)cannot allocate memory",
+            r"(?i)no space left on device",
+            r"(?i)disk quota exceeded",
+            r"OOMKilled",
+            r"(?i)killed by signal",
+            r"(?i)segmentation fault",
+            r"SIGSEGV",
+            r"(?i)core dumped",
+        ],
+        FailureCategory.DEPENDENCY: [
+            r"(?i)could not resolve dependencies",
+            r"(?i)dependency .* not found",
+            r"(?i)package .* not found",
+            r"(?i)module .* not found",
+            r"npm ERR!",
+            r"yarn error",
+            r"pip.*error",
+            r"(?i)version conflict",
+            r"(?i)incompatible version",
+            r"ERESOLVE",
+            r"(?i)failed to download",
+        ],
+        FailureCategory.CONFIGURATION: [
+            r"(?i)missing required",
+            r"(?i)configuration error",
+            r"(?i)invalid.*config",
+            r"(?i)environment variable.*not set",
+            r"(?i)missing environment",
+            r"(?i)file not found",
+            r"FileNotFoundException",
+            r"(?i)no such file or directory",
+        ],
+        FailureCategory.TIMEOUT: [
+            r"(?i)timed? ?out",
+            r"(?i)timeout exceeded",
+            r"(?i)deadline exceeded",
+            r"(?i)operation timed out",
+            r"TimeoutError",
+            r"TimeoutException",
+        ],
+        FailureCategory.NETWORK: [
+            r"(?i)connection refused",
+            r"(?i)connection reset",
+            r"(?i)network unreachable",
+            r"(?i)host not found",
+            r"(?i)dns lookup failed",
+            r"ECONNREFUSED",
+            r"ECONNRESET",
+            r"ETIMEDOUT",
+            r"(?i)ssl.*error",
+            r"(?i)certificate.*error",
+        ],
+        FailureCategory.PERMISSION: [
+            r"(?i)permission denied",
+            r"(?i)access denied",
+            r"(?i)unauthorized",
+            r"(?i)forbidden",
+            r"EACCES",
+            r"EPERM",
+            r"401 Unauthorized",
+            r"403 Forbidden",
+        ],
+        FailureCategory.RESOURCE: [
+            r"(?i)resource .* not found",
+            r"(?i)service unavailable",
+            r"503 Service Unavailable",
+            r"502 Bad Gateway",
+            r"504 Gateway Timeout",
+            r"(?i)database.*error",
+            r"(?i)connection pool exhausted",
+        ],
+        # Groovy/Pipeline specific patterns
+        FailureCategory.GROOVY_LIBRARY: [
+            r"(?i)Unable to find source for class",
+            r"(?i)Could not find shared library",
+            r"(?i)Library.*not found",
+            r"(?i)@Library.*does not exist",
+            r"(?i)Branch .* not found",
+            r"(?i)Unable to checkout revision",
+            r"(?i)vars/\w+\.groovy.*not found",
+        ],
+        FailureCategory.GROOVY_CPS: [
+            r"(?i)CpsCallableInvocation",
+            r"(?i)CPS-transformed.*cannot be invoked",
+            r"(?i)expected to call.*wound up catching",
+            r"(?i)Continuation passing style",
+            r"(?i)cannot be CPS transformed",
+            r"(?i)CpsScript\.invokeMethod",
+        ],
+        FailureCategory.GROOVY_SANDBOX: [
+            r"(?i)Scripts not permitted to use",
+            r"(?i)RejectedAccessException",
+            r"(?i)script-security sandbox",
+            r"(?i)Administrator approval is required",
+            r"(?i)Waiting for approval",
+        ],
+        FailureCategory.GROOVY_SERIALIZATION: [
+            r"(?i)java\.io\.NotSerializableException",
+            r"(?i)Unable to serialize",
+            r"(?i)cannot be serialized",
+            r"(?i)Expected to find a CPS-transformed",
+        ],
+        FailureCategory.CREDENTIAL_ERROR: [
+            r"(?i)CredentialsNotFoundException",
+            r"(?i)Could not find credentials",
+            r"(?i)No credentials with id",
+            r"(?i)Unable to find credentials",
+            r"(?i)Credential.*not found",
+            r"(?i)withCredentials.*failed",
+        ],
+        FailureCategory.AGENT_ERROR: [
+            r"(?i)There are no nodes with the label",
+            r"(?i)Still waiting for",
+            r"(?i)Agent.*is offline",
+            r"(?i)Node.*offline",
+            r"(?i)Waiting for next available executor",
+        ],
+        FailureCategory.PLUGIN_ERROR: [
+            r"(?i)Plugin.*not found",
+            r"(?i)Required plugin.*not installed",
+            r"(?i)No such DSL method",
+            r"(?i)java\.lang\.NoClassDefFoundError.*plugin",
+            r"(?i)Incompatible plugin version",
+        ],
+    }
+    
+    # Stack trace patterns for different languages
+    STACK_TRACE_PATTERNS = {
+        "java": re.compile(
+            r"(?P<exception>[\w.]+(?:Exception|Error|Throwable)):\s*(?P<message>.*?)\n"
+            r"(?P<frames>(?:\s+at\s+.*\n)+)",
+            re.MULTILINE
+        ),
+        "groovy": re.compile(
+            r"(?P<exception>groovy\.lang\.\w+(?:Exception|Error)|"
+            r"org\.jenkinsci\.plugins\.scriptsecurity\.\w+|"
+            r"org\.codehaus\.groovy\.\w+(?:Exception|Error)):\s*(?P<message>.*?)\n"
+            r"(?P<frames>(?:\s+at\s+.*\n)+)",
+            re.MULTILINE
+        ),
+        "groovy_cps": re.compile(
+            r"(?P<exception>[\w.]+(?:Exception|Error)).*?(?:CPS|workflow).*?:\s*(?P<message>.*?)\n"
+            r"(?P<frames>(?:\s+at\s+.*\n)+)",
+            re.MULTILINE | re.IGNORECASE
+        ),
+        "python": re.compile(
+            r"Traceback \(most recent call last\):\n"
+            r"(?P<frames>(?:\s+File .*\n\s+.*\n)+)"
+            r"(?P<exception>\w+(?:Error|Exception)):\s*(?P<message>.*)",
+            re.MULTILINE
+        ),
+        "javascript": re.compile(
+            r"(?P<exception>\w+(?:Error|Exception)):\s*(?P<message>.*?)\n"
+            r"(?P<frames>(?:\s+at\s+.*\n)+)",
+            re.MULTILINE
+        ),
+        "go": re.compile(
+            r"panic:\s*(?P<message>.*?)\n\n"
+            r"goroutine.*:\n(?P<frames>(?:.*\n)+?)(?:\n\n|$)",
+            re.MULTILINE
+        ),
+    }
+    
+    # Stage detection patterns
+    STAGE_PATTERNS = [
+        r"\[Pipeline\]\s*{\s*\((?P<stage>[^)]+)\)",
+        r"Stage\s*['\"](?P<stage>[^'\"]+)['\"].*(?:FAILED|ERROR)",
+        r">>>.*stage:\s*(?P<stage>\w+)",
+        r"\[(?P<stage>[A-Z][a-zA-Z\s]+)\]\s*(?:FAILED|ERROR)",
+    ]
+    
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        self.config = config or {}
+        self.context_lines = self.config.get("error_context_lines", 10)
+        self.max_log_size = self.config.get("max_log_size", 10 * 1024 * 1024)
+        
+        # Compile custom patterns from config
+        self.custom_patterns = {}
+        for category_name, category_config in self.config.get("categories", {}).items():
+            try:
+                category = FailureCategory(category_name)
+                patterns = category_config.get("patterns", [])
+                self.custom_patterns[category] = [re.compile(p) for p in patterns]
+            except ValueError:
+                pass
+    
+    def parse(self, log_content: str) -> ParsedLog:
+        """Parse a Jenkins log and extract errors, stack traces, and patterns."""
+        
+        # Truncate if too large
+        if len(log_content) > self.max_log_size:
+            log_content = log_content[:self.max_log_size]
+        
+        lines = log_content.split("\n")
+        result = ParsedLog(total_lines=len(lines))
+        
+        # Extract errors
+        result.errors = self._extract_errors(lines)
+        
+        # Extract stack traces
+        result.stack_traces = self._extract_stack_traces(log_content)
+        
+        # Detect failed stage
+        result.failed_stage = self._detect_failed_stage(log_content)
+        
+        # Extract timestamps
+        result.timestamps = self._extract_timestamps(lines)
+        
+        # Determine primary category
+        result.primary_category = self._determine_primary_category(result.errors)
+        
+        # Generate summary
+        result.summary = self._generate_summary(result)
+        
+        return result
+    
+    def _extract_errors(self, lines: List[str]) -> List[ErrorMatch]:
+        """Extract error lines with context."""
+        errors = []
+        seen_errors = set()  # Deduplication
+        
+        for i, line in enumerate(lines):
+            # Skip if we should ignore this line
+            if self._should_ignore(line):
+                continue
+            
+            # Check against all patterns
+            for category, patterns in self.DEFAULT_PATTERNS.items():
+                for pattern in patterns:
+                    if re.search(pattern, line):
+                        # Deduplicate similar errors
+                        error_key = (category, line.strip()[:100])
+                        if error_key in seen_errors:
+                            continue
+                        seen_errors.add(error_key)
+                        
+                        # Get context
+                        start = max(0, i - self.context_lines)
+                        end = min(len(lines), i + self.context_lines + 1)
+                        
+                        error = ErrorMatch(
+                            line_number=i + 1,
+                            line=line,
+                            pattern_matched=pattern,
+                            category=category,
+                            context_before=lines[start:i],
+                            context_after=lines[i + 1:end],
+                            severity=self._determine_severity(line),
+                        )
+                        errors.append(error)
+                        break
+            
+            # Check custom patterns
+            for category, patterns in self.custom_patterns.items():
+                for pattern in patterns:
+                    if pattern.search(line):
+                        error_key = (category, line.strip()[:100])
+                        if error_key not in seen_errors:
+                            seen_errors.add(error_key)
+                            start = max(0, i - self.context_lines)
+                            end = min(len(lines), i + self.context_lines + 1)
+                            
+                            error = ErrorMatch(
+                                line_number=i + 1,
+                                line=line,
+                                pattern_matched=pattern.pattern,
+                                category=category,
+                                context_before=lines[start:i],
+                                context_after=lines[i + 1:end],
+                                severity=self._determine_severity(line),
+                            )
+                            errors.append(error)
+        
+        return errors
+    
+    def _extract_stack_traces(self, log_content: str) -> List[StackTrace]:
+        """Extract and parse stack traces from the log."""
+        stack_traces = []
+        
+        for lang, pattern in self.STACK_TRACE_PATTERNS.items():
+            for match in pattern.finditer(log_content):
+                try:
+                    frames = self._parse_frames(match.group("frames"), lang)
+                    
+                    exception_type = match.group("exception") if "exception" in match.groupdict() else "Unknown"
+                    message = match.group("message") if "message" in match.groupdict() else ""
+                    
+                    stack_trace = StackTrace(
+                        exception_type=exception_type,
+                        message=message.strip(),
+                        frames=frames,
+                        raw_text=match.group(0),
+                    )
+                    stack_traces.append(stack_trace)
+                except Exception:
+                    continue
+        
+        return stack_traces
+    
+    def _parse_frames(self, frames_text: str, language: str) -> List[Dict[str, str]]:
+        """Parse stack trace frames based on language."""
+        frames = []
+        
+        if language == "java":
+            frame_pattern = re.compile(r"\s+at\s+(?P<method>[\w.$<>]+)\((?P<location>[^)]+)\)")
+            for match in frame_pattern.finditer(frames_text):
+                frames.append({
+                    "method": match.group("method"),
+                    "location": match.group("location"),
+                })
+        
+        elif language == "python":
+            frame_pattern = re.compile(
+                r'\s+File "(?P<file>[^"]+)", line (?P<line>\d+), in (?P<method>\w+)'
+            )
+            for match in frame_pattern.finditer(frames_text):
+                frames.append({
+                    "file": match.group("file"),
+                    "line": match.group("line"),
+                    "method": match.group("method"),
+                })
+        
+        elif language == "javascript":
+            frame_pattern = re.compile(r"\s+at\s+(?:(?P<method>[\w.]+)\s+)?\(?(?P<location>[^)\s]+)\)?")
+            for match in frame_pattern.finditer(frames_text):
+                frames.append({
+                    "method": match.group("method") or "anonymous",
+                    "location": match.group("location"),
+                })
+        
+        return frames
+    
+    def _detect_failed_stage(self, log_content: str) -> Optional[str]:
+        """Detect which pipeline stage failed."""
+        
+        # Look for stage markers near failures
+        for pattern in self.STAGE_PATTERNS:
+            matches = list(re.finditer(pattern, log_content))
+            if matches:
+                # Return the last matched stage (most likely the failed one)
+                return matches[-1].group("stage")
+        
+        # Try to find stage from Pipeline syntax
+        pipeline_stages = re.findall(r"\[Pipeline\]\s*{\s*\(([^)]+)\)", log_content)
+        if pipeline_stages:
+            # Find stages that appear after error markers
+            error_pos = log_content.find("ERROR")
+            if error_pos == -1:
+                error_pos = log_content.find("FAILURE")
+            
+            if error_pos > 0:
+                # Find the most recent stage before the error
+                last_stage = None
+                for match in re.finditer(r"\[Pipeline\]\s*{\s*\(([^)]+)\)", log_content[:error_pos]):
+                    last_stage = match.group(1)
+                return last_stage
+        
+        return None
+    
+    def _extract_timestamps(self, lines: List[str]) -> List[Tuple[int, str]]:
+        """Extract timestamp information from log lines."""
+        timestamps = []
+        timestamp_patterns = [
+            r"^\[(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})",
+            r"^(\d{2}:\d{2}:\d{2})",
+            r"^\[(\d+:\d{2}:\d{2})\]",
+        ]
+        
+        for i, line in enumerate(lines):
+            for pattern in timestamp_patterns:
+                match = re.match(pattern, line)
+                if match:
+                    timestamps.append((i, match.group(1)))
+                    break
+        
+        return timestamps
+    
+    def _determine_primary_category(self, errors: List[ErrorMatch]) -> FailureCategory:
+        """Determine the primary failure category from errors."""
+        if not errors:
+            return FailureCategory.UNKNOWN
+        
+        # Count categories
+        category_counts: Dict[FailureCategory, int] = {}
+        for error in errors:
+            category_counts[error.category] = category_counts.get(error.category, 0) + 1
+        
+        # Priority order for tie-breaking
+        priority = [
+            FailureCategory.INFRASTRUCTURE,
+            # Groovy/Pipeline errors are high priority as they block everything
+            FailureCategory.GROOVY_LIBRARY,
+            FailureCategory.GROOVY_CPS,
+            FailureCategory.GROOVY_SANDBOX,
+            FailureCategory.GROOVY_SERIALIZATION,
+            FailureCategory.CREDENTIAL_ERROR,
+            FailureCategory.AGENT_ERROR,
+            FailureCategory.PLUGIN_ERROR,
+            FailureCategory.COMPILATION_ERROR,
+            FailureCategory.TEST_FAILURE,
+            FailureCategory.DEPENDENCY,
+            FailureCategory.CONFIGURATION,
+            FailureCategory.NETWORK,
+            FailureCategory.PERMISSION,
+            FailureCategory.TIMEOUT,
+            FailureCategory.RESOURCE,
+        ]
+        
+        # Find most common category, using priority for ties
+        max_count = max(category_counts.values())
+        for cat in priority:
+            if category_counts.get(cat, 0) == max_count:
+                return cat
+        
+        return FailureCategory.UNKNOWN
+    
+    def _determine_severity(self, line: str) -> str:
+        """Determine the severity of an error line."""
+        line_lower = line.lower()
+        
+        if any(w in line_lower for w in ["fatal", "critical", "panic"]):
+            return "CRITICAL"
+        elif any(w in line_lower for w in ["error", "exception", "failed"]):
+            return "ERROR"
+        elif any(w in line_lower for w in ["warn", "warning"]):
+            return "WARNING"
+        
+        return "ERROR"
+    
+    def _should_ignore(self, line: str) -> bool:
+        """Check if a line should be ignored."""
+        ignore_patterns = [
+            r"^\s*$",  # Empty lines
+            r"^Downloading:",
+            r"^Downloaded:",
+            r"^Progress:",
+            r"^\[INFO\]\s*Download",
+            r"^\+\+\+",  # Git diff markers
+            r"^---",
+        ]
+        
+        for pattern in ignore_patterns:
+            if re.match(pattern, line):
+                return True
+        
+        # Check custom ignore patterns
+        for pattern in self.config.get("ignore_patterns", []):
+            if re.search(pattern, line):
+                return True
+        
+        return False
+    
+    def _generate_summary(self, result: ParsedLog) -> str:
+        """Generate a human-readable summary of the parsed log."""
+        parts = []
+        
+        parts.append(f"Analyzed {result.total_lines} lines")
+        parts.append(f"Found {len(result.errors)} errors")
+        
+        if result.stack_traces:
+            parts.append(f"Detected {len(result.stack_traces)} stack traces")
+        
+        if result.failed_stage:
+            parts.append(f"Failed in stage: {result.failed_stage}")
+        
+        parts.append(f"Primary category: {result.primary_category.value}")
+        
+        return ". ".join(parts) + "."
+    
+    def get_error_snippet(
+        self, 
+        result: ParsedLog, 
+        max_errors: int = 5,
+        include_context: bool = True
+    ) -> str:
+        """Generate a concise error snippet for AI analysis."""
+        snippets = []
+        
+        for error in result.errors[:max_errors]:
+            snippet_parts = []
+            
+            if include_context and error.context_before:
+                context = "\n".join(error.context_before[-3:])
+                snippet_parts.append(f"Context:\n{context}")
+            
+            snippet_parts.append(f">>> Error (line {error.line_number}, {error.category.value}):")
+            snippet_parts.append(error.line)
+            
+            if include_context and error.context_after:
+                context = "\n".join(error.context_after[:3])
+                snippet_parts.append(f"After:\n{context}")
+            
+            snippets.append("\n".join(snippet_parts))
+        
+        # Add stack traces
+        for trace in result.stack_traces[:3]:
+            trace_snippet = f"\n>>> Stack Trace ({trace.exception_type}):\n"
+            trace_snippet += f"Message: {trace.message}\n"
+            for frame in trace.frames[:5]:
+                trace_snippet += f"  - {frame}\n"
+            snippets.append(trace_snippet)
+        
+        return "\n\n---\n\n".join(snippets)
