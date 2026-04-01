@@ -316,7 +316,7 @@ def analyze(
         
         console.print("\n[bold]Generated Reports:[/bold]")
         for fmt, path in generated.items():
-            console.print(f"  • {fmt}: [cyan]{path}[/cyan]")
+            console.print(f"  * {fmt}: [cyan]{path}[/cyan]")
     
     # Output JSON to stdout if requested
     if not formats:
@@ -399,18 +399,18 @@ def test_connection(ctx):
     console.print("Testing Jenkins connection...", end=" ")
     jenkins = JenkinsClient(config.jenkins)
     if jenkins.test_connection():
-        console.print("[green]✓ Connected[/green]")
+        console.print("[green][OK] Connected[/green]")
     else:
-        console.print("[red]✗ Failed[/red]")
+        console.print("[red][FAIL] Failed[/red]")
     
     # Test AI
     console.print("Testing AI model connection...", end=" ")
     ai = AIAnalyzer(config.ai)
     if ai.test_connection():
-        console.print("[green]✓ Connected[/green]")
+        console.print("[green][OK] Connected[/green]")
         console.print(f"  Model: [cyan]{config.ai.model}[/cyan]")
     else:
-        console.print("[red]✗ Failed[/red]")
+        console.print("[red][FAIL] Failed[/red]")
         console.print(f"  URL: {config.ai.base_url}")
 
 

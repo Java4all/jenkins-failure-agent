@@ -167,7 +167,7 @@ class ToolExecutor:
         
         lines = ["## Tool Calls Made\n"]
         for i, result in enumerate(self.call_history, 1):
-            status = "✓" if result.success else "✗"
+            status = "[OK]" if result.success else "[FAIL]"
             lines.append(f"{i}. {status} `{result.name}`")
             if result.error:
                 lines.append(f"   Error: {result.error}")

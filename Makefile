@@ -59,14 +59,14 @@ help:
 setup:
 	@if [ ! -f .env ]; then \
 		cp .env.example .env; \
-		echo "✓ Created .env from template"; \
+		echo "[OK] Created .env from template"; \
 	fi
 	@echo ""
 	@echo "Starting Ollama and pulling AI model..."
 	docker-compose up -d ollama
 	docker-compose run --rm ollama-pull
 	@echo ""
-	@echo "✓ Setup complete!"
+	@echo "[OK] Setup complete!"
 	@echo ""
 	@echo "Next steps:"
 	@echo "  1. Edit .env with your Jenkins credentials"
@@ -76,7 +76,7 @@ setup:
 setup-deep:
 	@if [ ! -f .env ]; then \
 		cp .env.example .env; \
-		echo "✓ Created .env from template"; \
+		echo "[OK] Created .env from template"; \
 	fi
 	@echo ""
 	@echo "Setting up for deep investigation mode..."
@@ -86,7 +86,7 @@ setup-deep:
 	@echo "Pulling llama3:70b (this will take a while, ~40GB)..."
 	docker-compose exec ollama ollama pull llama3:70b
 	@echo ""
-	@echo "✓ Setup complete!"
+	@echo "[OK] Setup complete!"
 	@echo ""
 	@echo "To use the 70B model, update .env:"
 	@echo "  AI_MODEL=llama3:70b"
@@ -96,18 +96,18 @@ setup-deep:
 setup-external-ollama:
 	@if [ ! -f .env ]; then \
 		cp .env.example .env; \
-		echo "✓ Created .env from template"; \
+		echo "[OK] Created .env from template"; \
 	fi
 	@echo ""
 	@echo "Checking Ollama on host machine..."
 	@curl -s http://localhost:11434/api/tags > /dev/null 2>&1 || \
-		(echo "✗ Ollama not running! Start it with: ollama serve" && exit 1)
-	@echo "✓ Ollama is running"
+		(echo "[FAIL] Ollama not running! Start it with: ollama serve" && exit 1)
+	@echo "[OK] Ollama is running"
 	@echo ""
 	@echo "Checking for llama3:8b model..."
 	@curl -s http://localhost:11434/api/tags | grep -q "llama3:8b" || \
 		(echo "Pulling llama3:8b model..." && ollama pull llama3:8b)
-	@echo "✓ Model ready"
+	@echo "[OK] Model ready"
 	@echo ""
 	@echo "Setup complete! Next steps:"
 	@echo "  1. Edit .env with your Jenkins credentials"
@@ -121,29 +121,29 @@ setup-external-ollama:
 start:
 	docker-compose up -d
 	@echo ""
-	@echo "✓ Services running:"
-	@echo "  • UI Dashboard: http://localhost:3000"
-	@echo "  • Agent API:    http://localhost:8080"
-	@echo "  • Ollama:       http://localhost:11434"
+	@echo "[OK] Services running:"
+	@echo "  * UI Dashboard: http://localhost:3000"
+	@echo "  * Agent API:    http://localhost:8080"
+	@echo "  * Ollama:       http://localhost:11434"
 	@echo ""
 	@echo "Use 'make logs' to follow logs"
 
 start-external-ollama:
 	@echo "Starting with external Ollama (on host machine)..."
 	@curl -s http://localhost:11434/api/tags > /dev/null 2>&1 || \
-		(echo "✗ Ollama not running! Start it with: ollama serve" && exit 1)
+		(echo "[FAIL] Ollama not running! Start it with: ollama serve" && exit 1)
 	docker-compose -f docker-compose.external-ollama.yml up -d
 	@echo ""
-	@echo "✓ Services running:"
-	@echo "  • UI Dashboard: http://localhost:3000"
-	@echo "  • Agent API:    http://localhost:8080"
-	@echo "  • Ollama:       http://localhost:11434 (host)"
+	@echo "[OK] Services running:"
+	@echo "  * UI Dashboard: http://localhost:3000"
+	@echo "  * Agent API:    http://localhost:8080"
+	@echo "  * Ollama:       http://localhost:11434 (host)"
 	@echo ""
 	@echo "Use 'make logs-external' to follow logs"
 
 start-remote-ai:
 	@if [ -z "$$AI_BASE_URL" ] && ! grep -q "^AI_BASE_URL=" .env 2>/dev/null; then \
-		echo "✗ AI_BASE_URL not set! Configure it in .env first."; \
+		echo "[FAIL] AI_BASE_URL not set! Configure it in .env first."; \
 		echo ""; \
 		echo "Example for OpenAI:"; \
 		echo "  AI_BASE_URL=https://api.openai.com/v1"; \
@@ -154,10 +154,10 @@ start-remote-ai:
 	@echo "Starting with remote AI API..."
 	docker-compose -f docker-compose.remote-ai.yml up -d
 	@echo ""
-	@echo "✓ Services running:"
-	@echo "  • UI Dashboard: http://localhost:3000"
-	@echo "  • Agent API:    http://localhost:8080"
-	@echo "  • AI:           Remote API"
+	@echo "[OK] Services running:"
+	@echo "  * UI Dashboard: http://localhost:3000"
+	@echo "  * Agent API:    http://localhost:8080"
+	@echo "  * AI:           Remote API"
 	@echo ""
 	@echo "Use 'make logs-remote' to follow logs"
 
@@ -171,25 +171,25 @@ start-prebuilt:
 	docker-compose -f docker-compose.prebuilt.yml pull agent 2>/dev/null || true
 	docker-compose -f docker-compose.prebuilt.yml up -d
 	@echo ""
-	@echo "✓ Services running (pre-built):"
-	@echo "  • UI Dashboard: http://localhost:3000"
-	@echo "  • Agent API:    http://localhost:8080"
-	@echo "  • Ollama:       http://localhost:11434"
+	@echo "[OK] Services running (pre-built):"
+	@echo "  * UI Dashboard: http://localhost:3000"
+	@echo "  * Agent API:    http://localhost:8080"
+	@echo "  * Ollama:       http://localhost:11434"
 	@echo ""
 	@echo "Use 'make logs-prebuilt' to follow logs"
 
 start-prebuilt-external:
 	@echo "Starting with pre-built images + external Ollama..."
 	@curl -s http://localhost:11434/api/tags > /dev/null 2>&1 || \
-		(echo "✗ Ollama not running! Start it with: ollama serve" && exit 1)
+		(echo "[FAIL] Ollama not running! Start it with: ollama serve" && exit 1)
 	@echo "Pulling latest agent image..."
 	docker-compose -f docker-compose.prebuilt-external.yml pull agent 2>/dev/null || true
 	docker-compose -f docker-compose.prebuilt-external.yml up -d
 	@echo ""
-	@echo "✓ Services running (pre-built):"
-	@echo "  • UI Dashboard: http://localhost:3000"
-	@echo "  • Agent API:    http://localhost:8080"
-	@echo "  • Ollama:       http://localhost:11434 (host)"
+	@echo "[OK] Services running (pre-built):"
+	@echo "  * UI Dashboard: http://localhost:3000"
+	@echo "  * Agent API:    http://localhost:8080"
+	@echo "  * Ollama:       http://localhost:11434 (host)"
 	@echo ""
 	@echo "Use 'make logs-prebuilt-external' to follow logs"
 
@@ -199,7 +199,7 @@ stop:
 	docker-compose -f docker-compose.remote-ai.yml down 2>/dev/null || true
 	docker-compose -f docker-compose.prebuilt.yml down 2>/dev/null || true
 	docker-compose -f docker-compose.prebuilt-external.yml down 2>/dev/null || true
-	@echo "✓ All services stopped"
+	@echo "[OK] All services stopped"
 
 # Open UI in browser
 ui:
@@ -344,7 +344,7 @@ pull-model-deep:
 	@echo "This model is ~40GB and will take time to download."
 	docker-compose exec ollama ollama pull llama3:70b
 	@echo ""
-	@echo "✓ Model ready! To use it, update .env:"
+	@echo "[OK] Model ready! To use it, update .env:"
 	@echo "  AI_MODEL=llama3:70b"
 	@echo ""
 	@echo "Then run: make restart"
@@ -379,13 +379,13 @@ health:
 	@echo "Checking services..."
 	@echo ""
 	@echo "UI (port 3000):"
-	@curl -s http://localhost:3000 > /dev/null && echo "  ✓ Running" || echo "  ✗ NOT RUNNING"
+	@curl -s http://localhost:3000 > /dev/null && echo "  [OK] Running" || echo "  [FAIL] NOT RUNNING"
 	@echo ""
 	@echo "Agent API (port 8080):"
-	@curl -s http://localhost:8080/health && echo "" || echo "  ✗ NOT RUNNING"
+	@curl -s http://localhost:8080/health && echo "" || echo "  [FAIL] NOT RUNNING"
 	@echo ""
 	@echo "Ollama (port 11434):"
-	@curl -s http://localhost:11434/api/tags | head -c 100 || echo "  ✗ NOT RUNNING"
+	@curl -s http://localhost:11434/api/tags | head -c 100 || echo "  [FAIL] NOT RUNNING"
 	@echo ""
 
 status:
@@ -418,16 +418,16 @@ docker-build:
 	docker build -t $(DOCKER_REPO):$(DOCKER_TAG) .
 	docker tag $(DOCKER_REPO):$(DOCKER_TAG) $(DOCKER_REPO):v1.4.0
 	@echo ""
-	@echo "✓ Built $(DOCKER_REPO):$(DOCKER_TAG)"
-	@echo "✓ Tagged $(DOCKER_REPO):v1.4.0"
+	@echo "[OK] Built $(DOCKER_REPO):$(DOCKER_TAG)"
+	@echo "[OK] Tagged $(DOCKER_REPO):v1.4.0"
 
 docker-push:
 	@echo "Pushing to Docker Hub..."
 	docker push $(DOCKER_REPO):$(DOCKER_TAG)
 	docker push $(DOCKER_REPO):v1.4.0
 	@echo ""
-	@echo "✓ Pushed $(DOCKER_REPO):$(DOCKER_TAG)"
-	@echo "✓ Pushed $(DOCKER_REPO):v1.4.0"
+	@echo "[OK] Pushed $(DOCKER_REPO):$(DOCKER_TAG)"
+	@echo "[OK] Pushed $(DOCKER_REPO):v1.4.0"
 	@echo ""
 	@echo "To use on another machine:"
 	@echo "  export AGENT_IMAGE=$(DOCKER_REPO):$(DOCKER_TAG)"
@@ -436,8 +436,8 @@ docker-push:
 docker-pull:
 	@echo "Pulling from Docker Hub..."
 	docker pull $(DOCKER_REPO):$(DOCKER_TAG)
-	@echo "✓ Pulled $(DOCKER_REPO):$(DOCKER_TAG)"
+	@echo "[OK] Pulled $(DOCKER_REPO):$(DOCKER_TAG)"
 
 # Build and push in one command
 docker-release: docker-build docker-push
-	@echo "✓ Release complete!"
+	@echo "[OK] Release complete!"
