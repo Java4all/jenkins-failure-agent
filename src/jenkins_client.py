@@ -311,8 +311,33 @@ class JenkinsClient:
         return []
     
     def _job_path(self, job_name: str) -> str:
-        """Convert job name to API path (handles folders)."""
-        # Handle folder structure: "folder/subfolder/job" -> "folder/job/subfolder/job/job"
+        """Convert job name to API path (handles folders).
+        
+        Accepts various input formats:
+          - "jobname"                           -> "jobname"
+          - "folder/jobname"                    -> "folder/job/jobname"
+          - "folder1/folder2/jobname"           -> "folder1/job/folder2/job/jobname"
+          - "job/folder/job/jobname"            -> "folder/job/jobname" (strips existing /job/)
+          - "/job/folder/job/jobname"           -> "folder/job/jobname"
+          - Full URL                            -> extracts path
+        """
+        # Handle full URLs
+        if job_name.startswith("http"):
+            from urllib.parse import urlparse
+            parsed = urlparse(job_name)
+            job_name = parsed.path
+        
+        # Remove leading/trailing slashes
+        job_name = job_name.strip("/")
+        
+        # If path already contains /job/, extract the actual folder/job structure
+        if "/job/" in job_name or job_name.startswith("job/"):
+            # Split by /job/ and filter empty parts
+            parts = [p for p in job_name.split("/job/") if p and p != "job"]
+            # Rejoin without /job/ to get clean folder path
+            job_name = "/".join(parts)
+        
+        # Now split by / and rejoin with /job/
         parts = job_name.split("/")
         return "/job/".join(parts)
     
