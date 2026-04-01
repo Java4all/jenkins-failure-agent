@@ -199,6 +199,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
         base_url=raw_config.get("github", {}).get("base_url", "https://api.github.com"),
         token=raw_config.get("github", {}).get("token", ""),
         timeout=raw_config.get("github", {}).get("timeout", 30),
+        verify_ssl=raw_config.get("github", {}).get("verify_ssl", True),
         cache_enabled=raw_config.get("github", {}).get("cache_enabled", True),
         cache_ttl_seconds=raw_config.get("github", {}).get("cache_ttl_seconds", 300),
         library_mappings=raw_config.get("github", {}).get("library_mappings", {}),

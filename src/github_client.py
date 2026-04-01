@@ -171,6 +171,7 @@ class GitHubClient:
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
         kwargs.setdefault("headers", self._get_headers())
         kwargs.setdefault("timeout", self.config.timeout)
+        kwargs.setdefault("verify", self.config.verify_ssl)
         
         response = requests.request(method, url, **kwargs)
         
