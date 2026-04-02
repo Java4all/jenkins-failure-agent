@@ -259,48 +259,78 @@ class RootCauseFinder:
         return last_stage_name, last_stage_idx
     
     def _find_failed_method(self, lines: List[str]) -> Optional[str]:
-        """Find the method that was running when failure occurred."""
-        if not self.method_prefix:
-            return None
+        """Find the method that was running when failure occurred.
         
-        # Pattern for method execution
-        prefix_pattern = re.compile(rf'{re.escape(self.method_prefix)}:\s*(.+)$', re.IGNORECASE)
+        Implements Requirement 1.10: Same logic as LogParser for consistency
         
-        # Pattern for method start: hh:mm:ss  method_name: method_name
-        start_pattern = re.compile(r'^\d{2}:\d{2}:\d{2}\s+([^:]+):\s*\1\s*$')
+        Pattern priority:
+        - Primary (if prefix configured): {prefix}: method_name (Req 1.1)
+        - Secondary (fallback): hh:mm:ss  method_name: method_name (Req 1.3)
+        - Finish: method_name :time-elapsed-seconds:NN (Req 1.4)
         
-        # Pattern for method finish: method_name :time-elapsed-seconds:NN
+        Returns the last method that started but didn't finish.
+        """
+        # Pattern for method finish: method_name :time-elapsed-seconds:NN (Req 1.4)
         finish_pattern = re.compile(r'^(.+?)\s+:time-elapsed-seconds:\d+')
         
-        started = []
-        finished = set()
+        # Primary pattern: {prefix}: method_name (Req 1.1)
+        prefix_pattern = None
+        if self.method_prefix:
+            prefix_pattern = re.compile(rf'{re.escape(self.method_prefix)}:\s*(.+)$', re.IGNORECASE)
+        
+        # Secondary pattern (fallback): timestamp + method: method (Req 1.3)
+        secondary_pattern = re.compile(r'^\d{2}:\d{2}:\d{2}\s+(\S[^:]*?):\s*\1\s*$')
+        
+        started_methods = []  # List of (method_name, line_index)
+        finished_methods = set()  # Set of normalized method names
         
         for i, line in enumerate(lines):
-            line = line.strip()
+            line_stripped = line.strip()
             
-            # Check prefix pattern
-            match = prefix_pattern.search(line)
-            if match:
-                started.append(match.group(1).strip())
-                continue
+            # Check primary pattern first (Req 1.1)
+            if prefix_pattern:
+                exec_match = prefix_pattern.search(line_stripped)
+                if exec_match:
+                    method_name = exec_match.group(1).strip()
+                    started_methods.append((method_name, i))
+                    continue
             
-            # Check start pattern
-            match = start_pattern.match(line)
-            if match:
-                started.append(match.group(1).strip())
-                continue
+            # Check secondary pattern only if no prefix configured (Req 1.3)
+            if not self.method_prefix:
+                start_match = secondary_pattern.match(line_stripped)
+                if start_match:
+                    method_name = start_match.group(1).strip()
+                    started_methods.append((method_name, i))
+                    continue
             
-            # Check finish pattern
-            match = finish_pattern.match(line)
-            if match:
-                finished.add(match.group(1).strip())
+            # Check for method finish (Req 1.4)
+            finish_match = finish_pattern.match(line_stripped)
+            if finish_match:
+                method_name = finish_match.group(1).strip()
+                # Normalize: lowercase + collapse whitespace (Req 1.9)
+                normalized = self._normalize_method_name(method_name)
+                finished_methods.add(normalized)
         
-        # Return last method that started but didn't finish
-        for method in reversed(started):
-            if method not in finished:
-                return method
+        # Find the last method that started but didn't finish (Req 1.6, 1.7)
+        for method_name, line_idx in reversed(started_methods):
+            normalized = self._normalize_method_name(method_name)
+            if normalized not in finished_methods:
+                return method_name
         
-        return started[-1] if started else None
+        # If all methods finished, return the last one that ran (Req 1.8)
+        if started_methods:
+            return started_methods[-1][0]
+        
+        return None
+    
+    def _normalize_method_name(self, name: str) -> str:
+        """Normalize method name for comparison (Req 1.9).
+        
+        Lowercases and collapses all whitespace sequences to single space.
+        """
+        normalized = name.lower()
+        normalized = re.sub(r'\s+', ' ', normalized).strip()
+        return normalized
     
     def _find_error_line(self, lines: List[str], start_idx: int) -> Tuple[int, str, int]:
         """

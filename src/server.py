@@ -281,104 +281,31 @@ def create_app(config: Config) -> FastAPI:
             # AI analysis with source code (using hybrid analyzer)
             log_snippet = log_parser.get_error_snippet(parsed_log, max_errors=10)
             
-            # Check if iterative mode requested
-            if request.iterative:
-                # Use iterative RC analyzer (multi-cycle with code lookup)
-                from .iterative_analyzer import IterativeRCAnalyzer
-                
-                iterative_analyzer = IterativeRCAnalyzer(
-                    ai_client=hybrid_analyzer.ai_analyzer.client,
-                    github_client=github_client,
-                    config={
-                        'model': config.ai.model,
-                        'library_mappings': config.github.library_mappings if config.github else {},
-                        'max_cycles': 5,
-                    }
-                )
-                
-                iterative_result = iterative_analyzer.analyze(
-                    log=console_log,
-                    build_info={
-                        'job_name': build_info.job_name,
-                        'build_number': build_info.build_number,
-                    },
-                    jenkinsfile_content=jenkinsfile_content,
-                )
-                
-                # Convert iterative result to standard format
-                from .ai_analyzer import AnalysisResult, RootCause, FailureAnalysis, Recommendation
-                
-                # Build detailed fix information
-                fix_details = []
-                if iterative_result.code_location:
-                    fix_details.append(f"Code location: {iterative_result.code_location}")
-                if iterative_result.fix_file:
-                    fix_details.append(f"File to modify: {iterative_result.fix_file}")
-                if iterative_result.fix_code:
-                    fix_details.append(f"Fix code:\n{iterative_result.fix_code}")
-                
-                # Build recommendations from fix_steps
-                recommendations = []
-                if iterative_result.fix_steps:
-                    for i, step in enumerate(iterative_result.fix_steps):
-                        recommendations.append(Recommendation(
-                            action=step,
-                            priority="high" if i == 0 else "medium",
-                            rationale=f"Step {i+1} of fix",
-                        ))
-                elif iterative_result.fix_suggestion:
-                    recommendations.append(Recommendation(
-                        action=iterative_result.fix_suggestion,
-                        priority="high",
-                        rationale=f"Based on {iterative_result.cycles_used}-cycle investigation",
-                    ))
-                
-                result = AnalysisResult(
-                    root_cause=RootCause(
-                        summary=iterative_result.root_cause,
-                        details='\n'.join(fix_details) if fix_details else "",
-                        confidence=iterative_result.confidence,
-                    ),
-                    failure_analysis={
-                        "category": iterative_result.error_type.value.upper(),
-                        "tier": "tier1" if iterative_result.confidence > 0.8 else "tier2",
-                        "confidence": iterative_result.confidence,
-                        "primary_error": iterative_result.root_cause,
-                        "fix_file": iterative_result.fix_file,
-                        "fix_code": iterative_result.fix_code,
-                    },
-                    recommendations=recommendations,
-                    retry_assessment=None,
-                    raw_ai_response=f"Iterative analysis ({iterative_result.cycles_used} cycles), code analyzed: {iterative_result.code_analyzed}",
-                )
-                
-                analysis_mode = f"iterative ({iterative_result.cycles_used} cycles)"
-                agentic_enhanced = True
-                tool_calls_made = iterative_result.cycles_used
-                
-                logger.info(f"Iterative analysis complete: {iterative_result.cycles_used} cycles, confidence={iterative_result.confidence}")
-            else:
-                # Use hybrid analyzer for scripted + optional agentic investigation
-                hybrid_result = hybrid_analyzer.analyze(
-                    build_info=build_info,
-                    parsed_log=parsed_log,
-                    test_results=test_results,
-                    git_analysis=git_analysis,
-                    console_log_snippet=log_snippet,
-                    jenkinsfile_content=jenkinsfile_content,
-                    library_sources=library_sources,
-                    force_agentic=request.deep,
-                    force_scripted=request.scripted_only,
-                    pr_url=request.pr_url,
-                )
-                
-                # Get the merged result
-                result = hybrid_result.merged_result
-                analysis_mode = hybrid_result.mode.value
-                agentic_enhanced = hybrid_result.agentic_enhanced
-                tool_calls_made = hybrid_result.tool_calls_made
-                
-                logger.info(f"Analysis complete: mode={analysis_mode}, agentic_enhanced={agentic_enhanced}")
+            # Use hybrid analyzer for all modes:
+            # - force_iterative: multi-call iterative RC analysis
+            # - force_agentic (deep): full MCP tool agent investigation
+            # - force_scripted: single-call scripted analysis
+            hybrid_result = hybrid_analyzer.analyze(
+                build_info=build_info,
+                parsed_log=parsed_log,
+                test_results=test_results,
+                git_analysis=git_analysis,
+                console_log_snippet=log_snippet,
+                jenkinsfile_content=jenkinsfile_content,
+                library_sources=library_sources,
+                force_iterative=request.iterative,  # Multi-call iterative RC
+                force_agentic=request.deep,         # Full MCP agent investigation
+                force_scripted=request.scripted_only,
+                pr_url=request.pr_url,
+            )
+            
+            # Get the merged result
+            result = hybrid_result.merged_result
+            analysis_mode = hybrid_result.mode.value
+            agentic_enhanced = hybrid_result.agentic_enhanced
+            tool_calls_made = hybrid_result.tool_calls_made
+            
+            logger.info(f"Analysis complete: mode={analysis_mode}, agentic_enhanced={agentic_enhanced}")
             
             # Generate report if requested
             report_url = None
@@ -574,6 +501,105 @@ def create_app(config: Config) -> FastAPI:
             "status": "queued",
             "job": job_name,
             "build": build_number
+        }
+    
+    # =========================================================================
+    # Source Registry API (Requirement 10)
+    # =========================================================================
+    
+    @app.get("/sources")
+    async def get_sources(api_key: str = Depends(verify_api_key)):
+        """
+        Get current Source Registry entries (Req 10.4).
+        
+        Returns list of source locations used for resolving needs_source requests.
+        """
+        registry = config.rc_analyzer.source_registry
+        return {
+            "sources": [
+                {
+                    "index": i,
+                    "type": src.type,
+                    "value": src.value,
+                    "ref": src.ref,
+                    "name": src.name,
+                }
+                for i, src in enumerate(registry)
+            ],
+            "count": len(registry)
+        }
+    
+    @app.post("/sources")
+    async def add_source(
+        source: dict,
+        api_key: str = Depends(verify_api_key)
+    ):
+        """
+        Add a source location to the registry (Req 10.5).
+        
+        Request body:
+        {
+            "type": "repo" | "local_path",
+            "value": "owner/repo[@ref]" | "/path/to/library",
+            "name": "optional-label"
+        }
+        """
+        from .config import SourceLocation
+        
+        source_type = source.get("type", "repo")
+        value = source.get("value", "")
+        name = source.get("name", "")
+        ref = source.get("ref", "main")
+        
+        if not value:
+            raise HTTPException(status_code=400, detail="Missing 'value' field")
+        
+        if source_type not in ("repo", "local_path", "inline"):
+            raise HTTPException(status_code=400, detail="Invalid 'type' - must be repo, local_path, or inline")
+        
+        new_source = SourceLocation(
+            type=source_type,
+            value=value,
+            ref=ref,
+            name=name,
+        )
+        
+        config.rc_analyzer.source_registry.append(new_source)
+        
+        return {
+            "success": True,
+            "index": len(config.rc_analyzer.source_registry) - 1,
+            "source": {
+                "type": source_type,
+                "value": value,
+                "ref": ref,
+                "name": name,
+            }
+        }
+    
+    @app.delete("/sources/{index}")
+    async def delete_source(
+        index: int,
+        api_key: str = Depends(verify_api_key)
+    ):
+        """
+        Remove a source location from the registry (Req 10.6).
+        """
+        registry = config.rc_analyzer.source_registry
+        
+        if index < 0 or index >= len(registry):
+            raise HTTPException(status_code=404, detail=f"Source index {index} not found")
+        
+        removed = registry.pop(index)
+        
+        return {
+            "success": True,
+            "removed": {
+                "type": removed.type,
+                "value": removed.value,
+                "name": removed.name,
+            },
+            "remaining": len(registry)
         }
     
     return app

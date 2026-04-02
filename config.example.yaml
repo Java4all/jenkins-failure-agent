@@ -220,6 +220,56 @@ server:
   rate_limit: 100
 
 # =============================================================================
+# ITERATIVE ROOT CAUSE ANALYZER (RC_Analyzer)
+# =============================================================================
+# Multi-call AI analysis that iteratively narrows down root cause
+rc_analyzer:
+  # Enable iterative RC analysis
+  enabled: true
+  
+  # Maximum AI calls per analysis request
+  # Each call refines the hypothesis until confidence threshold is reached
+  max_rc_iterations: 3
+  
+  # Stop iterating when confidence reaches this threshold (0.0-1.0)
+  # Lower = faster (fewer calls), Higher = more accurate
+  confidence_threshold: 0.7
+  
+  # Maximum total characters of source code context to include in prompts
+  # Prevents excessively large prompts when many files are fetched
+  max_source_context_chars: 8000
+  
+  # ==========================================================================
+  # JENKINSFILE SOURCE (Requirement 9)
+  # ==========================================================================
+  # Where to find the Jenkinsfile for source context analysis
+  # Types: local_path (filesystem), repo (GitHub), inline (direct content)
+  #
+  # jenkinsfile_source:
+  #   type: "repo"
+  #   value: "${JENKINSFILE_REPO:-org/my-project}"  # owner/repo format
+  #   ref: "${JENKINSFILE_REF:-main}"               # branch/tag/commit
+  #
+  # jenkinsfile_source:
+  #   type: "local_path"
+  #   value: "/path/to/Jenkinsfile"
+  
+  # ==========================================================================
+  # LIBRARY SOURCES (Requirement 9)
+  # ==========================================================================
+  # Where to find shared library source code
+  # Complements github.library_mappings - use for additional paths
+  #
+  # library_sources:
+  #   - type: "repo"
+  #     value: "org/pipeline-library"
+  #     ref: "main"
+  #     name: "my-pipeline-lib"
+  #   - type: "local_path"
+  #     value: "/var/jenkins/shared-libs/common-steps"
+  #     name: "common-steps"
+
+# =============================================================================
 # ANALYSIS CONFIGURATION
 # =============================================================================
 analysis:

@@ -55,42 +55,62 @@ The agent supports **three analysis modes**: fast scripted analysis, iterative r
 
 ### Iterative Mode (Recommended)
 
-The iterative mode uses a **multi-cycle investigation** with **Solution Finder**:
+The iterative mode uses a **multi-call AI analysis** that iteratively narrows down the root cause:
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
 │                    ITERATIVE ROOT CAUSE ANALYSIS                   │
 ├────────────────────────────────────────────────────────────────────┤
 │                                                                    │
-│  Cycle 1: Smart Extract                                            │
+│  Iteration 1: Initial Context                                      │
 │  ┌──────────────────────────────────────────────────┐             │
-│  │ RC Finder → Extract error + 30 lines context     │             │
-│  │ AI → "Error in deployService(), need code"       │             │
+│  │ RootCauseFinder → Extract error + 30 lines       │             │
+│  │ AI Call #1 → "Error in deployService(), need     │             │
+│  │               source code" (confidence: 0.4)     │             │
+│  │               needs_source: [vars/deployService] │             │
 │  └──────────────────────────────────────────────────┘             │
 │                         ↓                                          │
-│  Cycle 2: Code Analysis                                            │
+│  Iteration 2: With Source Code                                     │
 │  ┌──────────────────────────────────────────────────┐             │
 │  │ GitHub → Fetch vars/deployService.groovy         │             │
-│  │ AI → "Line 42 calls awsHelper(), need that"      │             │
+│  │ AI Call #2 → "Line 42 calls awsHelper(), need    │             │
+│  │               that file" (confidence: 0.55)      │             │
+│  │               needs_source: [vars/awsHelper]     │             │
 │  └──────────────────────────────────────────────────┘             │
 │                         ↓                                          │
-│  Cycle 3: Dependency Analysis                                      │
+│  Iteration 3: With Dependencies                                    │
 │  ┌──────────────────────────────────────────────────┐             │
 │  │ GitHub → Fetch vars/awsHelper.groovy             │             │
-│  │ AI → "Found! SSM param ABC missing in eu-west-1" │             │
+│  │ AI Call #3 → "Found! SSM param ABC missing"      │             │
+│  │               (confidence: 0.85) ✓ THRESHOLD     │             │
 │  └──────────────────────────────────────────────────┘             │
 │                         ↓                                          │
-│  SOLUTION FINDER                                                   │
+│  RESULT                                                            │
 │  ┌──────────────────────────────────────────────────┐             │
-│  │ Input: Root cause + context                      │             │
-│  │ Output:                                          │             │
-│  │   - fix_code: "aws ssm put-parameter --name ABC" │             │
-│  │   - fix_file: "AWS Console / Terraform"          │             │
-│  │   - fix_steps: ["Step 1...", "Step 2...", ...]   │             │
+│  │ root_cause: "SSM param ABC missing in eu-west-1" │             │
+│  │ category: CREDENTIAL                              │             │
+│  │ confidence: 0.85                                  │             │
+│  │ fix: "aws ssm put-parameter --name ABC ..."       │             │
+│  │ iterations_used: 3                                │             │
 │  └──────────────────────────────────────────────────┘             │
 │                                                                    │
 └────────────────────────────────────────────────────────────────────┘
 ```
+
+**Configuration** (`config.yaml`):
+```yaml
+rc_analyzer:
+  enabled: true
+  max_rc_iterations: 3       # Max AI calls per analysis
+  confidence_threshold: 0.7  # Stop when confidence >= this
+  max_source_context_chars: 8000  # Limit source code in prompts
+```
+
+**Key Features:**
+- **Iterative refinement**: Each AI call can request additional source files
+- **Source-aware classification**: Detects signature mismatches → GROOVY_LIBRARY
+- **Confidence-based stopping**: Stops when confident, uses best result if max iterations reached
+- **Previous analysis context**: Follow-up prompts include prior findings
 
 ## Key Features
 
@@ -136,6 +156,14 @@ The agent tells you whether to retry or fix:
 - **Sandbox Rejection Detection**: Identifies required script approvals
 - **Serialization Issue Identification**: Finds non-serializable objects
 - **Library Version Correlation**: Detects branch/tag mismatches
+- **Method Call Sequence Tracking**: Tracks all library method invocations via configurable prefix tags
+- **Pipeline Stage Sequence**: Full execution path of all stages including special characters
+
+### Source Registry (v1.6.0)
+- **Automatic Source Pre-loading**: Fetches source code for all active methods at failure time
+- **Multi-Repo Search**: Searches across all registered library repos for method implementations
+- **Runtime Registry Management**: Add/remove source locations via API or UI
+- **Cross-Library Support**: Single method prefix tracks calls across multiple shared libraries
 
 ### Configuration Analysis  
 - **Credential Validation**: Missing IDs, wrong types, binding failures

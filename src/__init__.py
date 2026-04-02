@@ -6,15 +6,15 @@ Specializes in Groovy/Pipeline, shared library, and configuration error analysis
 
 Supports multiple analysis modes:
 - Scripted: Fast, single LLM call for simple failures (default)
+- Iterative: Multi-call analysis with source code context (recommended)
 - Agentic: Deep investigation with MCP tools for code/library issues
-- Iterative: Multi-cycle investigation with code lookup for complex failures
 """
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 from .config import (
     Config, JenkinsConfig, AIConfig, GitConfig, GitHubConfig,
-    SCMConfig, ReporterConfig
+    SCMConfig, ReporterConfig, RCAnalyzerConfig
 )
 from .jenkins_client import JenkinsClient, BuildInfo, TestResult
 from .log_parser import LogParser, ParsedLog, FailureCategory
@@ -30,12 +30,13 @@ from .report_generator import ReportGenerator, format_slack_message
 from .scm_client import SCMClient, SCMProvider, PRInfo, format_pr_comment
 from .hybrid_analyzer import HybridAnalyzer, HybridAnalysisResult, AnalysisMode
 from .rc_finder import RootCauseFinder, RootCauseContext, ErrorType, find_root_cause
+from .rc_analyzer import RCAnalyzer, RCAnalysisResult, IterationResult
 from .iterative_analyzer import IterativeRCAnalyzer, InvestigationResult, InvestigationAction
 
 __all__ = [
     # Config
     "Config", "JenkinsConfig", "AIConfig", "GitConfig", "GitHubConfig",
-    "SCMConfig", "ReporterConfig",
+    "SCMConfig", "ReporterConfig", "RCAnalyzerConfig",
     # Jenkins
     "JenkinsClient", "BuildInfo", "TestResult",
     # Log parsing
@@ -51,11 +52,13 @@ __all__ = [
     # AI analysis (scripted)
     "AIAnalyzer", "AnalysisResult", "result_to_dict",
     "FailureTier", "RetryAssessment", "CATEGORY_TO_TIER",
-    # Hybrid analysis (scripted + agentic)
+    # Hybrid analysis (scripted + agentic + iterative)
     "HybridAnalyzer", "HybridAnalysisResult", "AnalysisMode",
     # Root Cause Finder Expert
     "RootCauseFinder", "RootCauseContext", "ErrorType", "find_root_cause",
-    # Iterative analysis (multi-cycle investigation)
+    # RC Analyzer (iterative multi-call analysis)
+    "RCAnalyzer", "RCAnalysisResult", "IterationResult",
+    # Iterative analysis (legacy, use RCAnalyzer instead)
     "IterativeRCAnalyzer", "InvestigationResult", "InvestigationAction",
     # Reports
     "ReportGenerator", "format_slack_message",

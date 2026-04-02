@@ -151,6 +151,121 @@
         }
 
         // =====================================================================
+        // Source Registry Component (Requirement 10.7)
+        // =====================================================================
+        
+        function SourceRegistry({ apiBase }) {
+            const [sources, setSources] = useState([]);
+            const [loading, setLoading] = useState(false);
+            const [showForm, setShowForm] = useState(false);
+            const [newSource, setNewSource] = useState({ type: 'repo', value: '', name: '', ref: 'main' });
+            
+            const fetchSources = async () => {
+                try {
+                    const res = await fetch(`${apiBase}/sources`);
+                    if (res.ok) {
+                        const data = await res.json();
+                        setSources(data.sources || []);
+                    }
+                } catch (e) {
+                    console.error('Failed to fetch sources:', e);
+                }
+            };
+            
+            useEffect(() => { fetchSources(); }, []);
+            
+            const addSource = async () => {
+                if (!newSource.value) return;
+                setLoading(true);
+                try {
+                    const res = await fetch(`${apiBase}/sources`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(newSource)
+                    });
+                    if (res.ok) {
+                        await fetchSources();
+                        setNewSource({ type: 'repo', value: '', name: '', ref: 'main' });
+                        setShowForm(false);
+                    }
+                } catch (e) {
+                    console.error('Failed to add source:', e);
+                }
+                setLoading(false);
+            };
+            
+            const deleteSource = async (index) => {
+                try {
+                    const res = await fetch(`${apiBase}/sources/${index}`, { method: 'DELETE' });
+                    if (res.ok) await fetchSources();
+                } catch (e) {
+                    console.error('Failed to delete source:', e);
+                }
+            };
+            
+            return (
+                <div className="mt-3">
+                    <div className="flex items-center justify-between mb-2">
+                        <h4 className="text-sm font-medium text-gray-300 flex items-center gap-2">
+                            <i className="fas fa-folder-tree text-gray-400"></i> Source Registry
+                            <span className="text-xs text-gray-500">({sources.length})</span>
+                        </h4>
+                        <button onClick={() => setShowForm(!showForm)} 
+                            className="text-xs text-indigo-400 hover:text-indigo-300">
+                            <i className={`fas fa-${showForm ? 'minus' : 'plus'} mr-1`}></i>
+                            {showForm ? 'Cancel' : 'Add Source'}
+                        </button>
+                    </div>
+                    
+                    {showForm && (
+                        <div className="p-3 bg-gray-700/50 rounded-lg mb-2 space-y-2">
+                            <div className="grid grid-cols-3 gap-2">
+                                <select value={newSource.type} onChange={e => setNewSource({...newSource, type: e.target.value})}
+                                    className="bg-gray-700 text-white text-sm rounded px-2 py-1.5 border border-gray-600">
+                                    <option value="repo">GitHub Repo</option>
+                                    <option value="local_path">Local Path</option>
+                                </select>
+                                <input value={newSource.value} onChange={e => setNewSource({...newSource, value: e.target.value})}
+                                    placeholder={newSource.type === 'repo' ? 'org/repo' : '/path/to/lib'}
+                                    className="bg-gray-700 text-white text-sm rounded px-2 py-1.5 border border-gray-600 col-span-2" />
+                            </div>
+                            <div className="grid grid-cols-3 gap-2">
+                                <input value={newSource.name} onChange={e => setNewSource({...newSource, name: e.target.value})}
+                                    placeholder="Label (optional)" className="bg-gray-700 text-white text-sm rounded px-2 py-1.5 border border-gray-600" />
+                                <input value={newSource.ref} onChange={e => setNewSource({...newSource, ref: e.target.value})}
+                                    placeholder="Ref (main)" className="bg-gray-700 text-white text-sm rounded px-2 py-1.5 border border-gray-600"
+                                    disabled={newSource.type !== 'repo'} />
+                                <button onClick={addSource} disabled={loading || !newSource.value}
+                                    className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-sm rounded px-3 py-1.5">
+                                    {loading ? 'Adding...' : 'Add'}
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                    
+                    {sources.length > 0 ? (
+                        <div className="space-y-1 max-h-32 overflow-y-auto">
+                            {sources.map((src) => (
+                                <div key={src.index} className="flex items-center justify-between p-2 bg-gray-700/30 rounded text-xs">
+                                    <div className="flex items-center gap-2 min-w-0">
+                                        <i className={`fas fa-${src.type === 'repo' ? 'github fab' : 'folder'} text-gray-500`}></i>
+                                        <span className="truncate text-gray-300" title={src.value}>{src.name || src.value}</span>
+                                        {src.type === 'repo' && src.ref && <span className="text-gray-500">@{src.ref}</span>}
+                                    </div>
+                                    <button onClick={() => deleteSource(src.index)} className="text-red-400 hover:text-red-300 ml-2">
+                                        <i className="fas fa-trash-alt"></i>
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                    ) : (
+                        <p className="text-xs text-gray-500 italic">No sources configured. Add repos or paths for source code lookup.</p>
+                    )}
+                </div>
+            );
+        }
+
+        // =====================================================================
         // Health Panel - Extended
         // =====================================================================
         
@@ -338,6 +453,9 @@
                                         <Input label="Branch/Ref" value={projectRef} onChange={setProjectRef} placeholder="main" />
                                     </div>
                                 </div>
+                                
+                                {/* Source Registry */}
+                                <SourceRegistry apiBase={API_BASE} />
                                 
                                 {/* PR Integration */}
                                 <div>

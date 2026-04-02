@@ -122,6 +122,31 @@ class ServerConfig:
 
 
 @dataclass
+class SourceLocation:
+    """Configuration for a source file location (Req 9)."""
+    type: str = "repo"  # "local_path", "repo", or "inline"
+    value: str = ""     # Path, repo (owner/repo[@ref]), or content
+    ref: str = "main"   # Git ref for repo type
+    name: str = ""      # Optional label
+
+
+@dataclass
+class RCAnalyzerConfig:
+    """Configuration for iterative RC Analyzer (Requirement 6, 9)."""
+    enabled: bool = True
+    max_rc_iterations: int = 3
+    confidence_threshold: float = 0.7
+    max_source_context_chars: int = 8000
+    
+    # Requirement 9: Source locations
+    jenkinsfile_source: Optional[SourceLocation] = None
+    library_sources: List[SourceLocation] = field(default_factory=list)
+    
+    # Requirement 10: Source registry (populated at runtime)
+    source_registry: List[SourceLocation] = field(default_factory=list)
+
+
+@dataclass
 class Config:
     jenkins: JenkinsConfig
     ai: AIConfig
@@ -132,14 +157,32 @@ class Config:
     scm: SCMConfig
     reporter: ReporterConfig
     server: ServerConfig
+    rc_analyzer: RCAnalyzerConfig
     categories: Dict[str, Any] = field(default_factory=dict)
     reporting: Dict[str, Any] = field(default_factory=dict)
     history: Dict[str, Any] = field(default_factory=dict)
     logging: Dict[str, Any] = field(default_factory=dict)
 
 
-def load_config(config_path: Optional[str] = None) -> Config:
-    """Load configuration from YAML file."""
+def load_config(config_path: Optional[str] = None, env_file: str = ".env") -> Config:
+    """Load configuration from YAML file.
+    
+    Implements Requirement 12: Environment File Support
+    
+    Args:
+        config_path: Path to config.yaml file
+        env_file: Path to .env file (default: ".env")
+    """
+    # Load .env file first (Req 12.1)
+    try:
+        from dotenv import load_dotenv
+        env_path = Path(env_file)
+        if env_path.exists():
+            load_dotenv(env_path)
+        # Req 12.2: Continue without error if .env doesn't exist
+    except ImportError:
+        # python-dotenv not installed, continue without it
+        pass
     
     # Find config file
     if config_path:
@@ -255,6 +298,58 @@ def load_config(config_path: Optional[str] = None) -> Config:
         rate_limit=raw_config.get("server", {}).get("rate_limit", 100),
     )
     
+    # RC Analyzer config (Requirement 6, 9, 10)
+    rc_raw = raw_config.get("rc_analyzer", {})
+    
+    # Parse jenkinsfile_source (Req 9.3)
+    jenkinsfile_source = None
+    jf_raw = rc_raw.get("jenkinsfile_source", {})
+    if jf_raw:
+        jenkinsfile_source = SourceLocation(
+            type=jf_raw.get("type", "repo"),
+            value=jf_raw.get("value", ""),
+            ref=jf_raw.get("ref", "main"),
+            name=jf_raw.get("name", "Jenkinsfile"),
+        )
+    
+    # Parse library_sources (Req 9.3)
+    library_sources = []
+    for lib_raw in rc_raw.get("library_sources", []):
+        library_sources.append(SourceLocation(
+            type=lib_raw.get("type", "repo"),
+            value=lib_raw.get("value", ""),
+            ref=lib_raw.get("ref", "main"),
+            name=lib_raw.get("name", ""),
+        ))
+    
+    # Build initial source_registry from library_mappings (Req 10.2, 10.9)
+    source_registry = []
+    for lib_name, repo_path in github_cfg.library_mappings.items():
+        source_registry.append(SourceLocation(
+            type="repo",
+            value=repo_path,
+            name=lib_name,
+        ))
+    
+    # Add jenkinsfile_source to registry if configured (Req 10.9)
+    if jenkinsfile_source and jenkinsfile_source.value:
+        source_registry.insert(0, jenkinsfile_source)
+    
+    # Add explicit library_sources to registry
+    for lib_src in library_sources:
+        if lib_src.value and lib_src not in source_registry:
+            source_registry.append(lib_src)
+    
+    rc_analyzer_cfg = RCAnalyzerConfig(
+        enabled=rc_raw.get("enabled", True),
+        max_rc_iterations=rc_raw.get("max_rc_iterations", 3),
+        confidence_threshold=rc_raw.get("confidence_threshold", 0.7),
+        max_source_context_chars=rc_raw.get("max_source_context_chars", 8000),
+        jenkinsfile_source=jenkinsfile_source,
+        library_sources=library_sources,
+        source_registry=source_registry,
+    )
+    
     return Config(
         jenkins=jenkins_cfg,
         ai=ai_cfg,
@@ -265,6 +360,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
         scm=scm_cfg,
         reporter=reporter_cfg,
         server=server_cfg,
+        rc_analyzer=rc_analyzer_cfg,
         categories=raw_config.get("categories", {}),
         reporting=raw_config.get("reporting", {}),
         history=raw_config.get("history", {}),
@@ -312,7 +408,10 @@ def _expand_env_vars(value: Any) -> Any:
 
 
 def _apply_env_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
-    """Apply environment variable overrides to config."""
+    """Apply environment variable overrides to config.
+    
+    Implements Requirement 12: Environment File Support
+    """
     
     # First, expand ${VAR} references in config values
     config = _expand_env_vars(config)
@@ -331,6 +430,11 @@ def _apply_env_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
         "SCM_TOKEN": ("scm", "token"),
         "SLACK_WEBHOOK_URL": ("notifications", "slack", "webhook_url"),
         "SERVER_API_KEY": ("server", "api_key"),
+        # Req 12.4: Method execution prefix
+        "METHOD_EXECUTION_PREFIX": ("parsing", "method_execution_prefix"),
+        # Req 9: Jenkinsfile source
+        "JENKINSFILE_REPO": ("rc_analyzer", "jenkinsfile_source", "value"),
+        "JENKINSFILE_REF": ("rc_analyzer", "jenkinsfile_source", "ref"),
     }
     
     # Boolean env vars
@@ -340,6 +444,18 @@ def _apply_env_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
         "SCM_SET_COMMIT_STATUS": ("scm", "set_commit_status"),
         "UPDATE_JENKINS_DESCRIPTION": ("reporter", "update_jenkins_description"),
         "POST_TO_PR": ("reporter", "post_to_pr"),
+        # Req 12.5: RC Analyzer boolean
+        "RC_ANALYZER_ENABLED": ("rc_analyzer", "enabled"),
+    }
+    
+    # Numeric env vars (Req 12.5)
+    int_mappings = {
+        "RC_ANALYZER_MAX_ITERATIONS": ("rc_analyzer", "max_rc_iterations"),
+        "RC_ANALYZER_MAX_SOURCE_CHARS": ("rc_analyzer", "max_source_context_chars"),
+    }
+    
+    float_mappings = {
+        "RC_ANALYZER_CONFIDENCE_THRESHOLD": ("rc_analyzer", "confidence_threshold"),
     }
     
     for env_var, path in env_mappings.items():
@@ -351,6 +467,22 @@ def _apply_env_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
         value = os.environ.get(env_var)
         if value:
             _set_nested(config, path, value.lower() in ("true", "1", "yes"))
+    
+    for env_var, path in int_mappings.items():
+        value = os.environ.get(env_var)
+        if value:
+            try:
+                _set_nested(config, path, int(value))
+            except ValueError:
+                pass
+    
+    for env_var, path in float_mappings.items():
+        value = os.environ.get(env_var)
+        if value:
+            try:
+                _set_nested(config, path, float(value))
+            except ValueError:
+                pass
     
     return config
 

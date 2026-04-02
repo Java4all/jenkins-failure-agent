@@ -62,6 +62,15 @@ class ParsedLog:
     primary_category: FailureCategory = FailureCategory.UNKNOWN
     timestamps: List[Tuple[int, str]] = field(default_factory=list)
     summary: str = ""
+    
+    # Requirement 1.11: Full method call sequence from method tags
+    method_call_sequence: List[str] = field(default_factory=list)
+    
+    # Active methods at failure time (started but not finished)
+    active_methods: List[str] = field(default_factory=list)
+    
+    # Requirement 13.4: Full stage sequence from pipeline tags
+    stage_sequence: List[str] = field(default_factory=list)
 
 
 class LogParser:
@@ -302,12 +311,16 @@ class LogParser:
         lines = log_content.split("\n")
         result = ParsedLog(total_lines=len(lines))
         
-        # FIRST: Find the last stage - this is where the error likely is
-        last_stage_name, last_stage_start = self._find_last_stage(lines)
+        # FIRST: Find the last stage and full stage sequence (Req 13)
+        last_stage_name, last_stage_start, stage_sequence = self._find_last_stage(lines)
         result.failed_stage = last_stage_name
+        result.stage_sequence = stage_sequence
         
-        # Find the method that was running when failure occurred
-        result.failed_method = self._find_failed_method(lines)
+        # Find the method tracking info (Req 1)
+        failed_method, method_call_sequence, active_methods = self._find_failed_method(lines)
+        result.failed_method = failed_method
+        result.method_call_sequence = method_call_sequence
+        result.active_methods = active_methods
         
         # Focus on lines from the last stage onwards (or last 500 lines if no stage found)
         if last_stage_start >= 0:
@@ -345,76 +358,100 @@ class LogParser:
         
         return result
     
-    def _find_failed_method(self, lines: List[str]) -> Optional[str]:
+    def _find_failed_method(self, lines: List[str]) -> Tuple[Optional[str], List[str], List[str]]:
         """Find the shared library method that was running when failure occurred.
         
+        Implements Requirement 1: Robust Method Tag Tracking
+        
         Tracks method start/finish tags:
-        - Start: hh:mm:ss  method_name: method_name
-        - Finish: method_name :time-elapsed-seconds:NN
+        - Primary (if prefix configured): {prefix}: method_name (Req 1.1)
+        - Secondary (fallback): hh:mm:ss  method_name: method_name (Req 1.3)
+        - Finish: method_name :time-elapsed-seconds:NN (Req 1.4)
         
-        Also tracks: {method_execution_prefix}: method_name (if configured)
-        
-        Returns the last method that started but didn't finish.
+        Returns:
+            Tuple of (failed_method, method_call_sequence, active_methods)
+            - failed_method: Last method that started but didn't finish (Req 1.6, 1.7)
+            - method_call_sequence: All method start events in order (Req 1.11)
+            - active_methods: Methods that started but didn't finish
         """
-        # Pattern for method start: timestamp followed by method_name: method_name
-        # e.g., "10:30:45  deployService: deployService"
-        start_pattern = re.compile(r'^\d{2}:\d{2}:\d{2}\s+([^:]+):\s*\1\s*$')
+        method_call_sequence = []  # All methods detected (Req 1.11)
+        started_methods = []  # Stack of (method_name, line_index)
+        finished_methods = set()  # Set of normalized method names
         
-        # Pattern for method finish: method_name :time-elapsed-seconds:NN
-        finish_pattern = re.compile(r'^(.+?)\s*:time-elapsed-seconds:\d+')
+        # Pattern for method finish: method_name :time-elapsed-seconds:NN (Req 1.4)
+        finish_pattern = re.compile(r'^(.+?)\s+:time-elapsed-seconds:\d+')
         
-        # Configurable execution prefix pattern (e.g., "some-deploy-service-execution: method_name")
+        # Primary pattern: {prefix}: method_name (Req 1.1)
+        # Prefix may appear anywhere on the line, method name may contain :, (), whitespace
         execution_pattern = None
         if self.method_execution_prefix:
-            # Escape special regex characters in the prefix
             escaped_prefix = re.escape(self.method_execution_prefix)
             execution_pattern = re.compile(rf'{escaped_prefix}:\s*(.+)$', re.IGNORECASE)
         
-        started_methods = []  # Stack of (method_name, line_index)
-        finished_methods = set()
+        # Secondary pattern (fallback when no prefix): timestamp + method: method (Req 1.3)
+        secondary_pattern = re.compile(r'^\d{2}:\d{2}:\d{2}\s+(\S[^:]*?):\s*\1\s*$')
         
         for i, line in enumerate(lines):
             line_stripped = line.strip()
             
-            # Check for method start
-            start_match = start_pattern.match(line_stripped)
-            if start_match:
-                method_name = start_match.group(1).strip()
-                started_methods.append((method_name, i))
-                continue
-            
-            # Check for execution pattern (if configured)
+            # Check for method start - primary pattern first (Req 1.1)
             if execution_pattern:
                 exec_match = execution_pattern.search(line_stripped)
                 if exec_match:
+                    # Preserve full method name including :, (), whitespace (Req 1.2)
                     method_name = exec_match.group(1).strip()
+                    method_call_sequence.append(method_name)
                     started_methods.append((method_name, i))
                     continue
             
-            # Check for method finish
+            # Check secondary pattern only if no prefix configured (Req 1.3)
+            if not self.method_execution_prefix:
+                start_match = secondary_pattern.match(line_stripped)
+                if start_match:
+                    method_name = start_match.group(1).strip()
+                    method_call_sequence.append(method_name)
+                    started_methods.append((method_name, i))
+                    continue
+            
+            # Check for method finish (Req 1.4)
             finish_match = finish_pattern.match(line_stripped)
             if finish_match:
                 method_name = finish_match.group(1).strip()
-                finished_methods.add(method_name)
+                # Normalize for matching (Req 1.9)
+                normalized = self._normalize_method_name(method_name)
+                finished_methods.add(normalized)
         
-        # Find the last method that started but didn't finish
+        # Find active methods (started but not finished)
+        active_methods = []
+        for method_name, line_idx in started_methods:
+            normalized = self._normalize_method_name(method_name)
+            if normalized not in finished_methods:
+                active_methods.append(method_name)
+        
+        # Find failed_method: last method that started but didn't finish (Req 1.6, 1.7)
+        failed_method = None
         for method_name, line_idx in reversed(started_methods):
-            # Normalize for comparison (method names might have slight variations)
-            normalized = method_name.lower().replace(' ', '')
-            found_finish = False
-            for finished in finished_methods:
-                if finished.lower().replace(' ', '') == normalized:
-                    found_finish = True
-                    break
-            
-            if not found_finish:
-                return method_name
+            normalized = self._normalize_method_name(method_name)
+            if normalized not in finished_methods:
+                failed_method = method_name
+                break
         
-        # If all methods finished, return the last one that ran (might still be the issue)
-        if started_methods:
-            return started_methods[-1][0]
+        # Fallback: if all methods finished, return last one (Req 1.8)
+        if failed_method is None and started_methods:
+            failed_method = started_methods[-1][0]
         
-        return None
+        return failed_method, method_call_sequence, active_methods
+    
+    def _normalize_method_name(self, name: str) -> str:
+        """Normalize method name for comparison (Req 1.9).
+        
+        Lowercases and collapses all whitespace sequences to single space.
+        """
+        # Lowercase
+        normalized = name.lower()
+        # Collapse whitespace sequences to single space
+        normalized = re.sub(r'\s+', ' ', normalized).strip()
+        return normalized
     
     def _find_last_stage(self, lines: List[str]) -> Tuple[Optional[str], int]:
         """Find the last pipeline stage in the log.
@@ -424,31 +461,52 @@ class LogParser:
         - [Pipeline] { (Stage Name)
         - [Pipeline] { (stage_name)
         
-        Returns: (stage_name, line_index) or (None, -1) if not found
+        Returns: (stage_name, line_index, stage_sequence) or (None, -1, []) if not found
         """
+        stage_sequence = []  # All stages in order (Req 13.4)
         last_stage_name = None
         last_stage_line = -1
         
-        stage_pattern = re.compile(r'\[Pipeline\]\s*\{\s*\(([^)]+)\)')
-        stage_start_pattern = re.compile(r'\[Pipeline\]\s+stage')
+        # Pattern for [Pipeline] stage marker (first line of two-line pattern)
+        stage_marker_pattern = re.compile(r'\[Pipeline\]\s+stage')
         
-        for i, line in enumerate(lines):
-            # Check for stage start
-            if stage_start_pattern.search(line):
-                # Next line usually has the stage name
-                if i + 1 < len(lines):
-                    name_match = stage_pattern.search(lines[i + 1])
-                    if name_match:
-                        last_stage_name = name_match.group(1).strip()
-                        last_stage_line = i
+        # Pattern for [Pipeline] { (stage_name) - match LAST ) on line (Req 13.3)
+        # This handles stage names containing (, ), {, } characters
+        stage_name_pattern = re.compile(r'\[Pipeline\]\s*\{\s*\((.+)\)\s*$')
+        
+        i = 0
+        while i < len(lines):
+            line = lines[i]
             
-            # Also check current line for stage name pattern
-            name_match = stage_pattern.search(line)
+            # Check for [Pipeline] stage marker (Req 13.1)
+            if stage_marker_pattern.search(line):
+                # Look ahead up to 2 lines for stage name (Req 13.8)
+                for lookahead in range(1, 3):
+                    if i + lookahead < len(lines):
+                        name_match = stage_name_pattern.search(lines[i + lookahead])
+                        if name_match:
+                            # Extract stage name, strip whitespace but preserve internal chars (Req 13.9)
+                            stage_name = name_match.group(1).strip()
+                            stage_sequence.append(stage_name)
+                            last_stage_name = stage_name
+                            last_stage_line = i
+                            break
+                i += 1
+                continue
+            
+            # Also check single-line pattern (Req 13.2)
+            name_match = stage_name_pattern.search(line)
             if name_match:
-                last_stage_name = name_match.group(1).strip()
-                last_stage_line = i
+                stage_name = name_match.group(1).strip()
+                # Avoid duplicates from two-line detection
+                if not stage_sequence or stage_sequence[-1] != stage_name:
+                    stage_sequence.append(stage_name)
+                    last_stage_name = stage_name
+                    last_stage_line = i
+            
+            i += 1
         
-        return last_stage_name, last_stage_line
+        return last_stage_name, last_stage_line, stage_sequence
     
     def _extract_errors_from_end(self, lines: List[str], line_offset: int = 0) -> List[ErrorMatch]:
         """Extract errors, prioritizing those at the END of the log section.

@@ -31,6 +31,7 @@ logger = logging.getLogger("jenkins-agent.hybrid")
 class AnalysisMode(str, Enum):
     """Analysis mode used."""
     SCRIPTED = "scripted"           # Fast, single LLM call
+    ITERATIVE = "iterative"         # Multi-call iterative RC analysis
     AGENTIC = "agentic"             # Deep investigation with tool calls
     HYBRID = "hybrid"               # Scripted + Agentic enhancement
 
@@ -222,6 +223,7 @@ class HybridAnalyzer:
         library_sources: Dict[str, str] = None,
         force_agentic: bool = False,
         force_scripted: bool = False,
+        force_iterative: bool = False,
         pr_url: str = None,
     ) -> HybridAnalysisResult:
         """
@@ -237,6 +239,7 @@ class HybridAnalyzer:
             library_sources: Library source code if available
             force_agentic: Force agentic investigation regardless of category
             force_scripted: Force scripted-only mode
+            force_iterative: Force iterative RC analysis (Requirement 5.2)
             pr_url: PR URL for posting results
             
         Returns:
@@ -262,6 +265,24 @@ class HybridAnalyzer:
         failed_stage = scripted_result.failure_analysis.get("failed_stage", "")
         
         logger.info(f"Scripted analysis complete: {category}, confidence={scripted_result.failure_analysis.get('confidence', 0):.2f}")
+        
+        # Check if iterative RC analysis should be used (Requirement 5)
+        use_iterative = self._should_use_iterative(
+            force_iterative=force_iterative,
+            force_scripted=force_scripted,
+            category=category,
+            scripted_confidence=scripted_result.failure_analysis.get('confidence', 0),
+        )
+        
+        if use_iterative:
+            return self._run_iterative_analysis(
+                build_info=build_info,
+                parsed_log=parsed_log,
+                scripted_result=scripted_result,
+                console_log_snippet=console_log_snippet,
+                jenkinsfile_content=jenkinsfile_content,
+                library_sources=library_sources,
+            )
         
         # Phase 2: Decide if agentic investigation is needed
         use_agentic = (
@@ -429,3 +450,169 @@ class HybridAnalyzer:
     def test_connection(self) -> bool:
         """Test if the analyzer is properly configured."""
         return self.scripted_analyzer.test_connection()
+    
+    def _should_use_iterative(
+        self,
+        force_iterative: bool,
+        force_scripted: bool,
+        category: str,
+        scripted_confidence: float,
+    ) -> bool:
+        """
+        Determine if iterative RC analysis should be used.
+        
+        Implements Requirement 5.2, 5.3, 5.4
+        """
+        # Check if RC analyzer is enabled
+        if not hasattr(self.config, 'rc_analyzer') or not self.config.rc_analyzer.enabled:
+            return False
+        
+        # Force flags (Requirement 5.2)
+        if force_iterative:
+            logger.info("Using iterative mode: force_iterative=True")
+            return True
+        
+        if force_scripted:
+            return False
+        
+        # Auto-select for AGENTIC_CATEGORIES (Requirement 5.3)
+        if category in AGENTIC_CATEGORIES:
+            logger.info(f"Using iterative mode: category {category} in AGENTIC_CATEGORIES")
+            return True
+        
+        # Use iterative if scripted confidence is low
+        if scripted_confidence < 0.5:
+            logger.info(f"Using iterative mode: low scripted confidence {scripted_confidence}")
+            return True
+        
+        return False
+    
+    def _run_iterative_analysis(
+        self,
+        build_info: BuildInfo,
+        parsed_log: ParsedLog,
+        scripted_result: AnalysisResult,
+        console_log_snippet: str,
+        jenkinsfile_content: str,
+        library_sources: Dict[str, str],
+    ) -> HybridAnalysisResult:
+        """
+        Run iterative RC analysis.
+        
+        Implements Requirement 5.4: Merge into HybridAnalysisResult
+        Implements Requirement 5.5: Catch exceptions and fallback
+        """
+        logger.info("Running iterative RC analysis")
+        
+        try:
+            from .rc_analyzer import RCAnalyzer, RCAnalyzerConfig
+            from .rc_finder import RootCauseFinder
+            
+            # Create RC context using existing RootCauseFinder
+            rc_finder = RootCauseFinder(self.config.__dict__ if hasattr(self.config, '__dict__') else {})
+            rc_context = rc_finder.find(console_log_snippet)
+            
+            # Create RC analyzer config from main config
+            rc_config = RCAnalyzerConfig(
+                enabled=self.config.rc_analyzer.enabled if hasattr(self.config, 'rc_analyzer') else True,
+                max_rc_iterations=self.config.rc_analyzer.max_rc_iterations if hasattr(self.config, 'rc_analyzer') else 3,
+                confidence_threshold=self.config.rc_analyzer.confidence_threshold if hasattr(self.config, 'rc_analyzer') else 0.7,
+                max_source_context_chars=self.config.rc_analyzer.max_source_context_chars if hasattr(self.config, 'rc_analyzer') else 8000,
+            )
+            
+            # Create RC analyzer
+            rc_analyzer = RCAnalyzer(
+                ai_analyzer=self.scripted_analyzer,
+                github_client=self.github_client,
+                groovy_analyzer=None,  # TODO: Add groovy analyzer
+                config=rc_config,
+            )
+            
+            # Run iterative analysis
+            rc_result = rc_analyzer.analyze(
+                parsed_log=parsed_log,
+                rc_context=rc_context,
+                build_info={
+                    'job_name': build_info.job_name,
+                    'build_number': build_info.build_number,
+                },
+                jenkinsfile_content=jenkinsfile_content,
+                library_sources=library_sources,
+            )
+            
+            # Merge into scripted result (Requirement 5.4)
+            merged = self._merge_iterative_result(scripted_result, rc_result)
+            
+            logger.info(f"Iterative analysis complete: {rc_result.iterations_used} iterations, "
+                       f"confidence={rc_result.confidence}")
+            
+            return HybridAnalysisResult(
+                mode=AnalysisMode.ITERATIVE,
+                scripted_result=scripted_result,
+                agentic_result=rc_result.to_dict(),
+                merged_result=merged,
+                agentic_enhanced=True,
+                tool_calls_made=rc_result.iterations_used,
+            )
+            
+        except Exception as e:
+            # Requirement 5.5: Catch exception and fallback
+            logger.error(f"Iterative analysis failed: {e}")
+            logger.info("Falling back to scripted result")
+            
+            return HybridAnalysisResult(
+                mode=AnalysisMode.SCRIPTED,
+                scripted_result=scripted_result,
+                agentic_result={"error": str(e)},
+                merged_result=scripted_result,
+                agentic_enhanced=False,
+            )
+    
+    def _merge_iterative_result(
+        self,
+        scripted: AnalysisResult,
+        rc_result,
+    ) -> AnalysisResult:
+        """
+        Merge iterative RC analysis result into scripted result.
+        
+        Implements Requirement 5.4: Use existing _merge_results logic.
+        """
+        merged = scripted
+        
+        # If RC analysis has better confidence, use its root cause
+        if rc_result.confidence > scripted.root_cause.confidence:
+            merged.root_cause.summary = rc_result.root_cause
+            merged.root_cause.confidence = rc_result.confidence
+            merged.root_cause.category = rc_result.category
+            
+            if rc_result.fix:
+                merged.root_cause.details = f"Fix: {rc_result.fix}"
+        
+        # Update failure analysis
+        merged.failure_analysis["category"] = rc_result.category
+        merged.failure_analysis["confidence"] = rc_result.confidence
+        merged.failure_analysis["iterative_analysis"] = True
+        merged.failure_analysis["iterations_used"] = rc_result.iterations_used
+        merged.failure_analysis["source_files_fetched"] = rc_result.source_files_fetched
+        
+        # Add fix as recommendation
+        if rc_result.fix:
+            from .ai_analyzer import Recommendation
+            fix_rec = Recommendation(
+                action=rc_result.fix,
+                priority="high",
+                rationale=f"Based on {rc_result.iterations_used}-iteration analysis with {rc_result.confidence:.0%} confidence",
+            )
+            merged.recommendations = [fix_rec] + merged.recommendations[:4]
+        
+        # Update retry assessment
+        merged.retry_assessment = RetryAssessment(
+            is_retriable=rc_result.is_retriable,
+            confidence=rc_result.confidence,
+            reason=rc_result.root_cause[:200],
+            recommended_wait_seconds=60 if rc_result.is_retriable else 0,
+            max_retries=2 if rc_result.is_retriable else 0,
+        )
+        
+        return merged

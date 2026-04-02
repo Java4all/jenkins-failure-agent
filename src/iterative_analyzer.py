@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any, Tuple
 from enum import Enum
 
-from .rc_finder import RootCauseFinder, RootCauseContext, ErrorType
+from .deep_rc_finder import DeepRCFinder, DeepInvestigation, ErrorType
 
 logger = logging.getLogger(__name__)
 
@@ -185,8 +185,8 @@ RULES:
         # Library mappings: library_name -> repo_path
         self.library_mappings = self.config.get('library_mappings', {})
         
-        # RC Finder for smart extraction
-        self.rc_finder = RootCauseFinder(config)
+        # Deep RC Finder for thorough investigation
+        self.deep_finder = DeepRCFinder(config)
     
     def analyze(
         self, 
@@ -195,115 +195,149 @@ RULES:
         jenkinsfile_content: Optional[str] = None
     ) -> InvestigationResult:
         """
-        Run iterative root cause analysis.
+        Run deep iterative root cause analysis.
         
-        Args:
-            log: Jenkins console log
-            build_info: Build metadata (job name, number, etc.)
-            jenkinsfile_content: Optional Jenkinsfile content
-            
-        Returns:
-            InvestigationResult with root cause and investigation trace
+        Flow:
+        1. Deep RC Finder investigates the log thoroughly
+        2. AI analyzes the investigation report
+        3. Solution Finder generates fix
         """
-        # Step 1: Smart extract initial context
-        rc_context = self.rc_finder.find(log)
+        # Step 1: Deep investigation
+        investigation = self.deep_finder.investigate(log)
+        
+        logger.info(f"Deep Investigation: stage={investigation.failed_stage.name if investigation.failed_stage else None}, "
+                   f"error_type={investigation.error_type.value}, "
+                   f"identifiers={investigation.error.identifiers if investigation.error else []}")
         
         result = InvestigationResult(
             root_cause="",
-            error_type=rc_context.error_type,
-            failed_stage=rc_context.failed_stage,
-            failed_method=rc_context.failed_method,
+            error_type=investigation.error_type,
+            failed_stage=investigation.failed_stage.name if investigation.failed_stage else None,
+            failed_method=investigation.failed_stage.failed_method if investigation.failed_stage else None,
             confidence=0.0,
         )
         
-        # Build initial context for AI
-        current_context = self._build_initial_context(rc_context, build_info, jenkinsfile_content)
+        # Step 2: Generate investigation report for AI
+        investigation_report = investigation.get_investigation_report()
         
-        # Investigation loop
-        for cycle in range(1, self.max_cycles + 1):
-            logger.info(f"Investigation cycle {cycle}/{self.max_cycles}")
+        # Step 3: If we found clear error, ask AI to analyze
+        if investigation.error and investigation.error.error_line:
+            result.root_cause = investigation.error.error_line.strip()
+            result.confidence = 0.7
             
-            # Ask AI to analyze
-            ai_response = self._call_ai(self.ANALYSIS_PROMPT.format(context=current_context))
+            # Build source code context if available
+            source_context = ""
+            if investigation.error.source_file and self.github_client:
+                source_code = self._fetch_code(investigation.error.source_file)
+                if source_code:
+                    source_context = f"\n\n## SOURCE CODE ({investigation.error.source_file}):\n{source_code}"
+            
+            ai_prompt = f"""You are analyzing a Jenkins build failure. A deep investigation has been performed.
+
+{investigation_report}
+{source_context}
+
+Based on this investigation:
+
+1. What is the ROOT CAUSE? Be specific - use the identifiers, paths, and evidence found.
+2. What is the FIX? Provide specific steps or commands.
+
+Respond with JSON:
+{{
+  "root_cause": "Clear one-sentence explanation (mention specific names/IDs)",
+  "confidence": 0.0-1.0,
+  "fix_summary": "One sentence describing the fix",
+  "fix_steps": ["Step 1: specific action", "Step 2: specific action"],
+  "fix_code": "Actual command or code to run (if applicable)",
+  "fix_file": "File to modify (if applicable)"
+}}"""
+
+            ai_response = self._call_ai(ai_prompt)
             parsed = self._parse_ai_response(ai_response)
             
             # Record step
-            step = InvestigationStep(
-                cycle=cycle,
-                action=self._parse_action(parsed.get('need_action')),
-                context_provided=current_context[:500] + "..." if len(current_context) > 500 else current_context,
+            result.steps.append(InvestigationStep(
+                cycle=1,
+                action=InvestigationAction.DONE,
+                context_provided=investigation_report[:1000] + "..." if len(investigation_report) > 1000 else investigation_report,
                 ai_response=ai_response,
-                ai_request=parsed.get('need_target'),
-                findings=parsed.get('reasoning'),
-            )
-            result.steps.append(step)
-            result.cycles_used = cycle
+                findings=parsed.get('root_cause'),
+            ))
+            result.cycles_used = 1
             
-            # Check if root cause found
-            if parsed.get('status') == 'found' and parsed.get('confidence', 0) >= 0.7:
-                result.root_cause = parsed.get('root_cause', '')
-                result.confidence = parsed.get('confidence', 0.8)
-                result.code_location = parsed.get('code_location')
-                result.fix_suggestion = parsed.get('fix_suggestion')
-                logger.info(f"Root cause found in cycle {cycle}")
-                break
+            # Update result with AI analysis
+            if parsed.get('root_cause'):
+                result.root_cause = parsed['root_cause']
+            if parsed.get('confidence'):
+                result.confidence = float(parsed['confidence'])
+            if parsed.get('fix_summary'):
+                result.fix_suggestion = parsed['fix_summary']
+            if parsed.get('fix_steps'):
+                result.fix_steps = parsed['fix_steps']
+            if parsed.get('fix_code'):
+                result.fix_code = parsed['fix_code']
+            if parsed.get('fix_file'):
+                result.fix_file = parsed['fix_file']
             
-            # Determine next action
-            action = self._parse_action(parsed.get('need_action'))
-            target = parsed.get('need_target', '')
+            # Add code location from investigation
+            if investigation.error.source_file:
+                result.code_location = investigation.error.source_file
+                if investigation.error.source_line:
+                    result.code_location += f":{investigation.error.source_line}"
+                    
+        else:
+            # Fallback: use last 100 lines
+            logger.info("Deep investigation couldn't find clear error, using fallback")
             
-            if action == InvestigationAction.DONE or not target:
-                # AI says done or no specific request
-                result.root_cause = parsed.get('root_cause', 'Unable to determine root cause')
-                result.confidence = parsed.get('confidence', 0.5)
-                break
+            log_lines = log.strip().split('\n')
+            context = '\n'.join(log_lines[-100:])
             
-            # Fetch additional information
-            additional_context = self._fetch_additional_info(action, target, rc_context, log)
+            ai_prompt = f"""Analyze this Jenkins build log and find the ROOT CAUSE.
+
+JOB: {build_info.get('job_name', 'unknown') if build_info else 'unknown'}
+
+LOG (last 100 lines):
+{context}
+
+Find:
+1. What FAILED?
+2. WHY did it fail?
+3. How to FIX it?
+
+Respond with JSON:
+{{
+  "root_cause": "Clear explanation",
+  "confidence": 0.0-1.0,
+  "fix_summary": "How to fix",
+  "fix_steps": ["Step 1...", "Step 2..."],
+  "fix_code": "Command if applicable"
+}}"""
+
+            ai_response = self._call_ai(ai_prompt)
+            parsed = self._parse_ai_response(ai_response)
             
-            if additional_context:
-                current_context = self._merge_context(current_context, additional_context, action, target)
-                if action in (InvestigationAction.NEED_CODE, InvestigationAction.NEED_DEPENDENCY):
-                    result.code_analyzed.append(target)
-            else:
-                # Couldn't fetch what AI asked for
-                logger.warning(f"Could not fetch {action.value}: {target}")
-                current_context += f"\n\n[NOTE: Could not fetch {target}. Please analyze with available information.]"
+            result.steps.append(InvestigationStep(
+                cycle=1,
+                action=InvestigationAction.DONE,
+                context_provided=context[:500] + "...",
+                ai_response=ai_response,
+                findings=parsed.get('root_cause'),
+            ))
+            result.cycles_used = 1
+            
+            result.root_cause = parsed.get('root_cause', 'Unable to determine root cause')
+            result.confidence = float(parsed.get('confidence', 0.5))
+            result.fix_suggestion = parsed.get('fix_summary')
+            result.fix_steps = parsed.get('fix_steps', [])
+            result.fix_code = parsed.get('fix_code')
         
-        # If no root cause after max cycles
+        # Ensure we have a root cause
         if not result.root_cause:
-            result.root_cause = "Investigation inconclusive after maximum cycles"
+            if investigation.error:
+                result.root_cause = investigation.error.exception_message or investigation.error.error_line
+            else:
+                result.root_cause = "Unable to determine root cause"
             result.confidence = 0.3
-        
-        # =====================================================
-        # SOLUTION FINDER: Generate specific fix for root cause
-        # =====================================================
-        if result.root_cause and result.confidence >= 0.5:
-            logger.info("Running Solution Finder...")
-            solution = self._find_solution(result, rc_context, current_context)
-            
-            if solution:
-                result.fix_suggestion = solution.get('fix_summary', result.fix_suggestion)
-                result.fix_code = solution.get('fix_code')
-                result.fix_file = solution.get('fix_file')
-                result.fix_steps = solution.get('fix_steps', [])
-                
-                # If solution finder needs more info, try to fetch it
-                need_more = solution.get('need_more_info')
-                if need_more and result.cycles_used < self.max_cycles:
-                    logger.info(f"Solution finder needs more info: {need_more}")
-                    more_context = self._fetch_solution_context(need_more, rc_context, log)
-                    if more_context:
-                        # Re-run solution finder with more context
-                        enhanced_solution = self._find_solution(
-                            result, rc_context, 
-                            current_context + f"\n\nADDITIONAL INFO:\n{more_context}"
-                        )
-                        if enhanced_solution:
-                            result.fix_suggestion = enhanced_solution.get('fix_summary', result.fix_suggestion)
-                            result.fix_code = enhanced_solution.get('fix_code', result.fix_code)
-                            result.fix_file = enhanced_solution.get('fix_file', result.fix_file)
-                            result.fix_steps = enhanced_solution.get('fix_steps', result.fix_steps)
         
         return result
     

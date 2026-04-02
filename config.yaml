@@ -69,6 +69,13 @@ server:
   # api_key left empty = no auth required (UI works)
   # set SERVER_API_KEY in .env if you want API protection
 
+# Iterative Root Cause Analyzer
+rc_analyzer:
+  enabled: true
+  max_rc_iterations: 3
+  confidence_threshold: 0.7
+  max_source_context_chars: 8000
+
 analysis:
   max_log_lines: 5000
   enable_deep_investigation: true
