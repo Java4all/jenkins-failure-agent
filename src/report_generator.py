@@ -113,7 +113,11 @@ class ReportGenerator:
             lines.append("### Primary Error")
             lines.append("")
             lines.append("```")
-            lines.append(analysis['primary_error'])
+            # Ensure primary_error is a string (defensive)
+            primary_error = analysis['primary_error']
+            if not isinstance(primary_error, str):
+                primary_error = str(primary_error)
+            lines.append(primary_error)
             lines.append("```")
             lines.append("")
         
@@ -122,13 +126,21 @@ class ReportGenerator:
         lines.append("")
         lines.append(f"### Summary")
         lines.append("")
-        lines.append(f"> {result.root_cause.summary}")
+        # Ensure summary is a string (defensive)
+        summary = result.root_cause.summary
+        if not isinstance(summary, str):
+            summary = str(summary)
+        lines.append(f"> {summary}")
         lines.append("")
         
         if result.root_cause.details:
             lines.append("### Details")
             lines.append("")
-            lines.append(result.root_cause.details)
+            # Ensure details is a string (defensive)
+            details = result.root_cause.details
+            if not isinstance(details, str):
+                details = str(details)
+            lines.append(details)
             lines.append("")
         
         if result.root_cause.related_commits:
@@ -152,27 +164,45 @@ class ReportGenerator:
         priority_order = {"HIGH": 1, "MEDIUM": 2, "LOW": 3}
         sorted_recs = sorted(
             result.recommendations,
-            key=lambda r: priority_order.get(r.priority, 4)
+            key=lambda r: priority_order.get(getattr(r, 'priority', 'LOW') if isinstance(getattr(r, 'priority', 'LOW'), str) else 'LOW', 4)
         )
         
         for i, rec in enumerate(sorted_recs, 1):
-            priority_badge = self._get_priority_badge(rec.priority)
-            lines.append(f"### {i}. {priority_badge} {rec.action}")
+            # Ensure all recommendation fields are strings
+            priority = getattr(rec, 'priority', 'MEDIUM')
+            action = getattr(rec, 'action', '')
+            rationale = getattr(rec, 'rationale', '')
+            estimated_effort = getattr(rec, 'estimated_effort', '')
+            code_suggestion = getattr(rec, 'code_suggestion', '')
+            
+            if not isinstance(priority, str):
+                priority = str(priority)
+            if not isinstance(action, str):
+                action = str(action)
+            if not isinstance(rationale, str):
+                rationale = str(rationale)
+            if not isinstance(estimated_effort, str):
+                estimated_effort = str(estimated_effort) if estimated_effort else ''
+            if not isinstance(code_suggestion, str):
+                code_suggestion = str(code_suggestion) if code_suggestion else ''
+            
+            priority_badge = self._get_priority_badge(priority)
+            lines.append(f"### {i}. {priority_badge} {action}")
             lines.append("")
             
-            if rec.rationale:
-                lines.append(f"**Rationale:** {rec.rationale}")
+            if rationale:
+                lines.append(f"**Rationale:** {rationale}")
                 lines.append("")
             
-            if rec.estimated_effort:
-                lines.append(f"**Estimated Effort:** {rec.estimated_effort}")
+            if estimated_effort:
+                lines.append(f"**Estimated Effort:** {estimated_effort}")
                 lines.append("")
             
-            if rec.code_suggestion:
+            if code_suggestion:
                 lines.append("**Code Suggestion:**")
                 lines.append("")
                 lines.append("```")
-                lines.append(rec.code_suggestion)
+                lines.append(code_suggestion)
                 lines.append("```")
                 lines.append("")
         

@@ -234,21 +234,33 @@ def get_summary_prompt() -> str:
 Based on everything you've found, provide a final summary:
 
 ### Root Cause
-[One sentence description of what caused the failure]
+[One sentence: the actual error message or specific issue]
 
 ### Details  
-[Full explanation of the issue]
+[Full explanation of what went wrong and why]
 
 ### Evidence
-[Key findings from your investigation - code snippets, log lines, etc.]
+[Key findings - actual code snippets, log lines, file paths]
 
-### Recommended Fix
-[Specific code changes or configuration fixes]
+### Recommendations
+[Specific, actionable steps to fix this - NOT generic advice like "review the code"]
+
+Examples of GOOD recommendations:
+- Add null check in UserService.groovy line 45: `if (user?.name)`
+- Create credential 'aws-prod-key' of type 'AWS Credentials' in Jenkins
+- Change timeout from 10 to 30 in Jenkinsfile line 78
+- Fix typo: change `deployServce()` to `deployService()` in vars/deploy.groovy
+
+Examples of BAD recommendations (DO NOT USE):
+- Review the error details
+- Check the configuration  
+- Investigate the issue
+- Look at the logs
 
 ### Retriable
-[true/false - would retrying the build help?]
+[true/false - would retrying the build help WITHOUT code changes?]
 
 ### Confidence
 [0.0-1.0 - how confident are you in this analysis?]
 
-Provide your summary now in a structured format."""
+Provide your summary now. Be specific - include file names, line numbers, exact values."""

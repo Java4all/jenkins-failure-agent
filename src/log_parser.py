@@ -759,6 +759,205 @@ class LogParser:
         
         return ". ".join(parts) + "."
     
+    def extract_command_context(self, log: str, max_sections: int = 10) -> List[Dict[str, Any]]:
+        """
+        Extract command executions and their outputs from the log.
+        This helps identify cloud/API issues that precede the final error.
+        
+        Returns list of command contexts with:
+        - command: The command that was run
+        - output: The output (success or error)
+        - line_number: Where in the log
+        - is_error: Whether this appears to be an error
+        """
+        lines = log.split('\n')
+        contexts = []
+        
+        # Patterns for command starts
+        command_patterns = [
+            # Cloud CLIs
+            r'^\+?\s*(aws\s+\S+)',
+            r'^\+?\s*(az\s+\S+)',
+            r'^\+?\s*(gcloud\s+\S+)',
+            r'^\+?\s*(kubectl\s+\S+)',
+            r'^\+?\s*(helm\s+\S+)',
+            r'^\+?\s*(terraform\s+\S+)',
+            r'^\+?\s*(docker\s+\S+)',
+            # Build tools
+            r'^\+?\s*(npm\s+\S+)',
+            r'^\+?\s*(yarn\s+\S+)',
+            r'^\+?\s*(mvn\s+\S+)',
+            r'^\+?\s*(gradle\s+\S+)',
+            r'^\+?\s*(pip\s+\S+)',
+            # Generic shell
+            r'^\+\s+(.+)',  # Lines starting with + (shell trace)
+            r'^\[INFO\]\s+Executing:\s+(.+)',
+            r'^Running:\s+(.+)',
+            r'^Executing:\s+(.+)',
+        ]
+        
+        # Error indicators in output
+        error_indicators = [
+            r'(?i)error[:\s]',
+            r'(?i)failed',
+            r'(?i)exception',
+            r'(?i)denied',
+            r'(?i)forbidden',
+            r'(?i)not found',
+            r'(?i)unauthorized',
+            r'(?i)invalid',
+            r'(?i)missing',
+            r'(?i)unable to',
+            r'(?i)cannot',
+            r'(?i)could not',
+            r'\b4\d{2}\b',  # HTTP 4xx
+            r'\b5\d{2}\b',  # HTTP 5xx
+        ]
+        
+        i = 0
+        while i < len(lines) and len(contexts) < max_sections:
+            line = lines[i]
+            
+            # Check if this line is a command
+            for pattern in command_patterns:
+                match = re.search(pattern, line)
+                if match:
+                    command = match.group(1)
+                    
+                    # Capture output (next lines until next command or empty block)
+                    output_lines = []
+                    j = i + 1
+                    while j < len(lines) and j < i + 30:  # Max 30 lines of output
+                        next_line = lines[j]
+                        # Stop at next command or stage marker
+                        if any(re.search(p, next_line) for p in command_patterns[:12]):
+                            break
+                        if re.match(r'^\[Pipeline\]', next_line):
+                            break
+                        if next_line.strip():
+                            output_lines.append(next_line)
+                        elif len(output_lines) > 0:  # Empty line after some output
+                            break
+                        j += 1
+                    
+                    output = '\n'.join(output_lines[:20])  # Limit output length
+                    
+                    # Check if output contains errors
+                    is_error = any(re.search(p, output) for p in error_indicators)
+                    
+                    if output.strip():  # Only add if there's output
+                        contexts.append({
+                            'command': command[:200],
+                            'output': output[:1000],
+                            'line_number': i + 1,
+                            'is_error': is_error,
+                        })
+                    
+                    i = j - 1  # Skip the lines we've processed
+                    break
+            i += 1
+        
+        return contexts
+    
+    def extract_api_responses(self, log: str, max_responses: int = 5) -> List[Dict[str, Any]]:
+        """
+        Extract API/HTTP responses from the log.
+        Looks for JSON responses, HTTP status codes, and API error messages.
+        """
+        responses = []
+        lines = log.split('\n')
+        
+        # Patterns for API responses
+        response_patterns = [
+            (r'HTTP/[\d.]+ (\d{3})', 'http_status'),
+            (r'"status":\s*(\d{3})', 'json_status'),
+            (r'"error":\s*"([^"]+)"', 'json_error'),
+            (r'"message":\s*"([^"]+)"', 'json_message'),
+            (r'"code":\s*"?([^",}\s]+)', 'error_code'),
+            (r'Response:\s*(.+)', 'response'),
+            (r'API Error:\s*(.+)', 'api_error'),
+        ]
+        
+        for i, line in enumerate(lines):
+            if len(responses) >= max_responses:
+                break
+                
+            for pattern, resp_type in response_patterns:
+                match = re.search(pattern, line)
+                if match:
+                    # Get context around this response
+                    context_start = max(0, i - 3)
+                    context_end = min(len(lines), i + 3)
+                    context = '\n'.join(lines[context_start:context_end])
+                    
+                    responses.append({
+                        'type': resp_type,
+                        'value': match.group(1),
+                        'line_number': i + 1,
+                        'context': context[:500],
+                    })
+                    break
+        
+        return responses
+    
+    def get_enhanced_error_context(
+        self, 
+        log: str, 
+        result: ParsedLog,
+        context_lines: int = 10
+    ) -> str:
+        """
+        Build enhanced context for AI analysis including:
+        - Commands that failed
+        - API responses
+        - Extended context around errors
+        """
+        sections = []
+        
+        # 1. Failed stage context
+        if result.failed_stage:
+            sections.append(f"=== FAILED STAGE: {result.failed_stage} ===")
+            # Try to find the stage in the log and get more context
+            stage_pattern = rf'\[Pipeline\]\s*{{\s*\(\s*{re.escape(result.failed_stage)}\s*\)'
+            match = re.search(stage_pattern, log)
+            if match:
+                start = match.start()
+                # Get 2000 chars from stage start
+                sections.append(log[start:start+2000])
+        
+        # 2. Command executions with errors
+        cmd_contexts = self.extract_command_context(log)
+        error_commands = [c for c in cmd_contexts if c['is_error']]
+        if error_commands:
+            sections.append("\n=== COMMAND ERRORS (check these for root cause) ===")
+            for cmd in error_commands[-5:]:  # Last 5 error commands
+                sections.append(f"\n[Line {cmd['line_number']}] $ {cmd['command']}")
+                sections.append(cmd['output'])
+        
+        # 3. API/HTTP responses
+        api_responses = self.extract_api_responses(log)
+        error_responses = [r for r in api_responses if r['type'] in ('json_error', 'api_error') or 
+                          (r['type'] in ('http_status', 'json_status') and int(r['value']) >= 400)]
+        if error_responses:
+            sections.append("\n=== API/HTTP ERRORS ===")
+            for resp in error_responses[-3:]:
+                sections.append(f"\n[Line {resp['line_number']}] {resp['type']}: {resp['value']}")
+                sections.append(resp['context'])
+        
+        # 4. Extended error context (more lines before each error)
+        if result.errors:
+            sections.append("\n=== ERRORS WITH EXTENDED CONTEXT ===")
+            for error in result.errors[:5]:
+                sections.append(f"\n>>> ERROR at line {error.line_number}:")
+                # Get more context from the log
+                lines = log.split('\n')
+                start = max(0, error.line_number - context_lines - 1)
+                end = min(len(lines), error.line_number + 3)
+                context = '\n'.join(lines[start:end])
+                sections.append(context)
+        
+        return '\n'.join(sections)
+    
     def get_error_snippet(
         self, 
         result: ParsedLog, 

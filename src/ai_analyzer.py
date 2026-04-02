@@ -4,6 +4,7 @@ Supports any OpenAI-compatible API (Ollama, vLLM, LocalAI, etc.)
 """
 
 import json
+import re
 import time
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any, Optional
@@ -104,55 +105,58 @@ class AnalysisResult:
     config_analysis: Optional[Dict[str, Any]] = None
 
 
-SYSTEM_PROMPT = """You are a Jenkins CI/CD failure analyst. Analyze the build failure and respond with a JSON object.
+SYSTEM_PROMPT = """You analyze Jenkins build failures. Respond with JSON only.
 
-CRITICAL: The error is almost always at the END of the log, in the LAST stage. Look there FIRST.
+IMPORTANT: The REAL root cause is often in COMMAND OUTPUTS that ran BEFORE the final error.
+Look for:
+- Cloud CLI errors (aws, az, gcloud, kubectl) - missing params, wrong region, permission denied
+- API responses - HTTP 4xx/5xx, error messages, missing fields
+- Configuration errors - wrong values, missing env vars, invalid syntax
 
-IMPORTANT: Respond ONLY with valid JSON, no other text. Use this exact format:
+STEP 1: Check COMMAND OUTPUTS section first for the REAL cause
+STEP 2: Look at the final error and stack traces
+STEP 3: Connect them - what command/config caused the failure?
+STEP 4: Generate a fix with specifics (names, values, paths from the log)
 
+JSON FORMAT:
 {
-  "root_cause": "Copy the ACTUAL error text from the log",
-  "category": "TEST_FAILURE|COMPILATION_ERROR|DEPENDENCY|CONFIGURATION|NETWORK|TIMEOUT|INFRASTRUCTURE|GROOVY_LIBRARY|GROOVY_CPS|CREDENTIAL_ERROR|AGENT_ERROR|PLUGIN_ERROR|UNKNOWN",
-  "is_retriable": true or false,
-  "confidence": 0.0 to 1.0,
-  "failed_stage": "stage name or null",
-  "failed_method": "method/function name or null",
-  "recommendations": [
-    {
-      "priority": "HIGH or MEDIUM or LOW",
-      "action": "Specific action to fix THIS error",
-      "details": "Step-by-step instructions, commands, or code"
-    }
-  ]
+  "root_cause": "The REAL cause - could be from a command output, not just the final error",
+  "category": "CREDENTIAL_ERROR|DEPENDENCY|COMPILATION_ERROR|TEST_FAILURE|GROOVY_LIBRARY|TIMEOUT|NETWORK|CONFIGURATION|INFRASTRUCTURE|UNKNOWN",
+  "is_retriable": false,
+  "confidence": 0.85,
+  "failed_stage": "stage name",
+  "failed_method": "method name",
+  "fix": {
+    "action": "What to do - include specifics from the log",
+    "file": "file to change (if applicable)",
+    "code": "code snippet or command to run"
+  }
 }
 
-CRITICAL FOR root_cause:
-- Copy the ACTUAL error text from the log (lines starting with >>> in EXTRACTED ERRORS)
-- DO NOT write "Error 1" or "line 6747" - that's just a label
+EXAMPLES - Root cause is often in command output, not final error:
 
-CRITICAL FOR recommendations - ANALYZE THE ERROR AND BE SPECIFIC:
-- Extract specifics from the error: credential IDs, package names, file paths, line numbers
-- For credential errors: identify the credential ID and type (AWS, GCP, Azure, Docker, GitHub, Maven, etc.)
-- For dependency errors: specify exact package name and suggested version
-- For code errors: reference specific file, line number, method from stack trace
-- For timeout: suggest specific new timeout value based on the operation type
-- Provide 1-3 recommendations ordered by priority
+Log shows: "aws ecs update-service" then "An error occurred (InvalidParameterException): Missing required parameter: taskDefinition"
+Root cause: "AWS ECS update-service failed: Missing required parameter 'taskDefinition'"
+Fix: {"action": "Add taskDefinition parameter to aws ecs update-service call", "file": "deploy.sh", "code": "aws ecs update-service --task-definition my-task:latest ..."}
 
-GOOD recommendation examples (context-specific):
-- {"priority": "HIGH", "action": "Create AWS credential 'prod-aws-deploy'", "details": "Go to Jenkins > Credentials > Add > AWS Credentials. The ECS deployment requires this for S3 artifact upload."}
-- {"priority": "HIGH", "action": "Install missing package: @babel/core@7.22.0", "details": "Run: npm install @babel/core@7.22.0 --save-dev"}
-- {"priority": "HIGH", "action": "Fix NullPointerException in UserService.java:156", "details": "Add null check: if (user != null && user.getName() != null)"}
-- {"priority": "MEDIUM", "action": "Increase Docker build timeout to 30 minutes", "details": "In Jenkinsfile line 45, change timeout(10) to timeout(30)"}
+Log shows: "kubectl apply" then "error: unable to recognize file: no matches for kind 'Deployment' in version 'apps/v1beta1'"
+Root cause: "Kubernetes API version mismatch - apps/v1beta1 is deprecated"
+Fix: {"action": "Update Kubernetes API version from apps/v1beta1 to apps/v1", "file": "deployment.yaml", "code": "apiVersion: apps/v1"}
 
-BAD recommendations (NEVER use generic phrases):
-- "Review the error" / "Check the logs" / "Investigate the issue"
-- "Fix the code" / "Update credentials" / "Check configuration"
+Log shows: "az acr login" then "AADSTS700016: Application not found in tenant"
+Root cause: "Azure ACR login failed - service principal not found in tenant"
+Fix: {"action": "Verify Azure service principal exists and has ACR pull permission", "file": null, "code": "az ad sp show --id $AZURE_CLIENT_ID"}
 
-WHERE TO LOOK FOR ERRORS:
-1. Lines starting with >>> in EXTRACTED ERRORS section
-2. Exception messages and stack traces  
-3. Lines containing ERROR, FATAL, FAILED
-4. The LAST error before build ends"""
+Log shows: "terraform apply" then "Error: Missing required argument: The argument 'region' is required"
+Root cause: "Terraform apply failed: missing required 'region' argument"
+Fix: {"action": "Add region to Terraform provider configuration", "file": "main.tf", "code": "provider 'aws' { region = 'us-east-1' }"}
+
+CRITICAL RULES:
+1. Look at COMMAND OUTPUTS section first - the real cause is often there
+2. Connect command errors to the final exception
+3. The fix MUST include specifics from the log (param names, values, file paths)
+4. NEVER say "review", "check", "investigate" - give the actual fix
+5. If a cloud/API command failed, include the correct command syntax in fix"""
 
 
 GROOVY_SPECIALIZED_PROMPT = """
@@ -405,6 +409,8 @@ class AIAnalyzer:
     ) -> str:
         """Build a simple, effective analysis prompt."""
         
+        from .log_parser import LogParser
+        
         parts = []
         
         # Basic build info
@@ -415,30 +421,47 @@ class AIAnalyzer:
         if parsed_log.failed_method:
             parts.append(f"FAILED METHOD: {parsed_log.failed_method} <-- THIS METHOD WAS RUNNING WHEN IT FAILED")
         
-        # FIRST: Show the raw log END - this is where the error is!
+        # ENHANCED: Extract command errors and API responses FIRST
+        # This helps identify the REAL root cause (e.g., cloud misconfig, missing params)
+        if console_log_snippet:
+            parser = LogParser()
+            
+            # Get enhanced context (commands that failed, API errors, etc.)
+            enhanced_context = parser.get_enhanced_error_context(
+                console_log_snippet, 
+                parsed_log,
+                context_lines=15  # More context around errors
+            )
+            if enhanced_context.strip():
+                parts.append("\n" + "="*60)
+                parts.append("IMPORTANT: COMMAND OUTPUTS AND API RESPONSES")
+                parts.append("These often show the REAL root cause (missing params, wrong config, etc.)")
+                parts.append("="*60)
+                parts.append(enhanced_context)
+        
+        # Then show the raw log END - this is where the final error is
         if console_log_snippet:
             snippet = console_log_snippet
             # Take the LAST 8000 chars - this is where the error almost always is
             if len(snippet) > 8000:
                 snippet = snippet[-8000:]
-            parts.append("\n=== END OF BUILD LOG (MOST IMPORTANT - ERROR IS HERE) ===")
+            parts.append("\n=== END OF BUILD LOG ===")
             parts.append(snippet)
             parts.append("=== END OF LOG ===")
         
-        # Then show extracted errors - format so actual error text is prominent
+        # Show extracted errors with more context
         if parsed_log.errors:
-            parts.append("\n--- EXTRACTED ERRORS (use these for root_cause) ---")
+            parts.append("\n--- EXTRACTED ERRORS ---")
             for i, error in enumerate(parsed_log.errors[:10]):
-                # Put actual error text first, line number after
                 parts.append(f"\n>>> {error.line}")
-                parts.append(f"    ^ This error is at line {error.line_number}")
+                parts.append(f"    ^ Line {error.line_number}, Category: {error.category.value}")
                 if error.context_before:
-                    parts.append("    Context before:")
-                    for ctx in error.context_before[-2:]:
+                    parts.append("    Context before (look for command that caused this):")
+                    for ctx in error.context_before[-5:]:  # More context!
                         parts.append(f"      {ctx}")
                 if error.context_after:
                     parts.append("    Context after:")
-                    for ctx in error.context_after[:2]:
+                    for ctx in error.context_after[:3]:
                         parts.append(f"      {ctx}")
         
         # Stack traces
@@ -458,7 +481,9 @@ class AIAnalyzer:
                 parts.append(f"- {failure.get('name', 'Unknown')}: {failure.get('message', '')[:200]}")
         
         parts.append("\n--- TASK ---")
-        parts.append("Find the ROOT CAUSE in the log above. Quote the actual error message.")
+        parts.append("Analyze the COMMAND OUTPUTS and API RESPONSES above to find the REAL root cause.")
+        parts.append("The root cause is often in a command that ran BEFORE the final error.")
+        parts.append("Look for: missing parameters, wrong config, API errors, permission issues.")
         parts.append("Respond with JSON only.")
         
         return "\n".join(parts)
@@ -544,9 +569,20 @@ class AIAnalyzer:
         if isinstance(is_retriable, str):
             is_retriable = is_retriable.lower() in ("true", "yes", "1")
         
+        # Get root_cause summary and details - ensure they're strings
+        root_cause_summary = data.get("root_cause", "Unable to determine root cause")
+        if isinstance(root_cause_summary, dict):
+            root_cause_summary = root_cause_summary.get("text", str(root_cause_summary))
+        root_cause_summary = str(root_cause_summary) if root_cause_summary else "Unable to determine root cause"
+        
+        root_cause_details = data.get("details", "")
+        if isinstance(root_cause_details, dict):
+            root_cause_details = str(root_cause_details)
+        root_cause_details = str(root_cause_details) if root_cause_details else ""
+        
         root_cause = RootCause(
-            summary=data.get("root_cause", "Unable to determine root cause"),
-            details=data.get("details", ""),
+            summary=root_cause_summary,
+            details=root_cause_details,
             confidence=confidence,
             category=category,
             tier=tier,
@@ -560,50 +596,126 @@ class AIAnalyzer:
         
         # Parse recommendations from AI response
         recommendations = []
-        ai_recommendations = data.get("recommendations", [])
         
-        if isinstance(ai_recommendations, list):
-            for rec in ai_recommendations:
-                if isinstance(rec, dict):
-                    action = rec.get("action", "")
-                    # Filter out useless recommendations
-                    useless_phrases = ["review the", "check the", "see above", "investigate", "look at", "examine"]
-                    is_useless = not action or any(p in action.lower() for p in useless_phrases)
-                    
-                    if action and not is_useless:
-                        recommendations.append(Recommendation(
-                            priority=rec.get("priority", "MEDIUM"),
-                            action=action,
-                            rationale=rec.get("details", ""),
-                        ))
-        
-        # Fallback to fix_suggestion if no recommendations (backward compatibility)
-        if not recommendations:
-            fix_suggestion = data.get("fix_suggestion", "")
-            if fix_suggestion:
-                useless_phrases = ["review", "check the", "see above", "investigate", "look at"]
-                is_useless = any(p in fix_suggestion.lower() for p in useless_phrases)
-                if not is_useless:
-                    recommendations.append(Recommendation(
-                        priority="HIGH",
-                        action=fix_suggestion,
-                        rationale=data.get("details", ""),
-                    ))
-        
-        # Last resort fallback - use simple recommendation with actual error
-        if not recommendations:
-            root_cause_text = data.get("root_cause", "")
-            if root_cause_text and len(root_cause_text) > 10:
+        # NEW FORMAT: Parse "fix" object (simpler, more direct)
+        fix_data = data.get("fix", {})
+        if isinstance(fix_data, dict):
+            action = fix_data.get("action", "")
+            file_ref = fix_data.get("file", "")
+            code = fix_data.get("code", "")
+            
+            # Ensure strings
+            action = str(action) if action else ""
+            file_ref = str(file_ref) if file_ref else ""
+            code = str(code) if code else ""
+            
+            # Filter useless
+            useless = ["review", "check the", "investigate", "look at", "examine", "see above"]
+            is_useless = not action or any(u in action.lower() for u in useless)
+            
+            if action and not is_useless:
+                # Build detailed rationale from file and code
+                details_parts = []
+                if file_ref and file_ref != "null":
+                    details_parts.append(f"File: {file_ref}")
+                if code and code != "null":
+                    details_parts.append(f"Code:\n```\n{code}\n```")
+                
                 recommendations.append(Recommendation(
                     priority="HIGH",
-                    action=f"Fix: {root_cause_text[:200]}",
-                    rationale="Based on the primary error from the log",
+                    action=action,
+                    rationale="\n".join(details_parts) if details_parts else "",
+                    code_suggestion=code if code and code != "null" else "",
                 ))
+        
+        # LEGACY FORMAT: Parse "recommendations" array (backward compatibility)
+        if not recommendations:
+            ai_recommendations = data.get("recommendations", [])
+            if isinstance(ai_recommendations, list):
+                for rec in ai_recommendations:
+                    if isinstance(rec, dict):
+                        action = rec.get("action", "")
+                        priority = rec.get("priority", "MEDIUM")
+                        details = rec.get("details", "")
+                        
+                        action = str(action) if action else ""
+                        priority = str(priority) if priority else "MEDIUM"
+                        details = str(details) if details else ""
+                        
+                        useless = ["review the", "check the", "see above", "investigate", "look at", "examine"]
+                        is_useless = not action or any(p in action.lower() for p in useless)
+                        
+                        if action and not is_useless:
+                            recommendations.append(Recommendation(
+                                priority=priority,
+                                action=action,
+                                rationale=details,
+                            ))
+        
+        # FALLBACK: Use root_cause to generate fix suggestion
+        if not recommendations:
+            root_cause_text = root_cause_summary  # Already sanitized
+            
+            # Try to extract something actionable from the error
+            if root_cause_text and len(root_cause_text) > 10:
+                # Look for common patterns and create specific recommendations
+                rc_lower = root_cause_text.lower()
+                
+                if "credential" in rc_lower or "credentials" in rc_lower:
+                    # Extract credential ID if present
+                    import re
+                    cred_match = re.search(r"['\"]([^'\"]+)['\"]", root_cause_text)
+                    cred_id = cred_match.group(1) if cred_match else "the-credential-id"
+                    recommendations.append(Recommendation(
+                        priority="HIGH",
+                        action=f"Create Jenkins credential with ID '{cred_id}'",
+                        rationale="Go to: Jenkins > Manage Jenkins > Credentials > Add Credentials",
+                    ))
+                elif "nullpointerexception" in rc_lower or "null pointer" in rc_lower:
+                    # Extract location if present
+                    loc_match = re.search(r"at\s+(\S+):(\d+)", root_cause_text) if 'at ' in root_cause_text else None
+                    if loc_match:
+                        recommendations.append(Recommendation(
+                            priority="HIGH",
+                            action=f"Add null check at {loc_match.group(1)} line {loc_match.group(2)}",
+                            rationale="Add null safety: if (obj != null) or use ?. operator",
+                        ))
+                    else:
+                        recommendations.append(Recommendation(
+                            priority="HIGH",
+                            action="Add null check before the failing method call",
+                            rationale=f"Error: {root_cause_text[:150]}",
+                        ))
+                elif "timeout" in rc_lower:
+                    recommendations.append(Recommendation(
+                        priority="HIGH",
+                        action="Increase timeout value for the failing operation",
+                        rationale="In Jenkinsfile: timeout(time: 30, unit: 'MINUTES') { ... }",
+                    ))
+                elif "permission" in rc_lower or "access denied" in rc_lower:
+                    recommendations.append(Recommendation(
+                        priority="HIGH",
+                        action="Grant required permissions for the operation",
+                        rationale=f"Error: {root_cause_text[:150]}",
+                    ))
+                elif "not found" in rc_lower or "404" in rc_lower:
+                    recommendations.append(Recommendation(
+                        priority="HIGH",
+                        action="Verify the resource exists and path is correct",
+                        rationale=f"Error: {root_cause_text[:150]}",
+                    ))
+                else:
+                    # Generic but with actual error
+                    recommendations.append(Recommendation(
+                        priority="HIGH",
+                        action=f"Fix: {root_cause_text[:150]}",
+                        rationale="See error details above for specifics",
+                    ))
             else:
                 recommendations.append(Recommendation(
                     priority="HIGH",
-                    action="Check the build log for error details",
-                    rationale="AI could not generate specific recommendations",
+                    action="Unable to determine specific fix - see error details",
+                    rationale="The AI could not parse specific fix from the error",
                 ))
         
         return AnalysisResult(
@@ -616,8 +728,8 @@ class AIAnalyzer:
             failure_analysis={
                 "category": category,
                 "tier": tier,
-                "failed_stage": data.get("failed_stage"),
-                "primary_error": data.get("root_cause", ""),
+                "failed_stage": str(data.get("failed_stage", "")) if data.get("failed_stage") else None,
+                "primary_error": root_cause_summary,  # Use already-sanitized value
                 "confidence": confidence,
             },
             root_cause=root_cause,

@@ -379,20 +379,36 @@ class HybridAnalyzer:
             if investigation.recommendations:
                 # Add agentic recommendations as high priority
                 new_recs = []
+                
+                # Filter out useless recommendations
+                useless_phrases = ["review the", "check the", "investigate", "look at", "see above", "examine", "manual investigation"]
+                
                 for rec in investigation.recommendations:
+                    # Skip useless recommendations
+                    if any(u in rec.lower() for u in useless_phrases):
+                        continue
+                    # Skip very short recommendations
+                    if len(rec) < 15:
+                        continue
+                        
                     new_recs.append(Recommendation(
                         priority="HIGH",
                         action=rec,
-                        rationale="From agentic investigation",
+                        rationale=f"Based on code investigation: {investigation.root_cause[:100]}" if investigation.root_cause else "",
                     ))
                 
-                # Keep scripted recommendations that aren't duplicates
-                existing_actions = {r.lower() for r in investigation.recommendations}
-                for rec in merged.recommendations:
-                    if rec.action.lower() not in existing_actions:
-                        new_recs.append(rec)
+                # Keep scripted recommendations that aren't duplicates (only if we have few agentic ones)
+                if len(new_recs) < 3:
+                    existing_actions = {r.action.lower() for r in new_recs}
+                    for rec in merged.recommendations:
+                        if rec.action.lower() not in existing_actions:
+                            # Skip useless scripted recommendations too
+                            if any(u in rec.action.lower() for u in useless_phrases):
+                                continue
+                            new_recs.append(rec)
                 
-                merged.recommendations = new_recs[:5]  # Limit total
+                if new_recs:
+                    merged.recommendations = new_recs[:5]  # Limit total
             
             # Update retry assessment
             if investigation.is_retriable != (merged.retry_assessment and merged.retry_assessment.is_retriable):

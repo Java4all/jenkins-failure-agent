@@ -398,10 +398,20 @@ class Investigator:
         rec_text = sections.get('recommendations', '')
         for line in rec_text.split('\n'):
             line = line.strip()
-            if line and (line.startswith(('-', '*', '•')) or (line[0].isdigit() and '.' in line[:3])):
+            # Skip empty lines and generic phrases
+            if not line:
+                continue
+            # Skip useless generic recommendations
+            useless = ['review the', 'check the', 'investigate', 'look at', 'see above', 'examine']
+            if any(u in line.lower() for u in useless):
+                continue
+            # Parse list items
+            if line.startswith(('-', '*', '•')) or (len(line) > 1 and line[0].isdigit() and '.' in line[:3]):
                 rec = line.lstrip('-*•0123456789. ')
-                if rec:
+                if rec and len(rec) > 10:  # Must be meaningful
                     recommendations.append(rec)
+            elif len(line) > 20:  # Non-list but substantial content
+                recommendations.append(line)
         
         # Parse retriable
         retriable_text = sections.get('retriable', '').lower()
@@ -423,8 +433,13 @@ class Investigator:
         # Ensure we have at least some content
         if not root_cause:
             root_cause = "Unable to determine root cause from investigation"
+        
+        # Only use fallback if we truly have nothing - and make it reference the actual error
         if not recommendations:
-            recommendations = ["Review the investigation details for more context"]
+            if root_cause and root_cause != "Unable to determine root cause from investigation":
+                recommendations = [f"Fix the identified issue: {root_cause[:200]}"]
+            else:
+                recommendations = ["Manual investigation required - check build logs for details"]
         
         return InvestigationResult(
             status=InvestigationStatus.IN_PROGRESS,  # Will be set by caller
