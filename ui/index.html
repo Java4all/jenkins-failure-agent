@@ -370,10 +370,10 @@
                         {/* Submit */}
                         <Button type="submit" disabled={!job || (!build && !latestFailed)} loading={loading} className="w-full" size="lg">
                             {loading ? (
-                                <>Analyzing{deepInvestigation ? ' (Deep)' : ''}...</>
+                                <>Analyzing{analysisMode !== 'standard' ? ` (${analysisMode})` : ''}...</>
                             ) : (
-                                <><i className={`fas ${deepInvestigation ? 'fa-microscope' : 'fa-play'} mr-2`}></i>
-                                {deepInvestigation ? 'Deep Analyze' : 'Analyze'}</>
+                                <><i className={`fas ${analysisMode === 'deep' ? 'fa-microscope' : analysisMode === 'iterative' ? 'fa-sync-alt' : 'fa-play'} mr-2`}></i>
+                                {analysisMode === 'deep' ? 'Deep Analyze' : analysisMode === 'iterative' ? 'Iterative Analyze' : 'Analyze'}</>
                             )}
                         </Button>
                     </form>
