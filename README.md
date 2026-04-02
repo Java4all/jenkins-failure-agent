@@ -4,7 +4,7 @@ An autonomous AI-powered debugging assistant that analyzes Jenkins build failure
 
 ## Architecture
 
-The agent uses a **hybrid architecture** that combines fast scripted analysis with deep agentic investigation:
+The agent supports **three analysis modes**: fast scripted analysis, iterative root cause investigation, and deep agentic investigation:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -19,38 +19,24 @@ The agent uses a **hybrid architecture** that combines fast scripted analysis wi
 │                    Jenkins Failure Analysis Agent                        │
 │                                                                          │
 │  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │              PHASE 1: Scripted Analysis (Always)                 │    │
+│  │                     SELECT ANALYSIS MODE                         │    │
 │  │                                                                  │    │
-│  │  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────────────┐    │    │
-│  │  │Collector│─▶│  Parse  │─▶│Classify │─▶│ AI Single Call  │    │    │
-│  │  │ Logs    │  │ Errors  │  │  Tier   │  │ (Fast Analysis) │    │    │
-│  │  └─────────┘  └─────────┘  └─────────┘  └────────┬────────┘    │    │
-│  └──────────────────────────────────────────────────┼──────────────┘    │
-│                                                     │                    │
-│                    Is this a code/library issue?    │                    │
-│                           │                         │                    │
-│              ┌────────────┴────────────┐            │                    │
-│              │ YES                     │ NO         │                    │
-│              ▼                         ▼            │                    │
-│  ┌───────────────────────┐   ┌──────────────────┐  │                    │
-│  │ PHASE 2: Agentic      │   │ Return scripted  │  │                    │
-│  │ Investigation (MCP)   │   │ result (fast)    │──┼────────┐           │
-│  │                       │   └──────────────────┘  │        │           │
-│  │ LLM uses tools:       │                         │        │           │
-│  │ • get_library_file()  │                         │        │           │
-│  │ • get_jenkinsfile()   │                         │        │           │
-│  │ • search_code()       │                         │        │           │
-│  │ • get_blame()         │                         │        │           │
-│  │ • analyze_error()     │                         │        │           │
-│  │                       │                         │        │           │
-│  │ Multiple tool calls   │                         │        │           │
-│  │ to trace call chain   │                         │        │           │
-│  └───────────┬───────────┘                         │        │           │
-│              │                                     │        │           │
-│              ▼                                     ▼        ▼           │
+│  │     ⚡ Standard        🔄 Iterative          🔍 Deep            │    │
+│  │     (default)         (recommended)         (--deep)            │    │
+│  └──────────┬──────────────────┬──────────────────┬────────────────┘    │
+│             │                  │                  │                      │
+│             ▼                  ▼                  ▼                      │
+│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐      │
+│  │ Single AI Call   │  │ RC Finder Expert │  │ MCP Tool Agent   │      │
+│  │ ~2 seconds       │  │ + Solution Finder│  │ 31 tools         │      │
+│  │                  │  │ Multi-cycle      │  │ 5-15 tool calls  │      │
+│  └────────┬─────────┘  └────────┬─────────┘  └────────┬─────────┘      │
+│           │                     │                     │                  │
+│           └─────────────────────┴─────────────────────┘                  │
+│                                 │                                        │
+│                                 ▼                                        │
 │  ┌───────────────────────────────────────────────────────────────────┐  │
-│  │                        5. Reporter Layer                          │  │
-│  │                                                                   │  │
+│  │                        Reporter Layer                              │  │
 │  │  ┌─────────────┐  ┌─────────────┐  ┌─────────┐  ┌─────────────┐  │  │
 │  │  │   Jenkins   │  │  GitHub/    │  │  Slack  │  │   Reports   │  │  │
 │  │  │ Description │  │  GitLab PR  │  │         │  │ JSON/MD/HTML│  │  │
@@ -61,11 +47,50 @@ The agent uses a **hybrid architecture** that combines fast scripted analysis wi
 
 ### Analysis Modes
 
-| Mode | Trigger | Speed | Use Case |
-|------|---------|-------|----------|
-| **Scripted** | Default for simple errors | ⚡ Fast (1 LLM call) | Config errors, infra issues |
-| **Agentic** | `--deep` flag or auto for code issues | 🔍 Thorough (5-15 tool calls) | Library errors, code issues |
-| **Hybrid** | Auto-selected based on error type | Best of both | Recommended default |
+| Mode | Flag | Speed | Use Case |
+|------|------|-------|----------|
+| **Standard** | Default | ⚡ Fast (1 AI call, ~2s) | Simple errors, quick triage |
+| **Iterative** | `--iterative` | 🔄 Smart (3-5 cycles, ~10-30s) | **Recommended** - finds root cause + generates fix with code |
+| **Deep** | `--deep` | 🔍 Thorough (5-15 tool calls, ~30-60s) | Complex library/code issues |
+
+### Iterative Mode (Recommended)
+
+The iterative mode uses a **multi-cycle investigation** with **Solution Finder**:
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                    ITERATIVE ROOT CAUSE ANALYSIS                   │
+├────────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│  Cycle 1: Smart Extract                                            │
+│  ┌──────────────────────────────────────────────────┐             │
+│  │ RC Finder → Extract error + 30 lines context     │             │
+│  │ AI → "Error in deployService(), need code"       │             │
+│  └──────────────────────────────────────────────────┘             │
+│                         ↓                                          │
+│  Cycle 2: Code Analysis                                            │
+│  ┌──────────────────────────────────────────────────┐             │
+│  │ GitHub → Fetch vars/deployService.groovy         │             │
+│  │ AI → "Line 42 calls awsHelper(), need that"      │             │
+│  └──────────────────────────────────────────────────┘             │
+│                         ↓                                          │
+│  Cycle 3: Dependency Analysis                                      │
+│  ┌──────────────────────────────────────────────────┐             │
+│  │ GitHub → Fetch vars/awsHelper.groovy             │             │
+│  │ AI → "Found! SSM param ABC missing in eu-west-1" │             │
+│  └──────────────────────────────────────────────────┘             │
+│                         ↓                                          │
+│  SOLUTION FINDER                                                   │
+│  ┌──────────────────────────────────────────────────┐             │
+│  │ Input: Root cause + context                      │             │
+│  │ Output:                                          │             │
+│  │   - fix_code: "aws ssm put-parameter --name ABC" │             │
+│  │   - fix_file: "AWS Console / Terraform"          │             │
+│  │   - fix_steps: ["Step 1...", "Step 2...", ...]   │             │
+│  └──────────────────────────────────────────────────┘             │
+│                                                                    │
+└────────────────────────────────────────────────────────────────────┘
+```
 
 ## Key Features
 

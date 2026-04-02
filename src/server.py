@@ -38,6 +38,7 @@ class AnalyzeRequest(BaseModel):
     # Analysis mode options
     deep: bool = False  # Force agentic/deep investigation mode
     scripted_only: bool = False  # Force scripted-only mode (no agentic)
+    iterative: bool = False  # Use iterative RC analysis (multi-cycle with code lookup)
     # Notification options
     notify_slack: bool = False
     update_jenkins_description: bool = True
@@ -280,27 +281,104 @@ def create_app(config: Config) -> FastAPI:
             # AI analysis with source code (using hybrid analyzer)
             log_snippet = log_parser.get_error_snippet(parsed_log, max_errors=10)
             
-            # Use hybrid analyzer for scripted + optional agentic investigation
-            hybrid_result = hybrid_analyzer.analyze(
-                build_info=build_info,
-                parsed_log=parsed_log,
-                test_results=test_results,
-                git_analysis=git_analysis,
-                console_log_snippet=log_snippet,
-                jenkinsfile_content=jenkinsfile_content,
-                library_sources=library_sources,
-                force_agentic=request.deep,
-                force_scripted=request.scripted_only,
-                pr_url=request.pr_url,
-            )
-            
-            # Get the merged result
-            result = hybrid_result.merged_result
-            analysis_mode = hybrid_result.mode.value
-            agentic_enhanced = hybrid_result.agentic_enhanced
-            tool_calls_made = hybrid_result.tool_calls_made
-            
-            logger.info(f"Analysis complete: mode={analysis_mode}, agentic_enhanced={agentic_enhanced}")
+            # Check if iterative mode requested
+            if request.iterative:
+                # Use iterative RC analyzer (multi-cycle with code lookup)
+                from .iterative_analyzer import IterativeRCAnalyzer
+                
+                iterative_analyzer = IterativeRCAnalyzer(
+                    ai_client=hybrid_analyzer.ai_analyzer.client,
+                    github_client=github_client,
+                    config={
+                        'model': config.ai.model,
+                        'library_mappings': config.github.library_mappings if config.github else {},
+                        'max_cycles': 5,
+                    }
+                )
+                
+                iterative_result = iterative_analyzer.analyze(
+                    log=console_log,
+                    build_info={
+                        'job_name': build_info.job_name,
+                        'build_number': build_info.build_number,
+                    },
+                    jenkinsfile_content=jenkinsfile_content,
+                )
+                
+                # Convert iterative result to standard format
+                from .ai_analyzer import AnalysisResult, RootCause, FailureAnalysis, Recommendation
+                
+                # Build detailed fix information
+                fix_details = []
+                if iterative_result.code_location:
+                    fix_details.append(f"Code location: {iterative_result.code_location}")
+                if iterative_result.fix_file:
+                    fix_details.append(f"File to modify: {iterative_result.fix_file}")
+                if iterative_result.fix_code:
+                    fix_details.append(f"Fix code:\n{iterative_result.fix_code}")
+                
+                # Build recommendations from fix_steps
+                recommendations = []
+                if iterative_result.fix_steps:
+                    for i, step in enumerate(iterative_result.fix_steps):
+                        recommendations.append(Recommendation(
+                            action=step,
+                            priority="high" if i == 0 else "medium",
+                            rationale=f"Step {i+1} of fix",
+                        ))
+                elif iterative_result.fix_suggestion:
+                    recommendations.append(Recommendation(
+                        action=iterative_result.fix_suggestion,
+                        priority="high",
+                        rationale=f"Based on {iterative_result.cycles_used}-cycle investigation",
+                    ))
+                
+                result = AnalysisResult(
+                    root_cause=RootCause(
+                        summary=iterative_result.root_cause,
+                        details='\n'.join(fix_details) if fix_details else "",
+                        confidence=iterative_result.confidence,
+                    ),
+                    failure_analysis={
+                        "category": iterative_result.error_type.value.upper(),
+                        "tier": "tier1" if iterative_result.confidence > 0.8 else "tier2",
+                        "confidence": iterative_result.confidence,
+                        "primary_error": iterative_result.root_cause,
+                        "fix_file": iterative_result.fix_file,
+                        "fix_code": iterative_result.fix_code,
+                    },
+                    recommendations=recommendations,
+                    retry_assessment=None,
+                    raw_ai_response=f"Iterative analysis ({iterative_result.cycles_used} cycles), code analyzed: {iterative_result.code_analyzed}",
+                )
+                
+                analysis_mode = f"iterative ({iterative_result.cycles_used} cycles)"
+                agentic_enhanced = True
+                tool_calls_made = iterative_result.cycles_used
+                
+                logger.info(f"Iterative analysis complete: {iterative_result.cycles_used} cycles, confidence={iterative_result.confidence}")
+            else:
+                # Use hybrid analyzer for scripted + optional agentic investigation
+                hybrid_result = hybrid_analyzer.analyze(
+                    build_info=build_info,
+                    parsed_log=parsed_log,
+                    test_results=test_results,
+                    git_analysis=git_analysis,
+                    console_log_snippet=log_snippet,
+                    jenkinsfile_content=jenkinsfile_content,
+                    library_sources=library_sources,
+                    force_agentic=request.deep,
+                    force_scripted=request.scripted_only,
+                    pr_url=request.pr_url,
+                )
+                
+                # Get the merged result
+                result = hybrid_result.merged_result
+                analysis_mode = hybrid_result.mode.value
+                agentic_enhanced = hybrid_result.agentic_enhanced
+                tool_calls_made = hybrid_result.tool_calls_made
+                
+                logger.info(f"Analysis complete: mode={analysis_mode}, agentic_enhanced={agentic_enhanced}")
             
             # Generate report if requested
             report_url = None

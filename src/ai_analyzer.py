@@ -407,84 +407,49 @@ class AIAnalyzer:
         groovy_analysis: Optional[GroovyAnalysis] = None,
         config_analysis: Optional[ConfigurationAnalysis] = None,
     ) -> str:
-        """Build a simple, effective analysis prompt."""
+        """Build focused prompt using Root Cause Finder Expert."""
         
-        from .log_parser import LogParser
+        from .rc_finder import RootCauseFinder
         
         parts = []
         
         # Basic build info
         parts.append(f"Job: {build_info.job_name} #{build_info.build_number}")
         parts.append(f"Status: {build_info.status}")
-        if parsed_log.failed_stage:
-            parts.append(f"FAILED STAGE: {parsed_log.failed_stage} <-- LOOK HERE FOR THE ERROR")
-        if parsed_log.failed_method:
-            parts.append(f"FAILED METHOD: {parsed_log.failed_method} <-- THIS METHOD WAS RUNNING WHEN IT FAILED")
         
-        # ENHANCED: Extract command errors and API responses FIRST
-        # This helps identify the REAL root cause (e.g., cloud misconfig, missing params)
+        # Use Root Cause Finder Expert for smart extraction
         if console_log_snippet:
-            parser = LogParser()
+            finder = RootCauseFinder({
+                'method_execution_prefix': getattr(self.config, 'method_execution_prefix', '') if hasattr(self.config, 'method_execution_prefix') else '',
+                'context_before': 30,
+                'context_after': 15,
+            })
             
-            # Get enhanced context (commands that failed, API errors, etc.)
-            enhanced_context = parser.get_enhanced_error_context(
-                console_log_snippet, 
-                parsed_log,
-                context_lines=15  # More context around errors
-            )
-            if enhanced_context.strip():
-                parts.append("\n" + "="*60)
-                parts.append("IMPORTANT: COMMAND OUTPUTS AND API RESPONSES")
-                parts.append("These often show the REAL root cause (missing params, wrong config, etc.)")
-                parts.append("="*60)
-                parts.append(enhanced_context)
+            rc_context = finder.find(console_log_snippet)
+            
+            # Add the focused context from RC Finder
+            parts.append(rc_context.get_ai_prompt_context())
+        else:
+            # Fallback if no log
+            if parsed_log.failed_stage:
+                parts.append(f"FAILED STAGE: {parsed_log.failed_stage}")
+            if parsed_log.failed_method:
+                parts.append(f"FAILED METHOD: {parsed_log.failed_method}")
+            if parsed_log.errors:
+                parts.append(f"\nERROR: {parsed_log.errors[0].line}")
         
-        # Then show the raw log END - this is where the final error is
-        if console_log_snippet:
-            snippet = console_log_snippet
-            # Take the LAST 8000 chars - this is where the error almost always is
-            if len(snippet) > 8000:
-                snippet = snippet[-8000:]
-            parts.append("\n=== END OF BUILD LOG ===")
-            parts.append(snippet)
-            parts.append("=== END OF LOG ===")
-        
-        # Show extracted errors with more context
-        if parsed_log.errors:
-            parts.append("\n--- EXTRACTED ERRORS ---")
-            for i, error in enumerate(parsed_log.errors[:10]):
-                parts.append(f"\n>>> {error.line}")
-                parts.append(f"    ^ Line {error.line_number}, Category: {error.category.value}")
-                if error.context_before:
-                    parts.append("    Context before (look for command that caused this):")
-                    for ctx in error.context_before[-5:]:  # More context!
-                        parts.append(f"      {ctx}")
-                if error.context_after:
-                    parts.append("    Context after:")
-                    for ctx in error.context_after[:3]:
-                        parts.append(f"      {ctx}")
-        
-        # Stack traces
-        if parsed_log.stack_traces:
-            parts.append("\n--- STACK TRACES ---")
-            for i, trace in enumerate(parsed_log.stack_traces[:3]):
-                parts.append(f"\nException: {trace.exception_type}")
-                parts.append(f"Message: {trace.message}")
-                if trace.frames:
-                    for frame in trace.frames[:5]:
-                        parts.append(f"  {frame}")
-        
-        # Test failures
+        # Add test failures if present
         if test_results and test_results.failed > 0:
-            parts.append(f"\n--- TEST FAILURES ({test_results.failed} failed) ---")
-            for failure in test_results.failures[:5]:
-                parts.append(f"- {failure.get('name', 'Unknown')}: {failure.get('message', '')[:200]}")
+            parts.append(f"\nTEST FAILURES: {test_results.failed} failed")
+            for failure in test_results.failures[:3]:
+                parts.append(f"  - {failure.get('name', 'Unknown')}: {failure.get('message', '')[:100]}")
         
-        parts.append("\n--- TASK ---")
-        parts.append("Analyze the COMMAND OUTPUTS and API RESPONSES above to find the REAL root cause.")
-        parts.append("The root cause is often in a command that ran BEFORE the final error.")
-        parts.append("Look for: missing parameters, wrong config, API errors, permission issues.")
-        parts.append("Respond with JSON only.")
+        parts.append("\n" + "="*50)
+        parts.append("TASK")
+        parts.append("="*50)
+        parts.append("1. Look at COMMANDS/OPERATIONS BEFORE ERROR - they often show the real cause")
+        parts.append("2. Connect the error to what caused it")
+        parts.append("3. Respond with JSON only")
         
         return "\n".join(parts)
     

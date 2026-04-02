@@ -466,3 +466,33 @@ docker-release: docker-setup-buildx docker-build
 	@echo "To use on another machine (Intel or ARM):"
 	@echo "  export AGENT_IMAGE=$(DOCKER_REPO):$(DOCKER_TAG)"
 	@echo "  make start-prebuilt-external"
+
+# Build and push both agent and UI images
+docker-release-all: docker-setup-buildx
+	@echo "Building multi-arch AGENT image: $(DOCKER_REPO):$(DOCKER_TAG)"
+	docker buildx build \
+		--platform $(PLATFORMS) \
+		-t $(DOCKER_REPO):$(DOCKER_TAG) \
+		-t $(DOCKER_REPO):v1.4.0 \
+		--push \
+		.
+	@echo ""
+	@echo "Building multi-arch UI image: $(DOCKER_REPO)-ui:$(DOCKER_TAG)"
+	docker buildx build \
+		--platform $(PLATFORMS) \
+		-t $(DOCKER_REPO)-ui:$(DOCKER_TAG) \
+		-t $(DOCKER_REPO)-ui:v1.4.0 \
+		-f ui/Dockerfile.ui \
+		--push \
+		.
+	@echo ""
+	@echo "[OK] Released both images!"
+	@echo "  Agent: $(DOCKER_REPO):$(DOCKER_TAG)"
+	@echo "  UI:    $(DOCKER_REPO)-ui:$(DOCKER_TAG)"
+
+# Restart UI to pick up file changes (no build needed - uses mounted volumes)
+rebuild-ui:
+	docker-compose restart ui
+	@echo ""
+	@echo "[OK] UI restarted with updated files"
+	@echo "Hard refresh browser: Cmd+Shift+R (Mac) or Ctrl+Shift+R"
