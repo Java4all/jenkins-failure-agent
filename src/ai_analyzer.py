@@ -114,24 +114,26 @@ Look for:
 - Cloud CLI errors (aws, az, gcloud, kubectl) - missing params, wrong region, permission denied
 - API responses - HTTP 4xx/5xx, error messages, missing fields
 - Configuration errors - wrong values, missing env vars, invalid syntax
+- Custom tool errors - internal tools, scripts, deploy commands
 
-STEP 1: Check COMMAND OUTPUTS section first for the REAL cause
-STEP 2: Look at the final error and stack traces
+STEP 1: Check TOOL CONTEXT section first - this shows the exact command that failed
+STEP 2: Look at COMMAND OUTPUTS / shell output for error details
 STEP 3: Connect them - what command/config caused the failure?
-STEP 4: Generate a fix with specifics (names, values, paths from the log)
+STEP 4: Generate a fix with specifics (tool name, param names, values, paths from the log)
 
 JSON FORMAT:
 {
-  "root_cause": "The REAL cause - could be from a command output, not just the final error",
-  "category": "CREDENTIAL_ERROR|DEPENDENCY|COMPILATION_ERROR|TEST_FAILURE|GROOVY_LIBRARY|TIMEOUT|NETWORK|CONFIGURATION|INFRASTRUCTURE|UNKNOWN",
+  "root_cause": "The REAL cause - include the TOOL NAME and COMMAND that failed",
+  "category": "CREDENTIAL_ERROR|DEPENDENCY|COMPILATION_ERROR|TEST_FAILURE|GROOVY_LIBRARY|TIMEOUT|NETWORK|CONFIGURATION|INFRASTRUCTURE|TOOL_ERROR|UNKNOWN",
   "is_retriable": false,
   "confidence": 0.85,
   "failed_stage": "stage name",
   "failed_method": "method name",
+  "failed_tool": "tool name that caused the error (from TOOL CONTEXT)",
   "fix": {
-    "action": "What to do - include specifics from the log",
+    "action": "What to do - MUST include the tool name and specific changes",
     "file": "file to change (if applicable)",
-    "code": "code snippet or command to run"
+    "code": "code snippet or command to run - use the actual tool name from the log"
   }
 }
 

@@ -680,19 +680,31 @@ class HybridAnalyzer:
         category = rc_result.category or "UNKNOWN"
         tier = CATEGORY_TO_TIER.get(category, "unknown")
         
+        # Build failure_analysis with failing_tool if available
+        failure_analysis = {
+            "category": category,
+            "primary_error": rc_result.root_cause[:200] if rc_result.root_cause else "",
+            "failed_stage": parsed_log.failed_stage,
+            "confidence": rc_result.confidence,
+            "tier": tier,
+        }
+        
+        # Include failing tool info for UI display
+        if hasattr(rc_result, 'failing_tool') and rc_result.failing_tool:
+            failure_analysis["failing_tool"] = rc_result.failing_tool
+        
+        # Build metadata
+        metadata = {}
+        if hasattr(rc_result, 'failing_tool') and rc_result.failing_tool:
+            metadata["failing_tool"] = rc_result.failing_tool
+        
         return AnalysisResult(
             build_info={
                 "job_name": build_info.job_name,
                 "build_number": build_info.build_number,
                 "status": build_info.status,
             },
-            failure_analysis={
-                "category": category,
-                "primary_error": rc_result.root_cause[:200] if rc_result.root_cause else "",
-                "failed_stage": parsed_log.failed_stage,
-                "confidence": rc_result.confidence,
-                "tier": tier,
-            },
+            failure_analysis=failure_analysis,
             root_cause=RootCause(
                 summary=rc_result.root_cause,
                 details=rc_result.fix or "",
@@ -708,6 +720,7 @@ class HybridAnalyzer:
             recommendations=[
                 Recommendation(priority="HIGH", action=rc_result.fix, rationale=rc_result.root_cause[:100])
             ] if rc_result.fix else [],
+            metadata=metadata,
         )
     
     def _investigation_to_analysis_result(self, investigation, build_info: BuildInfo, parsed_log: ParsedLog) -> AnalysisResult:

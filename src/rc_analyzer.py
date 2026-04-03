@@ -73,9 +73,11 @@ class RCAnalysisResult:
     source_files_fetched: List[str] = field(default_factory=list)
     all_iterations: List[IterationResult] = field(default_factory=list)
     signature_mismatches: List[SignatureMismatch] = field(default_factory=list)
+    # Issue 1: Add failing tool/command context
+    failing_tool: Optional[Dict[str, Any]] = None
     
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        result = {
             "root_cause": self.root_cause,
             "confidence": self.confidence,
             "category": self.category,
@@ -84,6 +86,10 @@ class RCAnalysisResult:
             "iterations_used": self.iterations_used,
             "source_files_fetched": self.source_files_fetched,
         }
+        # Include failing tool context if available
+        if self.failing_tool:
+            result["failing_tool"] = self.failing_tool
+        return result
 
 
 class RCAnalyzer:
@@ -283,6 +289,12 @@ RULES:
             final_category = 'GROOVY_LIBRARY'
             logger.info(f"Overriding category to GROOVY_LIBRARY due to signature mismatch")
         
+        # Extract failing tool from rc_context (Issue 1)
+        failing_tool = None
+        if rc_context and hasattr(rc_context, 'related_tool') and rc_context.related_tool:
+            failing_tool = rc_context.related_tool
+            logger.debug(f"Failing tool: {failing_tool.get('tool_name', 'unknown')}")
+        
         final_result = RCAnalysisResult(
             root_cause=best_result.root_cause,
             confidence=best_result.confidence,
@@ -293,6 +305,7 @@ RULES:
             source_files_fetched=source_files_fetched,
             all_iterations=iterations,
             signature_mismatches=signature_mismatches,
+            failing_tool=failing_tool,
         )
         
         # Log final result (Requirement 8.4)
@@ -376,7 +389,8 @@ RULES:
                     if imports:
                         logger.debug(f"Method {method_name} imports: {imports}")
                 else:
-                    logger.warning(f"Could not find source for method: {method_name} (Req 11.7)")
+                    # Method not found - this is common for built-in/external methods
+                    logger.debug(f"Could not find source for method: {method_name} (may be external)")
         
         if parts:
             return "## SOURCE CODE CONTEXT ##\n\n" + "\n\n".join(parts)
@@ -387,44 +401,103 @@ RULES:
         Search for method source file across all registered library repos.
         
         Implements Requirement 11.2: Search strategy
+        Handles:
+        - vars/methodName.groovy (global variables)
+        - vars/subdir/methodName.groovy (nested vars)
+        - src/**/ClassName.groovy (class files containing methods)
+        - Utils.methodName pattern (class.method calls)
+        - resources/ files
+        
         Returns: (content, file_path) or (None, None) if not found
         """
         if not self.github_client:
             return None, None
         
-        # Search patterns (Req 11.2a, 11.2b)
+        # Handle Class.method pattern (e.g., Utils.deploy -> look for Utils.groovy)
+        class_name = None
+        actual_method = method_name
+        if '.' in method_name:
+            parts = method_name.split('.')
+            class_name = parts[0]
+            actual_method = parts[-1]
+            logger.debug(f"Detected class.method pattern: {class_name}.{actual_method}")
+        
+        # Build comprehensive search paths
         search_paths = [
-            f"vars/{method_name}.groovy",      # Exact match in vars/
-            f"src/**/{method_name}.groovy",    # Class file in src/
+            # Direct match in vars/
+            f"vars/{method_name}.groovy",
+            # Common subdirectories in vars/
+            f"vars/steps/{method_name}.groovy",
+            f"vars/pipelines/{method_name}.groovy",
+            f"vars/utils/{method_name}.groovy",
+            f"vars/common/{method_name}.groovy",
+            f"vars/deploy/{method_name}.groovy",
+            f"vars/build/{method_name}.groovy",
         ]
+        
+        # If it looks like Class.method, also search for the class file
+        if class_name:
+            search_paths.extend([
+                # Class in vars/
+                f"vars/{class_name}.groovy",
+                # Class in src/ with various package structures
+                f"src/{class_name}.groovy",
+                f"src/com/{class_name}.groovy",
+                f"src/org/{class_name}.groovy",
+                f"src/utils/{class_name}.groovy",
+                f"src/common/{class_name}.groovy",
+                f"src/lib/{class_name}.groovy",
+            ])
+        
+        # Also search for the method name directly in src/
+        search_paths.extend([
+            f"src/{method_name}.groovy",
+            f"src/{actual_method}.groovy",
+            f"src/com/{method_name}.groovy",
+            f"src/org/{method_name}.groovy",
+        ])
         
         # Try each library mapping (Req 11.9)
         for library_name, repo_path in self.library_mappings.items():
             for search_path in search_paths:
                 try:
-                    # Handle glob patterns
-                    if "**" in search_path:
-                        # For src/**/ we need to search recursively
-                        # Try common patterns
-                        for src_path in [
-                            f"src/com/{method_name}.groovy",
-                            f"src/org/{method_name}.groovy",
-                            f"src/{method_name}.groovy",
-                        ]:
-                            content = self.github_client.get_file_content(repo_path, src_path)
-                            if content:
-                                logger.debug(f"Found {method_name} at {repo_path}:{src_path}")
-                                return content, src_path
-                    else:
-                        content = self.github_client.get_file_content(repo_path, search_path)
-                        if content:
-                            logger.debug(f"Found {method_name} at {repo_path}:{search_path}")
-                            return content, search_path
+                    content = self.github_client.get_file_content(repo_path, search_path)
+                    if content:
+                        logger.info(f"Found {method_name} at {repo_path}:{search_path}")
+                        return content, search_path
                 except Exception as e:
-                    logger.debug(f"Could not fetch {search_path} from {repo_path}: {e}")
+                    logger.debug(f"Not found at {search_path}: {str(e)[:50]}")
                     continue
+            
+            # Try listing vars/ directory to find nested files
+            try:
+                vars_content = self._search_vars_recursive(repo_path, method_name)
+                if vars_content:
+                    return vars_content
+            except Exception as e:
+                logger.debug(f"Could not search vars/ recursively: {e}")
         
+        # Log at info level when method truly not found (not debug)
+        logger.info(f"Method '{method_name}' not found in any library mapping")
         return None, None
+    
+    def _search_vars_recursive(self, repo_path: str, method_name: str) -> Optional[Tuple[str, str]]:
+        """Search vars/ directory recursively for a method file."""
+        # This is a simplified recursive search
+        # In practice, you might want to use GitHub's tree API
+        common_subdirs = ['steps', 'pipelines', 'utils', 'common', 'deploy', 'build', 'test', 'docker', 'k8s']
+        
+        for subdir in common_subdirs:
+            try:
+                path = f"vars/{subdir}/{method_name}.groovy"
+                content = self.github_client.get_file_content(repo_path, path)
+                if content:
+                    logger.info(f"Found {method_name} at {repo_path}:{path}")
+                    return content, path
+            except:
+                continue
+        
+        return None
     
     def _extract_groovy_imports(self, content: str) -> List[str]:
         """Extract import statements from Groovy source (Req 11.11)."""

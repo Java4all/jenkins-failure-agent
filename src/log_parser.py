@@ -752,18 +752,33 @@ class LogParser:
             
             # Also detect tools from non-shell context (original behavior)
             elif line_type == PipelineLineType.OTHER:
-                for tool_name, pattern in self.tool_patterns:
-                    match = pattern.search(line)
-                    if match:
-                        command_line = match.group(1) if match.groups() else line.strip()
-                        exit_code = self._find_exit_code(lines, i)
-                        invocations.append(ToolInvocation(
-                            tool_name=tool_name,
-                            command_line=command_line.strip(),
-                            line_number=i + 1,
-                            exit_code=exit_code,
-                        ))
-                        break
+                # First check if this is a HH:MM:SS + command pattern (may appear outside shell block)
+                shell_cmd_match = self.SHELL_COMMAND_PATTERN.match(line.strip())
+                if shell_cmd_match:
+                    command = shell_cmd_match.group(1)
+                    tool_name = self._detect_tool_name(command)
+                    if current_command:
+                        invocations.append(current_command)
+                    current_command = ToolInvocation(
+                        tool_name=tool_name,
+                        command_line=command,
+                        line_number=i + 1,
+                        output_lines=[],
+                    )
+                else:
+                    # Check against known tool patterns
+                    for tool_name, pattern in self.tool_patterns:
+                        match = pattern.search(line)
+                        if match:
+                            command_line = match.group(1) if match.groups() else line.strip()
+                            exit_code = self._find_exit_code(lines, i)
+                            invocations.append(ToolInvocation(
+                                tool_name=tool_name,
+                                command_line=command_line.strip(),
+                                line_number=i + 1,
+                                exit_code=exit_code,
+                            ))
+                            break
             
             prev_line_type = line_type
         
