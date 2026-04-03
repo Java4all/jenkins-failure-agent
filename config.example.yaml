@@ -497,6 +497,7 @@ categories:
     credential_error: "Credential Issue"
     agent_error: "Agent Problem"
     plugin_error: "Plugin Error"
+    tool_error: "Tool/CLI Error"
     unknown: "Unknown"
   
   # Priority order for triage (higher = more urgent)
@@ -510,6 +511,7 @@ categories:
     groovy_sandbox: 70
     configuration: 60
     dependency: 50
+    tool_error: 45
     compilation_error: 40
     test_failure: 30
     network: 25

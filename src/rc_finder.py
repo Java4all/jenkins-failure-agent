@@ -304,47 +304,85 @@ class RootCauseFinder:
         self,
         error_line_number: int,
         tool_invocations: List[Any],
-        max_distance: int = 20
+        max_distance: int = 50
     ) -> Optional[Dict[str, Any]]:
         """Find the tool invocation most likely related to the error (Req 17.5).
         
-        Looks for the most recent tool invocation within max_distance lines
-        before the error.
+        Strategy:
+        1. First, look for tools with error indicators in their output
+        2. Prefer tools with non-zero exit codes
+        3. Fall back to the most recent tool before the error
         """
         if not tool_invocations:
             return None
         
-        best_tool = None
-        best_distance = max_distance + 1
+        error_indicators = [
+            'error:', 'Error:', 'ERROR:', 'FATAL:', 'fatal:',
+            'FAILED', 'failed', 'cannot', 'unable to', 'not found',
+            'denied', 'invalid', 'Exception', 'exception',
+        ]
         
+        # Collect candidates: tools before the error line
+        candidates = []
         for tool in tool_invocations:
-            # Get line number (handle both object and dict)
             tool_line = (
                 tool.line_number if hasattr(tool, 'line_number')
                 else tool.get('line_number', 0)
             )
             
-            # Tool must be before the error
             if tool_line < error_line_number:
                 distance = error_line_number - tool_line
-                if distance <= max_distance and distance < best_distance:
-                    best_distance = distance
-                    best_tool = tool
+                if distance <= max_distance:
+                    candidates.append((tool, distance))
         
-        if best_tool is None:
+        if not candidates:
             return None
         
-        # Convert to dict if needed
+        # Score each candidate
+        def score_tool(tool_distance_tuple):
+            tool, distance = tool_distance_tuple
+            score = 0
+            
+            # Check for error indicators in output
+            output_lines = (
+                tool.output_lines if hasattr(tool, 'output_lines')
+                else tool.get('output_lines', [])
+            )
+            for line in output_lines:
+                for indicator in error_indicators:
+                    if indicator in line:
+                        score += 100  # High score for error output
+                        break
+            
+            # Check exit code
+            exit_code = (
+                tool.exit_code if hasattr(tool, 'exit_code')
+                else tool.get('exit_code')
+            )
+            if exit_code is not None and exit_code != 0:
+                score += 50  # Medium score for non-zero exit
+            
+            # Closer is better (subtract distance)
+            score -= distance
+            
+            return score
+        
+        # Find best candidate
+        best_tool, _ = max(candidates, key=score_tool)
+        
+        # Convert to dict
         if hasattr(best_tool, 'to_dict'):
             return best_tool.to_dict()
         elif isinstance(best_tool, dict):
             return best_tool
         else:
+            output_lines = getattr(best_tool, 'output_lines', [])
             return {
                 'tool_name': getattr(best_tool, 'tool_name', 'unknown'),
                 'command_line': getattr(best_tool, 'command_line', ''),
                 'line_number': getattr(best_tool, 'line_number', 0),
                 'exit_code': getattr(best_tool, 'exit_code', None),
+                'output_lines': output_lines,
             }
     
     def _classify_context_lines(

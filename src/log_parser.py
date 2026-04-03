@@ -26,6 +26,8 @@ class FailureCategory(Enum):
     CREDENTIAL_ERROR = "credential_error"
     AGENT_ERROR = "agent_error"
     PLUGIN_ERROR = "plugin_error"
+    # Tool/CLI errors (internal and external tools)
+    TOOL_ERROR = "tool_error"
     UNKNOWN = "unknown"
 
 
@@ -345,6 +347,47 @@ class LogParser:
             r"(?i)java\.lang\.NoClassDefFoundError.*plugin",
             r"(?i)Incompatible plugin version",
         ],
+        # Tool/CLI errors - errors from shell commands (internal and external tools)
+        FailureCategory.TOOL_ERROR: [
+            # Generic "Error:" patterns from tools (Helm, Terraform, custom tools, etc.)
+            r"^Error:\s+.+",
+            r"^\[ERROR\]\s+.+",
+            r"^ERROR:\s+.+",
+            r"^error:\s+.+",
+            # Cloud CLI errors
+            r"(?i)An error occurred \(",  # AWS error format
+            r"(?i)ERROR:.*gcloud",
+            r"(?i)az:.*error",
+            # Kubernetes/Helm errors
+            r"(?i)UPGRADE FAILED",
+            r"(?i)INSTALLATION FAILED",
+            r"(?i)error:.*kubectl",
+            r"(?i)cannot validate",
+            # Terraform errors
+            r"(?i)Error:.*terraform",
+            r"(?i)Error applying plan",
+            # Docker errors
+            r"(?i)error during connect",
+            r"(?i)Error response from daemon",
+            # Generic script/tool errors
+            r"(?i)script returned exit code [1-9]",
+            r"(?i)command not found",
+            r"(?i)fatal:\s+.+",  # Git fatal errors
+            r"(?i)FATAL:\s+.+",
+            # Exit code patterns
+            r"(?i)exit status [1-9]",
+            r"(?i)exited with code [1-9]",
+            # Generic tool failure patterns
+            r"(?i)failed to execute",
+            r"(?i)execution failed",
+            r"(?i)command failed",
+            r"(?i)unable to execute",
+        ],
+        # Generic/Unknown errors - fallback
+        FailureCategory.UNKNOWN: [
+            r"(?i)Exception:",
+            r"(?i)Error$",  # Just "Error" at end of line
+        ],
     }
     
     # Stack trace patterns for different languages
@@ -615,6 +658,9 @@ class LogParser:
         
         # Requirement 17.2, 17.3: Extract tool invocations (with shell block tracking - Req 20.4)
         result.tool_invocations = self._extract_tool_invocations_v2(lines)
+        
+        # Associate final exit code with failing tool
+        self._associate_exit_code_with_failing_tool(result.tool_invocations, result.errors, lines)
         
         # Requirement 17.4: Associate errors with preceding tool invocations
         self._associate_errors_with_tools(result.errors, result.tool_invocations)
@@ -1000,6 +1046,74 @@ class LogParser:
                     if distance <= self.TOOL_ERROR_PROXIMITY:
                         error.related_tool = tool
                     break  # Stop at the most recent tool before the error
+    
+    def _associate_exit_code_with_failing_tool(
+        self,
+        tool_invocations: List[ToolInvocation],
+        errors: List[ErrorMatch],
+        lines: List[str],
+    ) -> None:
+        """
+        Associate final exit code with the failing tool.
+        
+        When Jenkins reports "script returned exit code N", associate that
+        exit code with the tool that has error output.
+        """
+        if not tool_invocations:
+            return
+        
+        # Find exit code from errors or final lines
+        exit_code = None
+        for error in errors:
+            match = re.search(r'(?:exit code|exit status|exited with)\s*[:\s]*(\d+)', 
+                            error.line, re.IGNORECASE)
+            if match:
+                try:
+                    exit_code = int(match.group(1))
+                    break
+                except (ValueError, IndexError):
+                    pass
+        
+        # If no exit code found in errors, check last lines
+        if exit_code is None:
+            for line in reversed(lines[-20:]):
+                match = re.search(r'(?:exit code|exit status|exited with|returned)\s*[:\s]*(\d+)', 
+                                line, re.IGNORECASE)
+                if match:
+                    try:
+                        exit_code = int(match.group(1))
+                        break
+                    except (ValueError, IndexError):
+                        pass
+        
+        if exit_code is None or exit_code == 0:
+            return
+        
+        # Find the tool with error indicators in its output
+        # Start from the last tool and work backwards
+        error_indicators = [
+            'error:', 'Error:', 'ERROR:', 'FATAL:', 'fatal:',
+            'FAILED', 'failed', 'cannot', 'unable to', 'not found',
+            'denied', 'invalid', 'Exception', 'exception',
+        ]
+        
+        for tool in reversed(tool_invocations):
+            if tool.exit_code is not None:
+                continue  # Already has exit code
+            
+            # Check if tool output contains error indicators
+            has_error = False
+            for output_line in tool.output_lines:
+                for indicator in error_indicators:
+                    if indicator in output_line:
+                        has_error = True
+                        break
+                if has_error:
+                    break
+            
+            if has_error:
+                tool.exit_code = exit_code
+                break  # Only associate with one tool
     
     def _find_failed_method(self, lines: List[str]) -> Tuple[Optional[str], List[str], List[str]]:
         """Find the shared library method that was running when failure occurred.
@@ -1394,6 +1508,8 @@ class LogParser:
             FailureCategory.PERMISSION,
             FailureCategory.TIMEOUT,
             FailureCategory.RESOURCE,
+            # Tool errors - common in CI/CD pipelines
+            FailureCategory.TOOL_ERROR,
         ]
         
         # Find most common category, using priority for ties
