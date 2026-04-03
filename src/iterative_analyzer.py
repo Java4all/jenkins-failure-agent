@@ -19,6 +19,7 @@ from typing import List, Optional, Dict, Any, Tuple
 from enum import Enum
 
 from .deep_rc_finder import DeepRCFinder, DeepInvestigation, ErrorType
+from .rc_finder import RootCauseContext
 
 logger = logging.getLogger(__name__)
 

@@ -10,11 +10,11 @@ Supports multiple analysis modes:
 - Agentic: Deep investigation with MCP tools for code/library issues
 """
 
-__version__ = "1.5.0"
+__version__ = "1.7.0"
 
 from .config import (
     Config, JenkinsConfig, AIConfig, GitConfig, GitHubConfig,
-    SCMConfig, ReporterConfig, RCAnalyzerConfig
+    SCMConfig, ReporterConfig, RCAnalyzerConfig, SourceLocation
 )
 from .jenkins_client import JenkinsClient, BuildInfo, TestResult
 from .log_parser import LogParser, ParsedLog, FailureCategory
@@ -32,11 +32,12 @@ from .hybrid_analyzer import HybridAnalyzer, HybridAnalysisResult, AnalysisMode
 from .rc_finder import RootCauseFinder, RootCauseContext, ErrorType, find_root_cause
 from .rc_analyzer import RCAnalyzer, RCAnalysisResult, IterationResult
 from .iterative_analyzer import IterativeRCAnalyzer, InvestigationResult, InvestigationAction
+from .feedback_store import FeedbackStore, FeedbackEntry, get_feedback_store
 
 __all__ = [
     # Config
     "Config", "JenkinsConfig", "AIConfig", "GitConfig", "GitHubConfig",
-    "SCMConfig", "ReporterConfig", "RCAnalyzerConfig",
+    "SCMConfig", "ReporterConfig", "RCAnalyzerConfig", "SourceLocation",
     # Jenkins
     "JenkinsClient", "BuildInfo", "TestResult",
     # Log parsing
@@ -49,10 +50,10 @@ __all__ = [
     "GroovyAnalyzer", "GroovyAnalysis", "GroovyFailureType",
     # Configuration analysis
     "ConfigurationAnalyzer", "ConfigurationAnalysis", "ConfigFailureType",
-    # AI analysis (scripted)
+    # AI analysis
     "AIAnalyzer", "AnalysisResult", "result_to_dict",
     "FailureTier", "RetryAssessment", "CATEGORY_TO_TIER",
-    # Hybrid analysis (scripted + agentic + iterative)
+    # Hybrid analysis (iterative + deep modes)
     "HybridAnalyzer", "HybridAnalysisResult", "AnalysisMode",
     # Root Cause Finder Expert
     "RootCauseFinder", "RootCauseContext", "ErrorType", "find_root_cause",
@@ -60,6 +61,8 @@ __all__ = [
     "RCAnalyzer", "RCAnalysisResult", "IterationResult",
     # Iterative analysis (legacy, use RCAnalyzer instead)
     "IterativeRCAnalyzer", "InvestigationResult", "InvestigationAction",
+    # Feedback Store (Requirement 15)
+    "FeedbackStore", "FeedbackEntry", "get_feedback_store",
     # Reports
     "ReportGenerator", "format_slack_message",
     # SCM (GitHub/GitLab)

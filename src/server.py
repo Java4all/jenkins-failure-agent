@@ -35,10 +35,8 @@ class AnalyzeRequest(BaseModel):
     # PR info for posting comments (optional)
     pr_url: Optional[str] = None  # e.g., "https://github.com/org/repo/pull/123"
     pr_sha: Optional[str] = None  # Commit SHA for status updates
-    # Analysis mode options
-    deep: bool = False  # Force agentic/deep investigation mode
-    scripted_only: bool = False  # Force scripted-only mode (no agentic)
-    iterative: bool = False  # Use iterative RC analysis (multi-cycle with code lookup)
+    # Analysis mode (Requirement 5.9)
+    mode: str = "iterative"  # "iterative" (default) or "deep"
     # Notification options
     notify_slack: bool = False
     update_jenkins_description: bool = True
@@ -51,23 +49,25 @@ class AnalyzeResponse(BaseModel):
     success: bool
     job: str
     build: int
-    category: str
-    tier: str  # 3-tier classification
-    root_cause: str
-    confidence: float
-    is_retriable: bool
-    retry_reason: str
-    recommendations: list
+    category: str = ""
+    tier: str = ""  # 3-tier classification
+    root_cause: str = ""
+    confidence: float = 0.0
+    is_retriable: bool = False
+    retry_reason: str = ""
+    recommendations: list = []
     report_url: Optional[str] = None
     # Source code fetch info
-    jenkinsfile_fetched: bool = False
-    libraries_fetched: list = []
+    source_files_fetched: list = []
     # Reporter status
     jenkins_description_updated: bool = False
     pr_comment_posted: bool = False
-    # Analysis mode info
-    analysis_mode: str = "scripted"  # scripted, agentic, or hybrid
-    agentic_enhanced: bool = False
+    # Analysis mode info (Req 5.9)
+    analysis_mode: str = "iterative"  # iterative or deep
+    iterations_used: int = 0
+    # Req 14: Skip status
+    status: str = "completed"  # "completed", "no_analysis_needed", "in_progress"
+    skip_reason: str = ""
     tool_calls_made: int = 0
 
 
@@ -281,10 +281,11 @@ def create_app(config: Config) -> FastAPI:
             # AI analysis with source code (using hybrid analyzer)
             log_snippet = log_parser.get_error_snippet(parsed_log, max_errors=10)
             
-            # Use hybrid analyzer for all modes:
-            # - force_iterative: multi-call iterative RC analysis
-            # - force_agentic (deep): full MCP tool agent investigation
-            # - force_scripted: single-call scripted analysis
+            # Use hybrid analyzer (Requirement 5):
+            # - mode="iterative" (default): multi-call iterative RC analysis
+            # - mode="deep": full MCP tool agent investigation
+            deep_mode = request.mode == "deep"
+            
             hybrid_result = hybrid_analyzer.analyze(
                 build_info=build_info,
                 parsed_log=parsed_log,
@@ -293,19 +294,28 @@ def create_app(config: Config) -> FastAPI:
                 console_log_snippet=log_snippet,
                 jenkinsfile_content=jenkinsfile_content,
                 library_sources=library_sources,
-                force_iterative=request.iterative,  # Multi-call iterative RC
-                force_agentic=request.deep,         # Full MCP agent investigation
-                force_scripted=request.scripted_only,
+                deep=deep_mode,
                 pr_url=request.pr_url,
             )
             
-            # Get the merged result
-            result = hybrid_result.merged_result
-            analysis_mode = hybrid_result.mode.value
-            agentic_enhanced = hybrid_result.agentic_enhanced
-            tool_calls_made = hybrid_result.tool_calls_made
+            # Check if analysis was skipped (Requirement 14)
+            if hybrid_result.skipped:
+                return AnalyzeResponse(
+                    success=True,
+                    job=request.job,
+                    build=build_number,
+                    status="no_analysis_needed",
+                    skip_reason=hybrid_result.skip_reason,
+                    analysis_mode=hybrid_result.mode.value,
+                )
             
-            logger.info(f"Analysis complete: mode={analysis_mode}, agentic_enhanced={agentic_enhanced}")
+            # Get the result
+            result = hybrid_result.result
+            analysis_mode = hybrid_result.mode.value
+            iterations_used = hybrid_result.iterations_used
+            source_files_fetched = hybrid_result.source_files_fetched
+            
+            logger.info(f"Analysis complete: mode={analysis_mode}, iterations={iterations_used}")
             
             # Generate report if requested
             report_url = None
@@ -600,6 +610,93 @@ def create_app(config: Config) -> FastAPI:
                 "name": removed.name,
             },
             "remaining": len(registry)
+        }
+    
+    # =========================================================================
+    # Feedback API (Requirement 15)
+    # =========================================================================
+    
+    @app.post("/feedback")
+    async def add_feedback(
+        feedback: dict,
+        api_key: str = Depends(verify_api_key)
+    ):
+        """
+        Add feedback for an analysis (Req 15.3).
+        
+        Request body:
+        {
+            "job": "job-name",
+            "build": 123,
+            "confirmed_root_cause": "The actual root cause",
+            "confirmed_fix": "The fix that was applied",
+            "was_correct": true,  // optional, defaults based on match
+            "ai_root_cause": "What AI said",  // optional
+            "error_category": "GROOVY_LIBRARY",  // optional
+            "error_snippet": "Error text...",  // optional
+            "failed_stage": "Deploy",  // optional
+            "failed_method": "deployService"  // optional
+        }
+        """
+        from .feedback_store import FeedbackStore, FeedbackEntry
+        
+        store = FeedbackStore()
+        
+        # Determine was_correct if not provided
+        was_correct = feedback.get("was_correct")
+        if was_correct is None:
+            ai_root_cause = feedback.get("ai_root_cause", "")
+            confirmed = feedback.get("confirmed_root_cause", "")
+            # Simple heuristic: correct if significant overlap
+            was_correct = (
+                ai_root_cause.lower()[:50] in confirmed.lower() or
+                confirmed.lower()[:50] in ai_root_cause.lower()
+            ) if ai_root_cause and confirmed else True
+        
+        entry = FeedbackEntry(
+            job_name=feedback.get("job", ""),
+            build_number=feedback.get("build", 0),
+            error_category=feedback.get("error_category", ""),
+            error_snippet=feedback.get("error_snippet", "")[:500],
+            failed_stage=feedback.get("failed_stage", ""),
+            failed_method=feedback.get("failed_method", ""),
+            ai_root_cause=feedback.get("ai_root_cause", ""),
+            confirmed_root_cause=feedback.get("confirmed_root_cause", ""),
+            confirmed_fix=feedback.get("confirmed_fix", ""),
+            was_correct=was_correct,
+            feedback_source="user",
+        )
+        
+        entry_id = store.add_feedback(entry)
+        
+        return {
+            "success": True,
+            "id": entry_id,
+            "was_correct": was_correct,
+        }
+    
+    @app.get("/feedback")
+    async def get_feedback(
+        category: str = None,
+        limit: int = 50,
+        api_key: str = Depends(verify_api_key)
+    ):
+        """
+        Get recent feedback entries (Req 15.4).
+        
+        Query params:
+        - category: Filter by error category (e.g., GROOVY_LIBRARY)
+        - limit: Max entries to return (default 50)
+        """
+        from .feedback_store import FeedbackStore
+        
+        store = FeedbackStore()
+        entries = store.get_recent(limit=limit, category=category)
+        
+        return {
+            "entries": [e.to_dict() for e in entries],
+            "count": len(entries),
+            "stats": store.get_stats(),
         }
     
     return app

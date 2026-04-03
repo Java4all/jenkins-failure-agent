@@ -504,6 +504,7 @@ RULES:
         Implements Requirement 7.3: Include signature mismatch comparison
         Implements Requirement 11.12: Include METHOD CALL SEQUENCE
         Implements Requirement 13.7: Include PIPELINE STAGE SEQUENCE
+        Implements Requirement 15.5: Include SIMILAR PAST CASES (few-shot)
         """
         parts = []
         
@@ -532,6 +533,11 @@ RULES:
                 marker = " <-- ACTIVE (did not finish)" if method in active_methods else ""
                 parts.append(f"  {i}. {method}{marker}")
         
+        # Few-shot examples from feedback store (Requirement 15.5)
+        few_shot_context = self._get_few_shot_examples(rc_context, parsed_log)
+        if few_shot_context:
+            parts.append("\n" + few_shot_context)
+        
         # Signature mismatch context (Requirement 7.3) - add early for visibility
         if mismatch_context:
             parts.append("\n" + mismatch_context)
@@ -554,6 +560,53 @@ RULES:
         parts.append("\nAnalyze the above and provide root cause analysis.")
         
         return "\n".join(parts)
+    
+    def _get_few_shot_examples(self, rc_context, parsed_log) -> str:
+        """
+        Get few-shot examples from feedback store (Requirement 15.5).
+        
+        Returns formatted prompt section or empty string if no matches.
+        """
+        try:
+            from .feedback_store import FeedbackStore
+            
+            store = FeedbackStore()
+            
+            # Get error snippet for similarity matching
+            error_snippet = ""
+            if rc_context and hasattr(rc_context, 'error_line'):
+                error_snippet = rc_context.error_line or ""
+            
+            # Get category and stage/method for filtering
+            category = None
+            failed_stage = None
+            failed_method = None
+            
+            if parsed_log:
+                if hasattr(parsed_log, 'primary_category') and parsed_log.primary_category:
+                    category = parsed_log.primary_category.value
+                failed_stage = getattr(parsed_log, 'failed_stage', None)
+                failed_method = getattr(parsed_log, 'failed_method', None)
+            
+            # Find top 3 similar cases (Req 15.5)
+            similar = store.find_similar(
+                error_snippet=error_snippet,
+                error_category=category,
+                failed_stage=failed_stage,
+                failed_method=failed_method,
+                limit=3,
+            )
+            
+            # Req 15.7: Skip if empty
+            if not similar:
+                return ""
+            
+            # Format for prompt (Req 15.8)
+            return store.format_few_shot_prompt(similar)
+            
+        except Exception as e:
+            logger.debug(f"Could not get few-shot examples: {e}")
+            return ""
     
     def _build_followup_prompt(
         self,

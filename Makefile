@@ -12,7 +12,7 @@ COMPOSE_FILE ?= docker-compose.yml
 
 # Default target
 help:
-	@echo "Jenkins Failure Analysis Agent v1.4"
+	@echo "Jenkins Failure Analysis Agent v1.7"
 	@echo ""
 	@echo "Deployment Modes (Build from Source):"
 	@echo "  make start                    - Start with Ollama in Docker (default)"
@@ -27,7 +27,10 @@ help:
 	@echo "  make setup                    - First-time setup (copy .env, pull model)"
 	@echo "  make setup-external-ollama    - Setup for external Ollama"
 	@echo "  make setup-deep               - Setup for deep investigation (larger model)"
-	@echo "  make stop                     - Stop all services"
+	@echo ""
+	@echo "Stop/Clean:"
+	@echo "  make stop                     - Stop all services (DATA PRESERVED)"
+	@echo "  make clean                    - Stop + DELETE ALL DATA (feedback, models, reports)"
 	@echo ""
 	@echo "Usage:"
 	@echo "  make ui                       - Open the web dashboard"
@@ -40,7 +43,6 @@ help:
 	@echo "  make build                    - Rebuild agent container"
 	@echo "  make logs                     - Follow agent logs"
 	@echo "  make shell                    - Shell into agent container"
-	@echo "  make clean                    - Stop and remove all data"
 	@echo ""
 	@echo "AI Models (for local Ollama):"
 	@echo "  make pull-model MODEL=llama3:70b  - Pull a different model"
@@ -194,12 +196,40 @@ start-prebuilt-external:
 	@echo "Use 'make logs-prebuilt-external' to follow logs"
 
 stop:
+	@echo "Stopping all services..."
 	docker-compose down 2>/dev/null || true
 	docker-compose -f docker-compose.external-ollama.yml down 2>/dev/null || true
 	docker-compose -f docker-compose.remote-ai.yml down 2>/dev/null || true
 	docker-compose -f docker-compose.prebuilt.yml down 2>/dev/null || true
 	docker-compose -f docker-compose.prebuilt-external.yml down 2>/dev/null || true
-	@echo "[OK] All services stopped"
+	@echo ""
+	@echo "[OK] All services stopped (data volumes preserved)"
+	@echo "     Feedback history, AI models, and reports are intact."
+	@echo "     Use 'make clean' to remove all data."
+
+clean:
+	@echo ""
+	@echo "┌────────────────────────────────────────────────────────────────┐"
+	@echo "│  ⚠️  WARNING: This will permanently delete ALL data:           │"
+	@echo "│                                                                │"
+	@echo "│    • Feedback history (feedback.db)                           │"
+	@echo "│    • Downloaded AI models (ollama_data)                       │"
+	@echo "│    • Generated reports (agent_reports)                        │"
+	@echo "│    • Jenkins home (if using local Jenkins)                    │"
+	@echo "│                                                                │"
+	@echo "│  Press Ctrl+C within 5 seconds to cancel...                   │"
+	@echo "└────────────────────────────────────────────────────────────────┘"
+	@echo ""
+	@sleep 5
+	@echo "Proceeding with cleanup..."
+	docker-compose down -v 2>/dev/null || true
+	docker-compose -f docker-compose.external-ollama.yml down -v 2>/dev/null || true
+	docker-compose -f docker-compose.remote-ai.yml down -v 2>/dev/null || true
+	docker-compose -f docker-compose.prebuilt.yml down -v 2>/dev/null || true
+	docker-compose -f docker-compose.prebuilt-external.yml down -v 2>/dev/null || true
+	@echo ""
+	@echo "[OK] All services stopped and ALL DATA REMOVED"
+	@echo "     Run 'make setup' to start fresh."
 
 # Open UI in browser
 ui:
@@ -235,10 +265,6 @@ logs-all:
 
 build:
 	docker-compose build agent
-
-clean:
-	docker-compose down -v
-	@echo "All containers and volumes removed"
 
 # =============================================================================
 # Analysis Commands
@@ -432,12 +458,12 @@ docker-build:
 	docker buildx build \
 		--platform $(PLATFORMS) \
 		-t $(DOCKER_REPO):$(DOCKER_TAG) \
-		-t $(DOCKER_REPO):v1.4.0 \
+		-t $(DOCKER_REPO):v1.7.0 \
 		--push \
 		.
 	@echo ""
 	@echo "[OK] Built and pushed $(DOCKER_REPO):$(DOCKER_TAG)"
-	@echo "[OK] Built and pushed $(DOCKER_REPO):v1.4.0"
+	@echo "[OK] Built and pushed $(DOCKER_REPO):v1.7.0"
 	@echo "[OK] Platforms: $(PLATFORMS)"
 
 # Build for single platform (local testing, no push)
@@ -473,7 +499,7 @@ docker-release-all: docker-setup-buildx
 	docker buildx build \
 		--platform $(PLATFORMS) \
 		-t $(DOCKER_REPO):$(DOCKER_TAG) \
-		-t $(DOCKER_REPO):v1.4.0 \
+		-t $(DOCKER_REPO):v1.7.0 \
 		--push \
 		.
 	@echo ""
@@ -481,7 +507,7 @@ docker-release-all: docker-setup-buildx
 	docker buildx build \
 		--platform $(PLATFORMS) \
 		-t $(DOCKER_REPO)-ui:$(DOCKER_TAG) \
-		-t $(DOCKER_REPO)-ui:v1.4.0 \
+		-t $(DOCKER_REPO)-ui:v1.7.0 \
 		-f ui/Dockerfile.ui \
 		--push \
 		.
