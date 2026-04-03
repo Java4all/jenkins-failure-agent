@@ -29,6 +29,19 @@ class FailureCategory(Enum):
     UNKNOWN = "unknown"
 
 
+class PipelineLineType(Enum):
+    """Classification of Jenkins Pipeline log lines (Requirement 20.1)."""
+    PIPELINE_STEP = "pipeline_step"       # [Pipeline] <something> (not stage/echo/sh)
+    PIPELINE_ECHO = "pipeline_echo"       # [Pipeline] echo
+    ECHO_OUTPUT = "echo_output"           # Line following [Pipeline] echo
+    PIPELINE_SH = "pipeline_sh"           # [Pipeline] sh
+    SHELL_COMMAND = "shell_command"       # HH:MM:SS + <command>
+    SHELL_OUTPUT = "shell_output"         # Output of shell command
+    PIPELINE_STAGE = "pipeline_stage"     # [Pipeline] stage or [Pipeline] { (stage_name)
+    METHOD_TAG = "method_tag"             # Method execution tag
+    OTHER = "other"                       # Anything else
+
+
 @dataclass
 class ToolInvocation:
     """Represents a detected tool invocation in the log (Requirement 17.2)."""
@@ -36,6 +49,7 @@ class ToolInvocation:
     command_line: str
     line_number: int
     exit_code: Optional[int] = None
+    output_lines: List[str] = field(default_factory=list)  # Req 19.3: output of the command
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -43,7 +57,83 @@ class ToolInvocation:
             "command_line": self.command_line,
             "line_number": self.line_number,
             "exit_code": self.exit_code,
+            "output_lines": self.output_lines,
         }
+
+
+@dataclass
+class TraceStep:
+    """Represents a step in the method execution trace (Requirement 19.3)."""
+    step_type: str  # "tool", "command", "function_call", "output"
+    name: str  # tool name or function name
+    command_line: str  # full command as it appeared in log
+    output_lines: List[str] = field(default_factory=list)  # output following the command
+    exit_code: Optional[int] = None
+    status: str = "unknown"  # "success", "failed", "unknown"
+    line_number: int = 0
+    source_line_ref: Optional[str] = None  # Reference to source code line (Req 19.9)
+    line_type: Optional[PipelineLineType] = None  # Req 20.5: Line classification
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "step_type": self.step_type,
+            "name": self.name,
+            "command_line": self.command_line,
+            "output_lines": self.output_lines,
+            "exit_code": self.exit_code,
+            "status": self.status,
+            "line_number": self.line_number,
+            "source_line_ref": self.source_line_ref,
+            "line_type": self.line_type.value if self.line_type else None,
+        }
+
+
+@dataclass
+class MethodExecutionTrace:
+    """Ordered trace of steps executed within a method (Requirement 19.2)."""
+    method_name: str
+    steps: List[TraceStep] = field(default_factory=list)
+    failure_step_index: Optional[int] = None  # Req 19.5: Index of step that failed
+    start_line: int = 0
+    end_line: int = 0
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "method_name": self.method_name,
+            "steps": [s.to_dict() for s in self.steps],
+            "failure_step_index": self.failure_step_index,
+            "start_line": self.start_line,
+            "end_line": self.end_line,
+        }
+    
+    def format_for_prompt(self) -> str:
+        """Format trace for AI prompt (Requirement 19.6)."""
+        lines = [
+            f"METHOD EXECUTION TRACE: {self.method_name}",
+            "=" * (24 + len(self.method_name)),
+        ]
+        
+        for i, step in enumerate(self.steps, 1):
+            status_str = "SUCCESS" if step.status == "success" else (
+                "FAILED" if step.status == "failed" else "UNKNOWN"
+            )
+            exit_str = f" (exit {step.exit_code})" if step.exit_code is not None else ""
+            
+            # Mark failure point
+            marker = "→" if step.status == "failed" else " "
+            
+            lines.append(f"[{i}]{marker} {step.command_line} → {status_str}{exit_str}")
+            
+            # Include output for failed steps or last few lines
+            if step.output_lines and (step.status == "failed" or i == len(self.steps)):
+                for out_line in step.output_lines[:10]:  # Limit output lines
+                    lines.append(f"    {out_line}")
+            
+            # Mark not reached steps
+            if self.failure_step_index is not None and i > self.failure_step_index + 1:
+                lines[-1] = f"[{i}]  {step.command_line} → NOT REACHED"
+        
+        return "\n".join(lines)
 
 
 @dataclass
@@ -93,6 +183,9 @@ class ParsedLog:
     
     # Requirement 17.3: Tool invocations detected in the log
     tool_invocations: List[ToolInvocation] = field(default_factory=list)
+    
+    # Requirement 19.4: Method execution trace when failed_method is identified
+    method_execution_trace: Optional[MethodExecutionTrace] = None
 
 
 class LogParser:
@@ -319,8 +412,10 @@ class LogParser:
         ("npm", r"^\s*\+?\s*(npm\s+.+)"),
         ("yarn", r"^\s*\+?\s*(yarn\s+.+)"),
         ("pip", r"^\s*\+?\s*(pip3?\s+.+)"),
-        # Shell commands (detect sh/bash script execution)
-        ("sh", r"^\s*\+?\s*(sh\s+-c\s+.+|bash\s+-c\s+.+|/bin/(?:ba)?sh\s+.+)"),
+        # Shell commands (detect sh/bash script execution - NOT Jenkins Pipeline markers)
+        # Must have actual command content, not just "[Pipeline] sh"
+        ("sh", r"^\s*\+\s*(sh\s+-c\s+.+|bash\s+-c\s+.+)"),
+        ("bash", r"^\s*\+\s*(/bin/(?:ba)?sh\s+.+)"),
         # Network tools
         ("curl", r"^\s*\+?\s*(curl\s+.+)"),
         ("wget", r"^\s*\+?\s*(wget\s+.+)"),
@@ -336,8 +431,30 @@ class LogParser:
         r"Return code[:\s]+(\d+)",
     ]
     
+    # Requirement 20.2: Shell command pattern - HH:MM:SS + <command>
+    SHELL_COMMAND_PATTERN = re.compile(r"^\d{2}:\d{2}:\d{2}\s+\+\s+(.+)")
+    
+    # Requirement 19.8: Failure indicators in command output
+    OUTPUT_FAILURE_PATTERNS = [
+        r"(?i)^error:",
+        r"(?i)Error:",
+        r"(?i)FAILED",
+        r"(?i)Exception",
+        r"(?i)fatal:",
+        r"(?i)cannot\s",
+        r"(?i)invalid\s",
+        r"(?i)not found",
+        r"(?i)permission denied",
+        r"(?i)access denied",
+        r"(?i)unable to",
+        r"(?i)failed to",
+    ]
+    
     # How many lines after a tool invocation to look for related errors
     TOOL_ERROR_PROXIMITY = 20
+    
+    # Req 19.7: Max output lines to collect per command
+    MAX_OUTPUT_LINES = 30
     
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or {}
@@ -347,6 +464,9 @@ class LogParser:
         # Configurable prefix for method execution tracking
         # Pattern: "{prefix}: method_name"
         self.method_execution_prefix = self.config.get("method_execution_prefix", "")
+        
+        # Req 19.7: Configurable max output lines
+        self.max_output_lines = self.config.get("max_output_lines", self.MAX_OUTPUT_LINES)
         
         # Requirement 17.7, 17.10: Combine built-in + custom tool patterns
         self.tool_patterns = []
@@ -370,6 +490,9 @@ class LogParser:
         # Compile exit code patterns
         self.exit_code_patterns = [re.compile(p, re.IGNORECASE) for p in self.EXIT_CODE_PATTERNS]
         
+        # Compile output failure patterns (Req 19.8)
+        self.output_failure_patterns = [re.compile(p) for p in self.OUTPUT_FAILURE_PATTERNS]
+        
         # Compile custom patterns from config
         self.custom_patterns = {}
         for category_name, category_config in self.config.get("categories", {}).items():
@@ -379,6 +502,73 @@ class LogParser:
                 self.custom_patterns[category] = [re.compile(p) for p in patterns]
             except ValueError:
                 pass
+    
+    def classify_line(self, line: str, in_sh_block: bool = False, prev_line_type: PipelineLineType = None) -> PipelineLineType:
+        """
+        Classify a Jenkins Pipeline log line by type (Requirement 20.7).
+        
+        Args:
+            line: The log line to classify
+            in_sh_block: Whether we're currently inside a shell block
+            prev_line_type: The type of the previous line (for ECHO_OUTPUT detection)
+            
+        Returns:
+            PipelineLineType classification
+        """
+        line_stripped = line.strip()
+        
+        # Method tag detection (using configured prefix)
+        if self.method_execution_prefix and self.method_execution_prefix in line:
+            return PipelineLineType.METHOD_TAG
+        
+        # Pipeline markers
+        if line_stripped.startswith("[Pipeline]"):
+            rest = line_stripped[10:].strip()
+            
+            if rest.startswith("stage") or rest.startswith("{ ("):
+                return PipelineLineType.PIPELINE_STAGE
+            elif rest == "echo":
+                return PipelineLineType.PIPELINE_ECHO
+            elif rest == "sh":
+                return PipelineLineType.PIPELINE_SH
+            else:
+                return PipelineLineType.PIPELINE_STEP
+        
+        # Echo output (line after [Pipeline] echo)
+        if prev_line_type == PipelineLineType.PIPELINE_ECHO:
+            return PipelineLineType.ECHO_OUTPUT
+        
+        # Shell command detection (Req 20.2, 20.8)
+        if in_sh_block:
+            if self.SHELL_COMMAND_PATTERN.match(line_stripped):
+                return PipelineLineType.SHELL_COMMAND
+            else:
+                return PipelineLineType.SHELL_OUTPUT
+        
+        return PipelineLineType.OTHER
+    
+    def _extract_shell_command(self, line: str) -> Optional[str]:
+        """
+        Extract command from shell command line (Req 20.8).
+        Strips timestamp and + prefix.
+        
+        Example: "09:00:01 + abc_tool --s -file_config=filepath"
+        Returns: "abc_tool --s -file_config=filepath"
+        """
+        match = self.SHELL_COMMAND_PATTERN.match(line.strip())
+        if match:
+            return match.group(1)
+        return None
+    
+    def _detect_output_failure(self, output_lines: List[str]) -> bool:
+        """
+        Check if output lines indicate a failure (Req 19.8).
+        """
+        for line in output_lines:
+            for pattern in self.output_failure_patterns:
+                if pattern.search(line):
+                    return True
+        return False
     
     def parse(self, log_content: str) -> ParsedLog:
         """Parse a Jenkins log and extract errors, stack traces, and patterns.
@@ -423,11 +613,17 @@ class LogParser:
         if not result.errors:
             result.errors = self._extract_errors(lines)
         
-        # Requirement 17.2, 17.3: Extract tool invocations
-        result.tool_invocations = self._extract_tool_invocations(lines)
+        # Requirement 17.2, 17.3: Extract tool invocations (with shell block tracking - Req 20.4)
+        result.tool_invocations = self._extract_tool_invocations_v2(lines)
         
         # Requirement 17.4: Associate errors with preceding tool invocations
         self._associate_errors_with_tools(result.errors, result.tool_invocations)
+        
+        # Requirement 19: Build method execution trace when failed_method is identified
+        if result.failed_method:
+            result.method_execution_trace = self._build_method_execution_trace(
+                lines, result.failed_method, result.errors
+            )
         
         # Extract stack traces - focus on the focused section
         focus_content = "\n".join(focus_lines)
@@ -448,32 +644,325 @@ class LogParser:
         
         return result
     
-    def _extract_tool_invocations(self, lines: List[str]) -> List[ToolInvocation]:
-        """Extract tool invocations from log lines (Requirement 17.2).
+    def _extract_tool_invocations_v2(self, lines: List[str]) -> List[ToolInvocation]:
+        """
+        Extract tool invocations with shell block context tracking (Req 17.2, 20.4).
         
-        Detects common CI/CD tools and their command lines.
-        Also attempts to extract exit codes from subsequent lines.
+        Tracks shell blocks to correctly identify commands and their output.
         """
         invocations = []
+        in_sh_block = False
+        current_command: Optional[ToolInvocation] = None
+        prev_line_type = PipelineLineType.OTHER
         
         for i, line in enumerate(lines):
-            for tool_name, pattern in self.tool_patterns:
-                match = pattern.search(line)
-                if match:
-                    command_line = match.group(1) if match.groups() else line.strip()
-                    
-                    # Try to find exit code in next few lines
-                    exit_code = self._find_exit_code(lines, i)
-                    
-                    invocations.append(ToolInvocation(
+            line_type = self.classify_line(line, in_sh_block, prev_line_type)
+            
+            # Track shell block state (Req 20.3)
+            if line_type == PipelineLineType.PIPELINE_SH:
+                in_sh_block = True
+                prev_line_type = line_type
+                continue
+            elif line_type in (PipelineLineType.PIPELINE_STEP, PipelineLineType.PIPELINE_STAGE,
+                              PipelineLineType.PIPELINE_ECHO):
+                # Any [Pipeline] line except output ends the shell block
+                in_sh_block = False
+                if current_command:
+                    invocations.append(current_command)
+                    current_command = None
+            
+            # Shell command detection (Req 20.4)
+            if line_type == PipelineLineType.SHELL_COMMAND:
+                # Save previous command if any
+                if current_command:
+                    invocations.append(current_command)
+                
+                # Extract command from shell line (Req 20.8)
+                command = self._extract_shell_command(line)
+                if command:
+                    # Detect tool name from command
+                    tool_name = self._detect_tool_name(command)
+                    current_command = ToolInvocation(
                         tool_name=tool_name,
-                        command_line=command_line.strip(),
+                        command_line=command,
                         line_number=i + 1,
-                        exit_code=exit_code,
-                    ))
-                    break  # Only match one tool per line
+                        output_lines=[],
+                    )
+            
+            # Collect output for current command (Req 20.4)
+            elif line_type == PipelineLineType.SHELL_OUTPUT and current_command:
+                if len(current_command.output_lines) < self.max_output_lines:
+                    current_command.output_lines.append(line.strip())
+                    
+                    # Check for exit code in output
+                    if current_command.exit_code is None:
+                        for pattern in self.exit_code_patterns:
+                            match = pattern.search(line)
+                            if match:
+                                try:
+                                    current_command.exit_code = int(match.group(1))
+                                except (ValueError, IndexError):
+                                    pass
+            
+            # Also detect tools from non-shell context (original behavior)
+            elif line_type == PipelineLineType.OTHER:
+                for tool_name, pattern in self.tool_patterns:
+                    match = pattern.search(line)
+                    if match:
+                        command_line = match.group(1) if match.groups() else line.strip()
+                        exit_code = self._find_exit_code(lines, i)
+                        invocations.append(ToolInvocation(
+                            tool_name=tool_name,
+                            command_line=command_line.strip(),
+                            line_number=i + 1,
+                            exit_code=exit_code,
+                        ))
+                        break
+            
+            prev_line_type = line_type
+        
+        # Don't forget the last command
+        if current_command:
+            invocations.append(current_command)
         
         return invocations
+    
+    def _detect_tool_name(self, command: str) -> str:
+        """Detect tool name from a command string."""
+        # Get first word of command
+        parts = command.strip().split()
+        if not parts:
+            return "shell"
+        
+        cmd = parts[0]
+        
+        # Check against known tools
+        known_tools = {
+            "aws", "az", "gcloud", "kubectl", "helm", "docker",
+            "terraform", "mvn", "mvnw", "gradle", "gradlew",
+            "npm", "yarn", "pip", "pip3", "curl", "wget",
+            "git", "make", "python", "python3", "java", "node",
+        }
+        
+        if cmd in known_tools:
+            return cmd
+        
+        # Check for path-based commands
+        if "/" in cmd:
+            cmd = cmd.split("/")[-1]
+            if cmd in known_tools:
+                return cmd
+        
+        return cmd  # Return the command itself as tool name
+    
+    def _build_method_execution_trace(
+        self,
+        lines: List[str],
+        failed_method: str,
+        errors: List[ErrorMatch],
+    ) -> Optional[MethodExecutionTrace]:
+        """
+        Build method execution trace (Requirement 19.1, 19.2).
+        
+        Extracts all log lines between the method's start and finish tags,
+        then identifies tool invocations and their output.
+        """
+        if not self.method_execution_prefix or not failed_method:
+            return None
+        
+        # Find method start and end (Req 19.1)
+        start_pattern = f"{self.method_execution_prefix}: {failed_method}"
+        finish_pattern = f"{self.method_execution_prefix}: Finished {failed_method}"
+        
+        start_line = -1
+        end_line = len(lines)
+        
+        for i, line in enumerate(lines):
+            if start_pattern in line and "Finished" not in line:
+                start_line = i
+            elif finish_pattern in line:
+                end_line = i
+                break
+        
+        if start_line < 0:
+            return None
+        
+        # Extract method execution window (Req 19.1)
+        method_lines = lines[start_line:end_line + 1]
+        
+        trace = MethodExecutionTrace(
+            method_name=failed_method,
+            start_line=start_line + 1,
+            end_line=end_line + 1,
+        )
+        
+        # Process method lines to extract trace steps (Req 19.2)
+        in_sh_block = False
+        current_step: Optional[TraceStep] = None
+        prev_line_type = PipelineLineType.OTHER
+        
+        for rel_idx, line in enumerate(method_lines):
+            abs_line_num = start_line + rel_idx + 1
+            line_type = self.classify_line(line, in_sh_block, prev_line_type)
+            
+            # Track shell block state
+            if line_type == PipelineLineType.PIPELINE_SH:
+                in_sh_block = True
+            elif line_type in (PipelineLineType.PIPELINE_STEP, PipelineLineType.PIPELINE_STAGE):
+                in_sh_block = False
+                if current_step:
+                    self._finalize_trace_step(current_step)
+                    trace.steps.append(current_step)
+                    current_step = None
+            
+            # Create trace step for shell commands (Req 19.3)
+            if line_type == PipelineLineType.SHELL_COMMAND:
+                if current_step:
+                    self._finalize_trace_step(current_step)
+                    trace.steps.append(current_step)
+                
+                command = self._extract_shell_command(line)
+                if command:
+                    tool_name = self._detect_tool_name(command)
+                    current_step = TraceStep(
+                        step_type="tool" if tool_name != command.split()[0] else "command",
+                        name=tool_name,
+                        command_line=command,
+                        line_number=abs_line_num,
+                        line_type=line_type,
+                    )
+            
+            # Collect output (Req 19.7)
+            elif line_type == PipelineLineType.SHELL_OUTPUT and current_step:
+                if len(current_step.output_lines) < self.max_output_lines:
+                    current_step.output_lines.append(line.strip())
+            
+            prev_line_type = line_type
+        
+        # Finalize last step
+        if current_step:
+            self._finalize_trace_step(current_step)
+            trace.steps.append(current_step)
+        
+        # Mark failure point (Req 19.5)
+        for i, step in enumerate(trace.steps):
+            if step.status == "failed":
+                trace.failure_step_index = i
+                break
+        
+        return trace if trace.steps else None
+    
+    def cross_reference_trace_with_source(
+        self,
+        trace: MethodExecutionTrace,
+        source_tool_invocations: List[Any],
+    ) -> MethodExecutionTrace:
+        """
+        Cross-reference trace steps with source code (Requirement 19.9).
+        
+        Matches each TraceStep to the corresponding source line
+        based on tool name and command similarity.
+        
+        Args:
+            trace: The method execution trace
+            source_tool_invocations: List of SourceToolInvocation from GroovyAnalyzer
+            
+        Returns:
+            Updated trace with source_line_ref populated
+        """
+        if not trace or not source_tool_invocations:
+            return trace
+        
+        # Build a lookup by tool name
+        tool_to_sources = {}
+        for inv in source_tool_invocations:
+            tool_name = inv.tool_name if hasattr(inv, 'tool_name') else inv.get('tool_name', '')
+            if tool_name not in tool_to_sources:
+                tool_to_sources[tool_name] = []
+            tool_to_sources[tool_name].append(inv)
+        
+        # Match each step to source
+        for step in trace.steps:
+            if step.name not in tool_to_sources:
+                continue
+            
+            sources = tool_to_sources[step.name]
+            
+            # Find best match based on command similarity
+            best_match = None
+            best_score = 0
+            
+            for src in sources:
+                cmd_template = (
+                    src.command_template if hasattr(src, 'command_template')
+                    else src.get('command_template', '')
+                )
+                
+                # Score based on common substrings
+                score = self._command_similarity(step.command_line, cmd_template)
+                if score > best_score:
+                    best_score = score
+                    best_match = src
+            
+            # Set source reference if match found
+            if best_match and best_score > 0.3:  # Threshold for match
+                src_file = (
+                    best_match.source_file if hasattr(best_match, 'source_file')
+                    else best_match.get('source_file', '')
+                )
+                src_line = (
+                    best_match.line_number if hasattr(best_match, 'line_number')
+                    else best_match.get('line_number', 0)
+                )
+                step.source_line_ref = f"{src_file}:{src_line}"
+        
+        return trace
+    
+    def _command_similarity(self, cmd1: str, cmd2: str) -> float:
+        """
+        Calculate similarity between two commands.
+        
+        Handles variable substitution by matching on tool and arguments.
+        """
+        # Normalize commands
+        cmd1_parts = set(cmd1.lower().split())
+        cmd2_parts = set(cmd2.lower().split())
+        
+        # Remove variable placeholders from cmd2
+        cmd2_parts = {p for p in cmd2_parts if not p.startswith('$')}
+        
+        if not cmd1_parts or not cmd2_parts:
+            return 0.0
+        
+        # Calculate Jaccard similarity
+        intersection = cmd1_parts & cmd2_parts
+        union = cmd1_parts | cmd2_parts
+        
+        return len(intersection) / len(union) if union else 0.0
+    
+    def _finalize_trace_step(self, step: TraceStep):
+        """Finalize a trace step by determining its status (Req 19.8)."""
+        # Check exit code
+        if step.exit_code is not None:
+            step.status = "success" if step.exit_code == 0 else "failed"
+        else:
+            # Check for exit code in output
+            for line in step.output_lines:
+                for pattern in self.exit_code_patterns:
+                    match = pattern.search(line)
+                    if match:
+                        try:
+                            step.exit_code = int(match.group(1))
+                            step.status = "success" if step.exit_code == 0 else "failed"
+                            return
+                        except (ValueError, IndexError):
+                            pass
+            
+            # Check for failure indicators in output (Req 19.8)
+            if self._detect_output_failure(step.output_lines):
+                step.status = "failed"
+            else:
+                step.status = "unknown"
     
     def _find_exit_code(self, lines: List[str], tool_line_idx: int) -> Optional[int]:
         """Find exit code in lines following a tool invocation."""

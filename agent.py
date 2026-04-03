@@ -136,6 +136,49 @@ def analyze(
             title="Build Information"
         ))
         
+        # =========================================================
+        # Requirement 14.1-14.4: Pre-check build status BEFORE log parsing
+        # =========================================================
+        
+        # Req 14.3: Build still in progress
+        if build_info.building:
+            console.print(Panel(
+                "[yellow]Build is still in progress[/yellow]\n"
+                "Analysis cannot be performed on a running build.",
+                title="No Analysis Needed"
+            ))
+            sys.exit(0)
+        
+        # Req 14.2: Build succeeded
+        if build_info.status == "SUCCESS":
+            console.print(Panel(
+                "[green]Build succeeded[/green] — no failure to analyze.",
+                title="No Analysis Needed"
+            ))
+            sys.exit(0)
+        
+        # Req 14.4: Build was aborted
+        if build_info.status == "ABORTED":
+            console.print(Panel(
+                "[yellow]Build was manually aborted[/yellow] — no failure to analyze.\n"
+                "The build was stopped by a user, not due to a pipeline error.",
+                title="No Analysis Needed"
+            ))
+            sys.exit(0)
+        
+        # Req 14.1: Proceed only for FAILURE or UNSTABLE
+        if build_info.status not in ("FAILURE", "UNSTABLE", None):
+            console.print(Panel(
+                f"[yellow]Unexpected build status: {build_info.status}[/yellow]\n"
+                "Only FAILURE and UNSTABLE builds can be analyzed.",
+                title="No Analysis Needed"
+            ))
+            sys.exit(0)
+        
+        # =========================================================
+        # Now fetch and parse logs (only for FAILURE/UNSTABLE)
+        # =========================================================
+        
         # Fetch console log
         progress.update(task, description="Fetching console log...")
         console_log = jenkins.get_console_log(job, build_info.build_number)

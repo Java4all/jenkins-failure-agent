@@ -556,6 +556,11 @@ RULES:
                 marker = " <-- ACTIVE (did not finish)" if method in active_methods else ""
                 parts.append(f"  {i}. {method}{marker}")
         
+        # Method execution trace (Requirement 19.6)
+        if parsed_log and hasattr(parsed_log, 'method_execution_trace') and parsed_log.method_execution_trace:
+            trace = parsed_log.method_execution_trace
+            parts.append("\n" + trace.format_for_prompt())
+        
         # Few-shot examples from feedback store (Requirement 15.5)
         few_shot_context = self._get_few_shot_examples(rc_context, parsed_log)
         if few_shot_context:

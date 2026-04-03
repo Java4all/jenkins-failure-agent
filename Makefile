@@ -12,7 +12,7 @@ COMPOSE_FILE ?= docker-compose.yml
 
 # Default target
 help:
-	@echo "Jenkins Failure Analysis Agent v1.8"
+	@echo "Jenkins Failure Analysis Agent v1.9"
 	@echo ""
 	@echo "Deployment Modes (Build from Source):"
 	@echo "  make start                    - Start with Ollama in Docker (default)"
@@ -458,12 +458,12 @@ docker-build:
 	docker buildx build \
 		--platform $(PLATFORMS) \
 		-t $(DOCKER_REPO):$(DOCKER_TAG) \
-		-t $(DOCKER_REPO):v1.8.0 \
+		-t $(DOCKER_REPO):v1.9.0 \
 		--push \
 		.
 	@echo ""
 	@echo "[OK] Built and pushed $(DOCKER_REPO):$(DOCKER_TAG)"
-	@echo "[OK] Built and pushed $(DOCKER_REPO):v1.8.0"
+	@echo "[OK] Built and pushed $(DOCKER_REPO):v1.9.0"
 	@echo "[OK] Platforms: $(PLATFORMS)"
 
 # Build for single platform (local testing, no push)
@@ -499,7 +499,7 @@ docker-release-all: docker-setup-buildx
 	docker buildx build \
 		--platform $(PLATFORMS) \
 		-t $(DOCKER_REPO):$(DOCKER_TAG) \
-		-t $(DOCKER_REPO):v1.8.0 \
+		-t $(DOCKER_REPO):v1.9.0 \
 		--push \
 		.
 	@echo ""
@@ -507,7 +507,7 @@ docker-release-all: docker-setup-buildx
 	docker buildx build \
 		--platform $(PLATFORMS) \
 		-t $(DOCKER_REPO)-ui:$(DOCKER_TAG) \
-		-t $(DOCKER_REPO)-ui:v1.8.0 \
+		-t $(DOCKER_REPO)-ui:v1.9.0 \
 		-f ui/Dockerfile.ui \
 		--push \
 		.

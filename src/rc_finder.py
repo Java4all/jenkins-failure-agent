@@ -18,6 +18,12 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Dict, Any
 from enum import Enum
 
+# Import PipelineLineType for line classification (Req 20.6)
+try:
+    from .log_parser import PipelineLineType
+except ImportError:
+    PipelineLineType = None
+
 
 class ErrorType(Enum):
     """High-level error type classification."""
@@ -52,6 +58,10 @@ class RootCauseContext:
     context_before: List[str] = field(default_factory=list)  # ~30 lines before error
     context_after: List[str] = field(default_factory=list)   # ~15 lines after error
     
+    # Requirement 20.6: Line type classifications for context lines
+    # Maps line index to type label (e.g., "SHELL_CMD", "SHELL_OUT", "ECHO", "STEP")
+    context_line_types: Dict[int, str] = field(default_factory=dict)
+    
     # Extracted identifiers (IDs, names, paths mentioned in error)
     identifiers: List[str] = field(default_factory=list)
     
@@ -80,6 +90,12 @@ class RootCauseContext:
             parts.append(f"COMMAND: {self.related_tool.get('command_line', 'unknown')}")
             exit_code = self.related_tool.get('exit_code')
             parts.append(f"EXIT CODE: {exit_code if exit_code is not None else 'unknown'}")
+            # Include tool output if available
+            output_lines = self.related_tool.get('output_lines', [])
+            if output_lines:
+                parts.append("OUTPUT:")
+                for line in output_lines[:10]:
+                    parts.append(f"  {line}")
         
         parts.append(f"\nERROR TYPE: {self.error_type.value}")
         parts.append(f"ERROR: {self.error_line}")
@@ -87,13 +103,17 @@ class RootCauseContext:
         if self.identifiers:
             parts.append(f"\nKEY IDENTIFIERS: {', '.join(self.identifiers)}")
         
-        # Context before (commands that led to error)
+        # Context before (commands that led to error) - Req 20.6: with line type labels
         if self.context_before:
             parts.append("\n" + "="*50)
             parts.append("COMMANDS/OPERATIONS BEFORE ERROR:")
             parts.append("="*50)
-            for line in self.context_before:
-                parts.append(line)
+            for i, line in enumerate(self.context_before):
+                line_type = self.context_line_types.get(i, "")
+                if line_type:
+                    parts.append(f"[{line_type}] {line}")
+                else:
+                    parts.append(line)
         
         # The error itself
         parts.append("\n" + "="*50)
@@ -106,8 +126,14 @@ class RootCauseContext:
             parts.append("\n" + "="*50)
             parts.append("ERROR DETAILS:")
             parts.append("="*50)
-            for line in self.context_after:
-                parts.append(line)
+            for i, line in enumerate(self.context_after):
+                # Offset index for after-context
+                idx = len(self.context_before) + 1 + i
+                line_type = self.context_line_types.get(idx, "")
+                if line_type:
+                    parts.append(f"[{line_type}] {line}")
+                else:
+                    parts.append(line)
         
         # Related lines (if identifiers found)
         if self.related_lines:
@@ -254,6 +280,11 @@ class RootCauseFinder:
         context.context_before = self._extract_context_before(lines, context.error_line_number)
         context.context_after = self._extract_context_after(lines, context.error_line_number)
         
+        # Step 5b (Req 20.6): Classify context lines
+        context.context_line_types = self._classify_context_lines(
+            context.context_before, context.context_after
+        )
+        
         # Step 6: Extract identifiers from error
         context.identifiers = self._extract_identifiers(context.error_line)
         
@@ -315,6 +346,86 @@ class RootCauseFinder:
                 'line_number': getattr(best_tool, 'line_number', 0),
                 'exit_code': getattr(best_tool, 'exit_code', None),
             }
+    
+    def _classify_context_lines(
+        self,
+        context_before: List[str],
+        context_after: List[str],
+    ) -> Dict[int, str]:
+        """
+        Classify context lines by type (Requirement 20.6).
+        
+        Returns a dict mapping line index to type label.
+        """
+        if PipelineLineType is None:
+            return {}
+        
+        result = {}
+        in_sh_block = False
+        prev_type = None
+        
+        # Shell command pattern (HH:MM:SS + command)
+        shell_cmd_pattern = re.compile(r'^\d{2}:\d{2}:\d{2}\s+\+\s+(.+)')
+        
+        def classify(line: str) -> str:
+            nonlocal in_sh_block, prev_type
+            
+            line_stripped = line.strip()
+            
+            # Pipeline markers
+            if line_stripped.startswith("[Pipeline]"):
+                rest = line_stripped[10:].strip()
+                
+                if rest.startswith("stage") or rest.startswith("{ ("):
+                    in_sh_block = False
+                    prev_type = "STAGE"
+                    return "STAGE"
+                elif rest == "echo":
+                    in_sh_block = False
+                    prev_type = "ECHO"
+                    return "ECHO"
+                elif rest == "sh":
+                    in_sh_block = True
+                    prev_type = "SH"
+                    return "SH"
+                else:
+                    in_sh_block = False
+                    prev_type = "STEP"
+                    return "STEP"
+            
+            # Echo output (line after [Pipeline] echo)
+            if prev_type == "ECHO":
+                prev_type = None
+                return "ECHO_OUT"
+            
+            # Inside shell block
+            if in_sh_block:
+                if shell_cmd_pattern.match(line_stripped):
+                    return "SHELL_CMD"
+                else:
+                    return "SHELL_OUT"
+            
+            prev_type = None
+            return ""  # No label for OTHER lines
+        
+        # Classify before context
+        for i, line in enumerate(context_before):
+            label = classify(line)
+            if label:
+                result[i] = label
+        
+        # Reset state for after context
+        in_sh_block = False
+        prev_type = None
+        
+        # Classify after context (offset index)
+        offset = len(context_before) + 1  # +1 for error line
+        for i, line in enumerate(context_after):
+            label = classify(line)
+            if label:
+                result[offset + i] = label
+        
+        return result
     
     def _find_last_stage(self, lines: List[str]) -> Tuple[Optional[str], int]:
         """Find the last pipeline stage."""

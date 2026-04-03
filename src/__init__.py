@@ -10,17 +10,20 @@ Supports multiple analysis modes:
 - Agentic: Deep investigation with MCP tools for code/library issues
 """
 
-__version__ = "1.8.0"
+__version__ = "1.9.1"
 
 from .config import (
     Config, JenkinsConfig, AIConfig, GitConfig, GitHubConfig,
     SCMConfig, ReporterConfig, RCAnalyzerConfig, SourceLocation
 )
 from .jenkins_client import JenkinsClient, BuildInfo, TestResult
-from .log_parser import LogParser, ParsedLog, FailureCategory, ToolInvocation
+from .log_parser import (
+    LogParser, ParsedLog, FailureCategory, ToolInvocation,
+    PipelineLineType, TraceStep, MethodExecutionTrace
+)
 from .git_analyzer import GitAnalyzer, GitAnalysis
 from .github_client import GitHubClient, GitHubConfig as GitHubClientConfig, FetchResult
-from .groovy_analyzer import GroovyAnalyzer, GroovyAnalysis, GroovyFailureType
+from .groovy_analyzer import GroovyAnalyzer, GroovyAnalysis, GroovyFailureType, SourceToolInvocation
 from .config_analyzer import ConfigurationAnalyzer, ConfigurationAnalysis, ConfigFailureType
 from .ai_analyzer import (
     AIAnalyzer, AnalysisResult, result_to_dict,
@@ -42,12 +45,13 @@ __all__ = [
     "JenkinsClient", "BuildInfo", "TestResult",
     # Log parsing
     "LogParser", "ParsedLog", "FailureCategory", "ToolInvocation",
+    "PipelineLineType", "TraceStep", "MethodExecutionTrace",
     # Git analysis
     "GitAnalyzer", "GitAnalysis",
     # GitHub code fetching
     "GitHubClient", "GitHubClientConfig", "FetchResult",
     # Groovy analysis
-    "GroovyAnalyzer", "GroovyAnalysis", "GroovyFailureType",
+    "GroovyAnalyzer", "GroovyAnalysis", "GroovyFailureType", "SourceToolInvocation",
     # Configuration analysis
     "ConfigurationAnalyzer", "ConfigurationAnalysis", "ConfigFailureType",
     # AI analysis

@@ -103,6 +103,8 @@ class AnalysisResult:
     # Enhanced analysis data
     groovy_analysis: Optional[Dict[str, Any]] = None
     config_analysis: Optional[Dict[str, Any]] = None
+    # Requirement 18.7, 19.10: Metadata for user_hint and method_execution_trace
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 SYSTEM_PROMPT = """You analyze Jenkins build failures. Respond with JSON only.

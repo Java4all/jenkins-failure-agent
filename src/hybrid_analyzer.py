@@ -11,6 +11,7 @@ Simplified to two modes per Requirement 5:
 """
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
 from enum import Enum
@@ -222,25 +223,34 @@ class HybridAnalyzer:
             )
         
         # Req 14.6: UNSTABLE builds - lightweight scan for serious issues
-        if status == "UNSTABLE" and parsed_log:
-            serious_issues = self._scan_for_serious_issues(parsed_log)
+        if status == "UNSTABLE":
+            logger.info(f"UNSTABLE build detected - performing lightweight scan")
+            
+            # Req 14.6a: Check for serious issues only
+            serious_issues = self._scan_for_serious_issues(parsed_log) if parsed_log else False
             
             if not serious_issues:
                 # Req 14.6b: No serious issues found
                 # Req 18.6: If user_hint provided, do targeted search
                 if user_hint:
                     logger.info(f"UNSTABLE build with user hint - will do targeted search")
+                    # Mark as UNSTABLE in build_info for labeling
                     return None  # Proceed with analysis using hint
                 
-                logger.info(f"UNSTABLE build with no critical errors detected")
+                # Req 14.6c: Return cautious response
+                logger.info(f"UNSTABLE build with no critical errors detected - skipping analysis")
                 return HybridAnalysisResult(
                     mode=AnalysisMode.ITERATIVE,
                     result=None,
                     skipped=True,
                     skip_reason="Build is unstable but no critical errors were detected. "
-                               "If you can provide more context about what you expected, "
-                               "I can look more carefully. Use --hint or the hint field in the UI.",
+                               "This often means tests passed but with warnings, or quality gates weren't met. "
+                               "If you believe there's a real issue, please provide a hint about what you expected "
+                               "using --hint or the hint field in the UI.",
                 )
+            else:
+                # Req 14.6a: Serious issues found - proceed but log it
+                logger.info(f"UNSTABLE build with serious issues detected - proceeding with analysis")
         
         # Req 14.1: Only proceed for FAILURE or UNSTABLE (with issues)
         if status not in ("FAILURE", "UNSTABLE", None):
@@ -258,15 +268,15 @@ class HybridAnalyzer:
         """
         Lightweight scan for serious issues in UNSTABLE builds (Req 14.6).
         
-        Searches for ERROR, FATAL, Exception, and stack traces.
+        Only returns True for REAL serious issues, not noise.
         Returns True if serious issues found.
         """
-        # Check for stack traces
+        # Check for stack traces - these are always serious
         if parsed_log.stack_traces:
-            logger.debug(f"Found {len(parsed_log.stack_traces)} stack traces")
+            logger.debug(f"Found {len(parsed_log.stack_traces)} stack traces - serious issue")
             return True
         
-        # Check for serious error categories
+        # Serious error categories that warrant investigation
         serious_categories = {
             FailureCategory.COMPILATION_ERROR,
             FailureCategory.INFRASTRUCTURE,
@@ -275,41 +285,128 @@ class HybridAnalyzer:
             FailureCategory.GROOVY_LIBRARY,
             FailureCategory.GROOVY_CPS,
             FailureCategory.GROOVY_SANDBOX,
+            FailureCategory.GROOVY_SERIALIZATION,
+            FailureCategory.PLUGIN_ERROR,
         }
         
         for error in parsed_log.errors:
             if error.category in serious_categories:
                 logger.debug(f"Found serious error category: {error.category}")
                 return True
-            
-            # Check for serious patterns in error text
-            error_lower = error.line.lower()
-            if any(p in error_lower for p in ['fatal', 'exception', 'error:', 'failed']):
-                logger.debug(f"Found serious pattern in error: {error.line[:100]}")
-                return True
         
+        # Only check for VERY specific serious patterns (not generic ones)
+        serious_patterns = [
+            'exception:',
+            'fatal error',
+            'fatal:',
+            'build failure',
+            'compilation failed',
+            'unable to resolve',
+            'could not find',
+            'permission denied',
+            'access denied',
+            'authentication failed',
+            'connection refused',
+            'timeout',
+        ]
+        
+        for error in parsed_log.errors:
+            error_lower = error.line.lower()
+            for pattern in serious_patterns:
+                if pattern in error_lower:
+                    logger.debug(f"Found serious pattern '{pattern}' in: {error.line[:100]}")
+                    return True
+        
+        # No serious issues found
+        logger.debug("No serious issues found in UNSTABLE build")
         return False
     
     def _check_parsed_log(self, parsed_log: ParsedLog) -> Optional[HybridAnalysisResult]:
         """
-        Check if parsed log has actionable errors (Requirement 14.6).
+        Check if parsed log has actionable errors (Requirement 14.8, 14.11).
         
-        Returns HybridAnalysisResult with skipped=True if no errors found.
+        Filters out noise patterns and returns skipped result if no real errors.
         """
-        has_errors = bool(parsed_log.errors)
+        # Req 14.8: Check for presence of errors/traces/failed stage
         has_traces = bool(parsed_log.stack_traces)
         has_failed_stage = parsed_log.failed_stage is not None
         
-        if not has_errors and not has_traces and not has_failed_stage:
-            logger.info("No actionable errors found in log")
+        # Req 14.11: Filter out noise patterns from errors
+        actionable_errors = self._filter_noise_errors(parsed_log.errors)
+        has_actionable_errors = bool(actionable_errors)
+        
+        if not has_actionable_errors and not has_traces and not has_failed_stage:
+            if parsed_log.errors:
+                # We had errors but they were all noise
+                logger.warning(f"Found {len(parsed_log.errors)} errors but all were noise patterns - skipping analysis")
+            else:
+                logger.info("No actionable errors found in log")
+            
             return HybridAnalysisResult(
                 mode=AnalysisMode.ITERATIVE,
                 result=None,
                 skipped=True,
-                skip_reason="No errors detected in build log",
+                skip_reason="No actionable errors detected in build log",
             )
         
         return None  # Proceed with analysis
+    
+    def _filter_noise_errors(self, errors: List) -> List:
+        """
+        Filter out noise/non-actionable errors (Requirement 14.11).
+        
+        Returns list of actionable errors only.
+        """
+        if not errors:
+            return []
+        
+        # Noise patterns - these are common log lines that aren't real errors
+        noise_patterns = [
+            # Download/progress indicators
+            r'downloading:',
+            r'downloaded:',
+            r'progress[\s:]*\d',
+            r'\[\d+/\d+\]',  # [1/10] style progress
+            r'^\s*\d+%',  # Percentage indicators
+            # Git/SCM noise
+            r'checking out',
+            r'cloning into',
+            r'fetching',
+            # Jenkins Pipeline markers (not errors)
+            r'\[pipeline\]\s*(sh|stage|node|checkout)',
+            r'\[pipeline\]\s*\{',
+            r'\[pipeline\]\s*\}',
+            r'^\s*\+\s*[\w-]+$',  # Just a command name with no content
+            # Build tool info messages
+            r'^\[info\]',
+            r'^info:',
+            r'build started',
+            r'build finished',
+            # Test framework noise
+            r'tests? (run|passed|skipped)',
+            r'test suite',
+            r'running \d+ test',
+        ]
+        
+        actionable = []
+        for error in errors:
+            error_lower = error.line.lower().strip()
+            
+            # Skip empty or very short lines
+            if len(error_lower) < 5:
+                continue
+            
+            # Check against noise patterns
+            is_noise = False
+            for pattern in noise_patterns:
+                if re.search(pattern, error_lower):
+                    is_noise = True
+                    break
+            
+            if not is_noise:
+                actionable.append(error)
+        
+        return actionable
     
     def should_use_agentic(
         self,
@@ -454,6 +551,7 @@ class HybridAnalyzer:
     ) -> HybridAnalysisResult:
         """Run iterative RC analysis (Requirement 5.2)."""
         from .rc_finder import RootCauseFinder
+        from .groovy_analyzer import GroovyAnalyzer
         
         logger.info("Running iterative RC analysis")
         
@@ -465,6 +563,22 @@ class HybridAnalyzer:
             })
             tool_invocations = getattr(parsed_log, 'tool_invocations', None)
             rc_context = rc_finder.find(console_log_snippet or "", tool_invocations)
+            
+            # Req 19.9: Cross-reference method execution trace with source code
+            if parsed_log and hasattr(parsed_log, 'method_execution_trace') and parsed_log.method_execution_trace:
+                if jenkinsfile_content or library_sources:
+                    groovy_analyzer = GroovyAnalyzer()
+                    source_invocations = groovy_analyzer.analyze_source_for_tools(
+                        jenkinsfile_content=jenkinsfile_content,
+                        library_sources=library_sources,
+                    )
+                    if source_invocations:
+                        from .log_parser import LogParser
+                        log_parser = LogParser(vars(self.config.parsing))
+                        parsed_log.method_execution_trace = log_parser.cross_reference_trace_with_source(
+                            parsed_log.method_execution_trace,
+                            source_invocations,
+                        )
             
             # Run RC analyzer (Req 18.4: pass user_hint)
             rc_result = self.rc_analyzer.analyze(
@@ -483,11 +597,18 @@ class HybridAnalyzer:
             # Convert RC result to AnalysisResult
             analysis_result = self._rc_result_to_analysis_result(rc_result, build_info, parsed_log)
             
-            # Req 18.7: Store user_hint in result metadata
-            if user_hint and analysis_result:
-                if not hasattr(analysis_result, 'metadata'):
+            # Req 18.7, 19.10: Store metadata in result
+            if analysis_result:
+                if not hasattr(analysis_result, 'metadata') or analysis_result.metadata is None:
                     analysis_result.metadata = {}
-                analysis_result.metadata['user_hint'] = user_hint
+                
+                # Req 18.7: Store user_hint
+                if user_hint:
+                    analysis_result.metadata['user_hint'] = user_hint
+                
+                # Req 19.10: Store method_execution_trace
+                if parsed_log and hasattr(parsed_log, 'method_execution_trace') and parsed_log.method_execution_trace:
+                    analysis_result.metadata['method_execution_trace'] = parsed_log.method_execution_trace.to_dict()
             
             return HybridAnalysisResult(
                 mode=AnalysisMode.ITERATIVE,

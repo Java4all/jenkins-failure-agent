@@ -217,11 +217,49 @@ def create_app(config: Config) -> FastAPI:
             # Get build info
             build_info = jenkins_client.get_build_info(request.job, build_number)
             
+            # =========================================================
+            # Requirement 14.1: Check build status BEFORE log parsing
+            # =========================================================
+            
+            # Req 14.3: Build still in progress
             if build_info.building:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Build is still in progress"
+                logger.info(f"Build {request.job}#{build_number} is still running - skipping analysis")
+                return AnalyzeResponse(
+                    success=True,
+                    job=request.job,
+                    build=build_number,
+                    status="no_analysis_needed",
+                    skip_reason="Build is still in progress",
+                    analysis_mode="none",
                 )
+            
+            # Req 14.2: Build succeeded
+            if build_info.status == "SUCCESS":
+                logger.info(f"Build {request.job}#{build_number} succeeded - no failure to analyze")
+                return AnalyzeResponse(
+                    success=True,
+                    job=request.job,
+                    build=build_number,
+                    status="no_analysis_needed",
+                    skip_reason="Build succeeded",
+                    analysis_mode="none",
+                )
+            
+            # Req 14.4: Build was aborted
+            if build_info.status == "ABORTED":
+                logger.info(f"Build {request.job}#{build_number} was aborted - skipping analysis")
+                return AnalyzeResponse(
+                    success=True,
+                    job=request.job,
+                    build=build_number,
+                    status="no_analysis_needed",
+                    skip_reason="Build was manually aborted",
+                    analysis_mode="none",
+                )
+            
+            # =========================================================
+            # Only fetch and parse logs for FAILURE or UNSTABLE builds
+            # =========================================================
             
             # Fetch console log
             console_log = jenkins_client.get_console_log(request.job, build_number)

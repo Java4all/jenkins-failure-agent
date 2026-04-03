@@ -104,6 +104,34 @@ class PipelineExecutionNode:
 
 
 @dataclass
+class SourceToolInvocation:
+    """
+    A tool invocation detected in source code (Requirement 17.9).
+    
+    Used to identify tools called within sh() steps in Jenkinsfile
+    or shared library methods.
+    """
+    tool_name: str
+    command_template: str  # The command as written (may contain variables)
+    source_file: str
+    line_number: int
+    enclosing_method: str = ""  # Method/function that contains this sh() call
+    is_in_sh_step: bool = True
+    variables_used: List[str] = field(default_factory=list)  # Variables in command
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "tool_name": self.tool_name,
+            "command_template": self.command_template,
+            "source_file": self.source_file,
+            "line_number": self.line_number,
+            "enclosing_method": self.enclosing_method,
+            "is_in_sh_step": self.is_in_sh_step,
+            "variables_used": self.variables_used,
+        }
+
+
+@dataclass
 class GroovyAnalysis:
     """Complete Groovy/Pipeline analysis result."""
     failure_type: GroovyFailureType
@@ -115,6 +143,8 @@ class GroovyAnalysis:
     decoded_cps_trace: List[CPSFrame] = field(default_factory=list)
     configuration_issues: List[str] = field(default_factory=list)
     summary: str = ""
+    # Requirement 17.9: Tool invocations detected in source code
+    source_tool_invocations: List[SourceToolInvocation] = field(default_factory=list)
 
 
 class GroovyAnalyzer:
@@ -868,3 +898,206 @@ class GroovyAnalyzer:
         parts.append(f"**Summary:** {analysis.summary}")
         
         return "\n".join(parts)
+    
+    # =========================================================================
+    # Requirement 17.9: Detect tool invocations within sh() steps
+    # =========================================================================
+    
+    # Known tools to detect in sh() commands
+    KNOWN_TOOLS = {
+        "aws", "az", "gcloud", "kubectl", "helm", "docker",
+        "terraform", "mvn", "mvnw", "gradle", "gradlew",
+        "npm", "yarn", "pip", "pip3", "curl", "wget",
+        "git", "make", "python", "python3", "java", "node",
+        "ansible", "ansible-playbook", "packer", "vault",
+    }
+    
+    # Patterns to match sh() step invocations in Groovy
+    SH_STEP_PATTERNS = [
+        # sh "command" or sh 'command'
+        re.compile(r'sh\s*["\'](.+?)["\']', re.DOTALL),
+        # sh """command""" or sh '''command'''
+        re.compile(r'sh\s*"{3}(.+?)"{3}', re.DOTALL),
+        re.compile(r"sh\s*'{3}(.+?)'{3}", re.DOTALL),
+        # sh script: "command"
+        re.compile(r'sh\s+script:\s*["\'](.+?)["\']', re.DOTALL),
+        re.compile(r'sh\s+script:\s*"{3}(.+?)"{3}', re.DOTALL),
+        # shell() function (common in shared libraries)
+        re.compile(r'shell\s*\(\s*["\'](.+?)["\']', re.DOTALL),
+    ]
+    
+    # Pattern to extract variables from commands
+    VARIABLE_PATTERN = re.compile(r'\$\{?(\w+)\}?')
+    
+    def extract_sh_tool_invocations(
+        self,
+        source_code: str,
+        source_file: str = "",
+        enclosing_method: str = "",
+    ) -> List[SourceToolInvocation]:
+        """
+        Extract tool invocations from sh() steps in Groovy source code.
+        
+        Implements Requirement 17.9: Detect tools within sh() steps in
+        Jenkinsfile or shared library methods.
+        
+        Args:
+            source_code: Groovy/Jenkinsfile source code
+            source_file: Path to the source file
+            enclosing_method: Name of enclosing method if known
+            
+        Returns:
+            List of SourceToolInvocation objects for detected tools
+        """
+        invocations = []
+        
+        # Track line numbers
+        lines = source_code.split('\n')
+        line_to_offset = {}
+        offset = 0
+        for i, line in enumerate(lines):
+            line_to_offset[offset] = i + 1
+            offset += len(line) + 1  # +1 for newline
+        
+        def get_line_number(match_start: int) -> int:
+            """Get line number for a match position."""
+            for off, line_num in sorted(line_to_offset.items()):
+                if off > match_start:
+                    return prev_line
+                prev_line = line_num
+            return prev_line
+        
+        # Find all sh() invocations
+        for pattern in self.SH_STEP_PATTERNS:
+            for match in pattern.finditer(source_code):
+                command = match.group(1).strip()
+                line_num = get_line_number(match.start())
+                
+                # Extract tools from the command
+                tools = self._extract_tools_from_command(command)
+                
+                # Extract variables used
+                variables = self.VARIABLE_PATTERN.findall(command)
+                
+                for tool_name, command_part in tools:
+                    invocations.append(SourceToolInvocation(
+                        tool_name=tool_name,
+                        command_template=command_part,
+                        source_file=source_file,
+                        line_number=line_num,
+                        enclosing_method=enclosing_method,
+                        is_in_sh_step=True,
+                        variables_used=list(set(variables)),
+                    ))
+        
+        return invocations
+    
+    def _extract_tools_from_command(self, command: str) -> List[Tuple[str, str]]:
+        """
+        Extract tool names and their command portions from a shell command.
+        
+        Handles:
+        - Simple commands: aws s3 cp ...
+        - Piped commands: cat file | grep pattern
+        - Chained commands: cmd1 && cmd2
+        - Subcommands: $(aws ...) or `aws ...`
+        - Multi-line commands (in triple-quoted strings)
+        
+        Returns list of (tool_name, command_portion) tuples.
+        """
+        tools = []
+        
+        # First, split by newlines for multi-line commands
+        lines = command.split('\n')
+        commands = []
+        
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            commands.append(line)
+        
+        # Then split each line by common command separators
+        separators = ['&&', '||', ';', '|']
+        for sep in separators:
+            new_commands = []
+            for cmd in commands:
+                new_commands.extend(cmd.split(sep))
+            commands = new_commands
+        
+        # Also extract subcommands
+        subcommand_pattern = re.compile(r'\$\(([^)]+)\)|`([^`]+)`')
+        for match in subcommand_pattern.finditer(command):
+            sub = match.group(1) or match.group(2)
+            if sub:
+                commands.append(sub)
+        
+        # Process each command portion
+        for cmd in commands:
+            cmd = cmd.strip()
+            if not cmd:
+                continue
+            
+            # Get first word (the tool)
+            parts = cmd.split()
+            if not parts:
+                continue
+            
+            first_word = parts[0]
+            
+            # Strip common prefixes
+            if first_word.startswith('./'):
+                first_word = first_word[2:]
+            if '/' in first_word:
+                first_word = first_word.split('/')[-1]
+            
+            # Check if it's a known tool
+            if first_word.lower() in self.KNOWN_TOOLS:
+                tools.append((first_word.lower(), cmd))
+            elif first_word in self.KNOWN_TOOLS:
+                tools.append((first_word, cmd))
+        
+        return tools
+    
+    def analyze_source_for_tools(
+        self,
+        jenkinsfile_content: str = None,
+        library_sources: Dict[str, str] = None,
+    ) -> List[SourceToolInvocation]:
+        """
+        Analyze Jenkinsfile and library sources for tool invocations.
+        
+        Args:
+            jenkinsfile_content: Content of Jenkinsfile
+            library_sources: Dict mapping file paths to source content
+            
+        Returns:
+            Combined list of all detected tool invocations
+        """
+        all_invocations = []
+        
+        # Analyze Jenkinsfile
+        if jenkinsfile_content:
+            invocations = self.extract_sh_tool_invocations(
+                jenkinsfile_content,
+                source_file="Jenkinsfile",
+            )
+            all_invocations.extend(invocations)
+        
+        # Analyze library sources
+        if library_sources:
+            for file_path, content in library_sources.items():
+                # Try to detect enclosing method from filename
+                method_name = ""
+                if file_path.startswith("vars/") and file_path.endswith(".groovy"):
+                    # vars/myMethod.groovy -> myMethod
+                    method_name = Path(file_path).stem
+                
+                invocations = self.extract_sh_tool_invocations(
+                    content,
+                    source_file=file_path,
+                    enclosing_method=method_name,
+                )
+                all_invocations.extend(invocations)
+        
+        return all_invocations
