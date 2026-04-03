@@ -925,6 +925,41 @@
                                     </Collapsible>
                                 )}
                                 
+                                {/* Shell Commands Executed */}
+                                {failure_analysis?.tool_invocations?.length > 0 && (
+                                    <Collapsible title="Shell Commands Executed" icon="fas fa-terminal" badge={failure_analysis.tool_invocations.length}>
+                                        <div className="space-y-3">
+                                            {failure_analysis.tool_invocations.map((tool, i) => (
+                                                <div key={i} className={`p-3 rounded-lg border ${
+                                                    tool.exit_code && tool.exit_code !== 0 
+                                                        ? 'bg-red-500/10 border-red-500/30' 
+                                                        : 'bg-gray-700/50 border-gray-600'
+                                                }`}>
+                                                    <div className="flex items-center justify-between mb-2">
+                                                        <span className="font-mono text-sm font-semibold text-orange-300">{tool.tool_name}</span>
+                                                        {tool.exit_code !== null && tool.exit_code !== undefined && (
+                                                            <span className={`text-xs px-2 py-0.5 rounded ${
+                                                                tool.exit_code === 0 ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
+                                                            }`}>
+                                                                exit: {tool.exit_code}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                    <code className="block text-xs bg-gray-900 p-2 rounded text-gray-300 break-all">
+                                                        {tool.command_line}
+                                                    </code>
+                                                    {tool.output_lines?.length > 0 && (
+                                                        <pre className="mt-2 text-xs bg-gray-900 p-2 rounded text-gray-400 max-h-24 overflow-auto">
+                                                            {tool.output_lines.slice(0, 5).join('\n')}
+                                                            {tool.output_lines.length > 5 && `\n... (${tool.output_lines.length - 5} more lines)`}
+                                                        </pre>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </Collapsible>
+                                )}
+                                
                                 {/* Raw JSON Toggle */}
                                 <div className="pt-4 border-t border-gray-700">
                                     <button onClick={() => setShowRawJson(!showRawJson)}

@@ -562,7 +562,15 @@ class HybridAnalyzer:
                 'method_execution_prefix': self.config.parsing.method_execution_prefix
             })
             tool_invocations = getattr(parsed_log, 'tool_invocations', None)
+            if tool_invocations:
+                logger.info(f"Found {len(tool_invocations)} tool invocations: {[t.tool_name for t in tool_invocations]}")
+            else:
+                logger.warning("No tool_invocations found in parsed_log")
             rc_context = rc_finder.find(console_log_snippet or "", tool_invocations)
+            if rc_context.related_tool:
+                logger.info(f"RC context has related_tool: {rc_context.related_tool.get('tool_name')}")
+            else:
+                logger.warning("RC context has NO related_tool")
             
             # Req 19.9: Cross-reference method execution trace with source code
             if parsed_log and hasattr(parsed_log, 'method_execution_trace') and parsed_log.method_execution_trace:
@@ -693,10 +701,39 @@ class HybridAnalyzer:
         if hasattr(rc_result, 'failing_tool') and rc_result.failing_tool:
             failure_analysis["failing_tool"] = rc_result.failing_tool
         
+        # FALLBACK: If no specific failing_tool but we have tool_invocations,
+        # find the most likely failing tool (one with exit_code != 0 or has errors)
+        if "failing_tool" not in failure_analysis and parsed_log and hasattr(parsed_log, 'tool_invocations'):
+            tool_invocations = parsed_log.tool_invocations
+            if tool_invocations:
+                # Find tool with non-zero exit or error output
+                for tool in reversed(tool_invocations):  # Check last tools first
+                    has_error = tool.exit_code and tool.exit_code != 0
+                    has_error_output = any(
+                        'error' in line.lower() or 'fail' in line.lower() or 'fatal' in line.lower()
+                        for line in (tool.output_lines or [])
+                    )
+                    if has_error or has_error_output:
+                        failure_analysis["failing_tool"] = tool.to_dict()
+                        logger.debug(f"Fallback: using tool {tool.tool_name} as failing_tool")
+                        break
+                
+                # If still no failing tool, just use the last one
+                if "failing_tool" not in failure_analysis and tool_invocations:
+                    last_tool = tool_invocations[-1]
+                    failure_analysis["failing_tool"] = last_tool.to_dict()
+                    logger.debug(f"Fallback: using last tool {last_tool.tool_name} as failing_tool")
+        
         # Build metadata
         metadata = {}
-        if hasattr(rc_result, 'failing_tool') and rc_result.failing_tool:
-            metadata["failing_tool"] = rc_result.failing_tool
+        if "failing_tool" in failure_analysis:
+            metadata["failing_tool"] = failure_analysis["failing_tool"]
+        
+        # Include ALL tool invocations for UI display
+        if parsed_log and hasattr(parsed_log, 'tool_invocations') and parsed_log.tool_invocations:
+            failure_analysis["tool_invocations"] = [
+                t.to_dict() for t in parsed_log.tool_invocations
+            ]
         
         return AnalysisResult(
             build_info={
