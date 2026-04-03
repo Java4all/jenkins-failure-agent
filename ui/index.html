@@ -662,6 +662,11 @@
                 jenkins_description_updated, pr_comment_posted
             } = result;
             
+            // DEBUG: Log failing_tool status
+            console.log('=== DEBUG: failure_analysis ===', failure_analysis);
+            console.log('=== DEBUG: failing_tool ===', failure_analysis?.failing_tool);
+            console.log('=== DEBUG: tool_invocations ===', failure_analysis?.tool_invocations);
+            
             const tabs = [
                 { id: 'overview', label: 'Overview', icon: 'fas fa-home' },
                 { id: 'recommendations', label: 'Fix', icon: 'fas fa-wrench', badge: recommendations?.length },

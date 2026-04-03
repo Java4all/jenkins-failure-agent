@@ -1253,13 +1253,53 @@ class LogParser:
     def _normalize_method_name(self, name: str) -> str:
         """Normalize method name for comparison (Req 1.9).
         
-        Lowercases and collapses all whitespace sequences to single space.
+        - Lowercases
+        - Collapses all whitespace sequences to single space
+        - Strips () suffix
         """
         # Lowercase
         normalized = name.lower()
         # Collapse whitespace sequences to single space
         normalized = re.sub(r'\s+', ' ', normalized).strip()
+        # Strip () suffix if present
+        if normalized.endswith('()'):
+            normalized = normalized[:-2]
         return normalized
+    
+    def get_method_file_name(self, method_name: str) -> str:
+        """Extract the file name to search for from a method name.
+        
+        Handles patterns like:
+        - method() -> method
+        - prefix:method:submethod -> method (skips known prefix)
+        - gitHub:repoClone -> gitHub
+        - Class.method -> Class
+        
+        Returns the actual file name (without .groovy extension) to search in vars/
+        """
+        # Strip () suffix
+        name = method_name.strip()
+        if name.endswith('()'):
+            name = name[:-2]
+        
+        # Handle prefix:method:submethod pattern
+        # e.g., "pipeline:gitHub:repoClone" or "gitHub:repoClone"
+        parts = name.split(':')
+        if len(parts) >= 2:
+            # If first part matches the configured prefix, skip it
+            if self.method_execution_prefix and parts[0].lower() == self.method_execution_prefix.lower():
+                # "pipeline:gitHub:repoClone" -> return "gitHub"
+                return parts[1] if len(parts) > 1 else parts[0]
+            else:
+                # "gitHub:repoClone" -> return "gitHub"
+                return parts[0]
+        
+        # Handle Class.method pattern
+        if '.' in name:
+            parts = name.split('.')
+            return parts[0]
+        
+        return name
     
     def _find_last_stage(self, lines: List[str]) -> Tuple[Optional[str], int]:
         """Find the last pipeline stage in the log.

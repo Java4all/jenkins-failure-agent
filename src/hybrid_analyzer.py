@@ -160,6 +160,7 @@ class HybridAnalyzer:
                 github_client=self.github_client,
                 groovy_analyzer=GroovyAnalyzer(),
                 config=self.config.rc_analyzer,
+                method_prefix=self.config.parsing.method_execution_prefix or "",
             )
         return self._rc_analyzer
     

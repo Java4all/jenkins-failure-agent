@@ -457,7 +457,21 @@ def create_app(config: Config) -> FastAPI:
             
             # Store result
             result_key = f"{request.job}:{build_number}"
-            analysis_results[result_key] = result_to_dict(result)
+            result_dict = result_to_dict(result)
+            analysis_results[result_key] = result_dict
+            
+            # DEBUG: Log what's in failure_analysis
+            fa = result.failure_analysis
+            logger.info(f"=== DEBUG: failure_analysis keys: {list(fa.keys()) if fa else 'None'}")
+            if fa:
+                if 'failing_tool' in fa:
+                    logger.info(f"=== DEBUG: failing_tool: {fa['failing_tool'].get('tool_name', 'unknown')}")
+                else:
+                    logger.warning("=== DEBUG: NO failing_tool in failure_analysis")
+                if 'tool_invocations' in fa:
+                    logger.info(f"=== DEBUG: tool_invocations count: {len(fa['tool_invocations'])}")
+                else:
+                    logger.warning("=== DEBUG: NO tool_invocations in failure_analysis")
             
             # Build response with retry info
             retry_assessment = result.retry_assessment

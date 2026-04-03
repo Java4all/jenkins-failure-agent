@@ -140,11 +140,13 @@ RULES:
         github_client=None,  # For fetching source files
         groovy_analyzer=None,  # For Groovy-specific classification
         config: Optional[RCAnalyzerConfig] = None,
+        method_prefix: str = "",  # For method name parsing (e.g., "pipeline")
     ):
         self.ai_analyzer = ai_analyzer
         self.github_client = github_client
         self.groovy_analyzer = groovy_analyzer
         self.config = config or RCAnalyzerConfig()
+        self.method_prefix = method_prefix  # Used to strip prefix from method names
         
         # Library mappings from config
         self.library_mappings = {}
@@ -406,12 +408,43 @@ RULES:
         - vars/subdir/methodName.groovy (nested vars)
         - src/**/ClassName.groovy (class files containing methods)
         - Utils.methodName pattern (class.method calls)
-        - resources/ files
+        - prefix:method:submethod pattern (e.g., gitHub:repoClone -> gitHub.groovy)
+        - Method names with () suffix (strip it)
         
         Returns: (content, file_path) or (None, None) if not found
         """
         if not self.github_client:
             return None, None
+        
+        # Clean up method name
+        original_method = method_name
+        
+        # Strip () suffix if present (e.g., "myMethod()" -> "myMethod")
+        if method_name.endswith('()'):
+            method_name = method_name[:-2]
+            logger.debug(f"Stripped () from method name: {original_method} -> {method_name}")
+        
+        # Handle prefix:method:submethod pattern
+        # e.g., "pipeline:gitHub:repoClone" -> search for gitHub.groovy
+        # The prefix is a known tag prefix from config (stored in self.method_prefix)
+        parts_colon = method_name.split(':')
+        method_file = method_name  # Default: use full name
+        submethod = None
+        
+        if len(parts_colon) >= 2:
+            # Check if first part is the known prefix
+            method_prefix = getattr(self, 'method_prefix', '') or ''
+            if method_prefix and parts_colon[0].lower() == method_prefix.lower():
+                # "pipeline:gitHub:repoClone" -> file=gitHub, submethod=repoClone
+                method_file = parts_colon[1] if len(parts_colon) > 1 else parts_colon[0]
+                submethod = parts_colon[2] if len(parts_colon) > 2 else None
+            else:
+                # "gitHub:repoClone" -> file=gitHub, submethod=repoClone  
+                method_file = parts_colon[0]
+                submethod = parts_colon[1] if len(parts_colon) > 1 else None
+            
+            logger.debug(f"Colon pattern: {method_name} -> method_file={method_file}, submethod={submethod}")
+            method_name = method_file
         
         # Handle Class.method pattern (e.g., Utils.deploy -> look for Utils.groovy)
         class_name = None
