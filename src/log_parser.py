@@ -475,7 +475,8 @@ class LogParser:
     ]
     
     # Requirement 20.2: Shell command pattern - HH:MM:SS + <command>
-    SHELL_COMMAND_PATTERN = re.compile(r"^\d{2}:\d{2}:\d{2}\s+\+\s+(.+)")
+    # The + might have optional space after it
+    SHELL_COMMAND_PATTERN = re.compile(r"^\d{2}:\d{2}:\d{2}\s+\+\s*(.+)")
     
     # Requirement 19.8: Failure indicators in command output
     OUTPUT_FAILURE_PATTERNS = [
@@ -789,32 +790,67 @@ class LogParser:
         return invocations
     
     def _detect_tool_name(self, command: str) -> str:
-        """Detect tool name from a command string."""
-        # Get first word of command
-        parts = command.strip().split()
+        """
+        Detect tool name from a command string.
+        
+        The tool name is the FIRST word after stripping:
+        - Leading/trailing whitespace
+        - Quotes around the command
+        - Environment variable assignments (VAR=value)
+        
+        Examples:
+          'abc -a read --file' -> 'abc'
+          '/usr/bin/abc --file' -> 'abc'
+          'VAR=1 abc --file' -> 'abc'
+          '"abc" --file' -> 'abc'
+        """
+        if not command:
+            return "shell"
+        
+        cmd = command.strip()
+        
+        # Strip surrounding quotes if present
+        if (cmd.startswith('"') and '"' in cmd[1:]) or (cmd.startswith("'") and "'" in cmd[1:]):
+            quote = cmd[0]
+            end_quote = cmd.find(quote, 1)
+            if end_quote > 0:
+                cmd = cmd[1:end_quote]
+        
+        # Split by whitespace
+        parts = cmd.split()
         if not parts:
             return "shell"
         
-        cmd = parts[0]
+        # Skip environment variable assignments (VAR=value)
+        idx = 0
+        while idx < len(parts) and '=' in parts[idx] and not parts[idx].startswith('-'):
+            idx += 1
         
-        # Check against known tools
+        if idx >= len(parts):
+            return parts[0].split('=')[0]  # Fallback to first part
+        
+        tool = parts[idx]
+        
+        # Handle path-based commands - extract just the filename
+        if "/" in tool:
+            tool = tool.split("/")[-1]
+        
+        # Strip any remaining quotes
+        tool = tool.strip("'\"")
+        
+        # Known tools for normalization
         known_tools = {
             "aws", "az", "gcloud", "kubectl", "helm", "docker",
             "terraform", "mvn", "mvnw", "gradle", "gradlew",
             "npm", "yarn", "pip", "pip3", "curl", "wget",
             "git", "make", "python", "python3", "java", "node",
+            "ansible", "packer", "vault", "consul",
         }
         
-        if cmd in known_tools:
-            return cmd
+        if tool in known_tools:
+            return tool
         
-        # Check for path-based commands
-        if "/" in cmd:
-            cmd = cmd.split("/")[-1]
-            if cmd in known_tools:
-                return cmd
-        
-        return cmd  # Return the command itself as tool name
+        return tool
     
     def _build_method_execution_trace(
         self,
