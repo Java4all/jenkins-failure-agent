@@ -72,6 +72,9 @@ class ParsingConfig:
     # Prefix for shared library method execution tracking
     # Pattern: "{prefix}: method_name"
     method_execution_prefix: str = ""
+    # Requirement 17.7: Custom tool patterns for recognition
+    # Each entry: {"name": "tool_name", "pattern": "regex_pattern"}
+    tool_patterns: List[Dict[str, str]] = field(default_factory=list)
 
 
 @dataclass

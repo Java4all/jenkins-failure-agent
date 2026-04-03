@@ -85,6 +85,7 @@ def cli(ctx, config_path: Optional[str]):
 @click.option("--workspace", "-w", help="Path to workspace/repo for git analysis")
 @click.option("--deep", is_flag=True, help="Enable deep agentic investigation (slower but more thorough)")
 @click.option("--scripted-only", is_flag=True, help="Use scripted analysis only (no agentic)")
+@click.option("--hint", "-H", help="User hint to guide analysis (e.g., 'terraform apply failed on VPC module')")
 @click.pass_context
 def analyze(
     ctx, 
@@ -97,6 +98,7 @@ def analyze(
     workspace: Optional[str],
     deep: bool,
     scripted_only: bool,
+    hint: Optional[str],
 ):
     """Analyze a Jenkins build failure."""
     config: Config = ctx.obj["config"]
@@ -218,28 +220,40 @@ def analyze(
                 
                 # Show analysis mode
                 if deep:
-                    console.print("[cyan]Using deep agentic investigation mode[/cyan]")
-                elif scripted_only:
-                    console.print("[dim]Using scripted-only mode[/dim]")
+                    console.print("[cyan]Using deep investigation mode (MCP tools)[/cyan]")
                 else:
-                    console.print("[dim]Using hybrid mode (auto-selects best approach)[/dim]")
+                    console.print("[dim]Using iterative mode (multi-call AI)[/dim]")
                 
-                # Run hybrid analysis
+                # Show user hint if provided
+                if hint:
+                    console.print(f"[green]User hint:[/green] {hint[:100]}{'...' if len(hint) > 100 else ''}")
+                
+                # Run hybrid analysis (Req 18.2: pass hint)
                 hybrid_result = hybrid_analyzer.analyze(
                     build_info=build_info,
                     parsed_log=parsed_log,
                     test_results=test_results,
                     git_analysis=git_analysis,
                     console_log_snippet=log_snippet,
-                    force_agentic=deep,
-                    force_scripted=scripted_only,
+                    deep=deep,
+                    user_hint=hint,
                 )
                 
-                result = hybrid_result.merged_result
+                # Req 14.10: Check if analysis was skipped
+                if hybrid_result.skipped:
+                    console.print(Panel(
+                        f"[yellow]Analysis skipped:[/yellow] {hybrid_result.skip_reason}",
+                        title="No Analysis Needed"
+                    ))
+                    sys.exit(0)
+                
+                result = hybrid_result.result
                 
                 # Show analysis mode used
                 mode_msg = f"Analysis mode: {hybrid_result.mode.value}"
-                if hybrid_result.agentic_enhanced:
+                if hybrid_result.iterations_used > 1:
+                    mode_msg += f" ({hybrid_result.iterations_used} iterations)"
+                if hybrid_result.tool_calls_made > 0:
                     mode_msg += f" ({hybrid_result.tool_calls_made} tool calls)"
                 progress.update(task, description=f"Analysis complete! [{mode_msg}]")
                 

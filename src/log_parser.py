@@ -30,6 +30,23 @@ class FailureCategory(Enum):
 
 
 @dataclass
+class ToolInvocation:
+    """Represents a detected tool invocation in the log (Requirement 17.2)."""
+    tool_name: str
+    command_line: str
+    line_number: int
+    exit_code: Optional[int] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "tool_name": self.tool_name,
+            "command_line": self.command_line,
+            "line_number": self.line_number,
+            "exit_code": self.exit_code,
+        }
+
+
+@dataclass
 class ErrorMatch:
     """Represents a matched error in the log."""
     line_number: int
@@ -39,6 +56,8 @@ class ErrorMatch:
     context_before: List[str] = field(default_factory=list)
     context_after: List[str] = field(default_factory=list)
     severity: str = "ERROR"
+    # Requirement 17.4: Related tool invocation
+    related_tool: Optional[ToolInvocation] = None
 
 
 @dataclass
@@ -71,6 +90,9 @@ class ParsedLog:
     
     # Requirement 13.4: Full stage sequence from pipeline tags
     stage_sequence: List[str] = field(default_factory=list)
+    
+    # Requirement 17.3: Tool invocations detected in the log
+    tool_invocations: List[ToolInvocation] = field(default_factory=list)
 
 
 class LogParser:
@@ -277,6 +299,46 @@ class LogParser:
         r"\[(?P<stage>[A-Z][a-zA-Z\s]+)\]\s*(?:FAILED|ERROR)",
     ]
     
+    # Requirement 17.1: Built-in tool recognition patterns
+    # Each entry: (tool_name, regex_pattern)
+    BUILTIN_TOOL_PATTERNS = [
+        # Cloud CLIs
+        ("aws", r"^\s*\+?\s*(aws\s+.+)"),
+        ("az", r"^\s*\+?\s*(az\s+.+)"),
+        ("gcloud", r"^\s*\+?\s*(gcloud\s+.+)"),
+        # Kubernetes/Container
+        ("kubectl", r"^\s*\+?\s*(kubectl\s+.+)"),
+        ("helm", r"^\s*\+?\s*(helm\s+.+)"),
+        ("docker", r"^\s*\+?\s*(docker\s+.+)"),
+        # Infrastructure as Code
+        ("terraform", r"^\s*\+?\s*(terraform\s+.+)"),
+        # Build tools
+        ("mvn", r"^\s*\+?\s*(mvn\s+.+|mvnw\s+.+)"),
+        ("gradle", r"^\s*\+?\s*(gradle\s+.+|gradlew\s+.+|\./gradlew\s+.+)"),
+        # Package managers
+        ("npm", r"^\s*\+?\s*(npm\s+.+)"),
+        ("yarn", r"^\s*\+?\s*(yarn\s+.+)"),
+        ("pip", r"^\s*\+?\s*(pip3?\s+.+)"),
+        # Shell commands (detect sh/bash script execution)
+        ("sh", r"^\s*\+?\s*(sh\s+-c\s+.+|bash\s+-c\s+.+|/bin/(?:ba)?sh\s+.+)"),
+        # Network tools
+        ("curl", r"^\s*\+?\s*(curl\s+.+)"),
+        ("wget", r"^\s*\+?\s*(wget\s+.+)"),
+    ]
+    
+    # Exit code detection patterns
+    EXIT_CODE_PATTERNS = [
+        r"exit code[:\s]+(\d+)",
+        r"returned (\d+)",
+        r"exited with (\d+)",
+        r"status[:\s]+(\d+)",
+        r"rc=(\d+)",
+        r"Return code[:\s]+(\d+)",
+    ]
+    
+    # How many lines after a tool invocation to look for related errors
+    TOOL_ERROR_PROXIMITY = 20
+    
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or {}
         self.context_lines = self.config.get("error_context_lines", 10)
@@ -285,6 +347,28 @@ class LogParser:
         # Configurable prefix for method execution tracking
         # Pattern: "{prefix}: method_name"
         self.method_execution_prefix = self.config.get("method_execution_prefix", "")
+        
+        # Requirement 17.7, 17.10: Combine built-in + custom tool patterns
+        self.tool_patterns = []
+        
+        # Add built-in patterns
+        for tool_name, pattern in self.BUILTIN_TOOL_PATTERNS:
+            self.tool_patterns.append((tool_name, re.compile(pattern, re.IGNORECASE)))
+        
+        # Add custom patterns from config (Req 17.7)
+        custom_tool_patterns = self.config.get("tool_patterns", [])
+        for entry in custom_tool_patterns:
+            if isinstance(entry, dict) and "name" in entry and "pattern" in entry:
+                try:
+                    self.tool_patterns.append((
+                        entry["name"],
+                        re.compile(entry["pattern"], re.IGNORECASE)
+                    ))
+                except re.error:
+                    pass  # Skip invalid patterns
+        
+        # Compile exit code patterns
+        self.exit_code_patterns = [re.compile(p, re.IGNORECASE) for p in self.EXIT_CODE_PATTERNS]
         
         # Compile custom patterns from config
         self.custom_patterns = {}
@@ -339,6 +423,12 @@ class LogParser:
         if not result.errors:
             result.errors = self._extract_errors(lines)
         
+        # Requirement 17.2, 17.3: Extract tool invocations
+        result.tool_invocations = self._extract_tool_invocations(lines)
+        
+        # Requirement 17.4: Associate errors with preceding tool invocations
+        self._associate_errors_with_tools(result.errors, result.tool_invocations)
+        
         # Extract stack traces - focus on the focused section
         focus_content = "\n".join(focus_lines)
         result.stack_traces = self._extract_stack_traces(focus_content)
@@ -357,6 +447,70 @@ class LogParser:
         result.summary = self._generate_summary(result)
         
         return result
+    
+    def _extract_tool_invocations(self, lines: List[str]) -> List[ToolInvocation]:
+        """Extract tool invocations from log lines (Requirement 17.2).
+        
+        Detects common CI/CD tools and their command lines.
+        Also attempts to extract exit codes from subsequent lines.
+        """
+        invocations = []
+        
+        for i, line in enumerate(lines):
+            for tool_name, pattern in self.tool_patterns:
+                match = pattern.search(line)
+                if match:
+                    command_line = match.group(1) if match.groups() else line.strip()
+                    
+                    # Try to find exit code in next few lines
+                    exit_code = self._find_exit_code(lines, i)
+                    
+                    invocations.append(ToolInvocation(
+                        tool_name=tool_name,
+                        command_line=command_line.strip(),
+                        line_number=i + 1,
+                        exit_code=exit_code,
+                    ))
+                    break  # Only match one tool per line
+        
+        return invocations
+    
+    def _find_exit_code(self, lines: List[str], tool_line_idx: int) -> Optional[int]:
+        """Find exit code in lines following a tool invocation."""
+        # Look in the next 10 lines for exit code
+        for i in range(tool_line_idx + 1, min(tool_line_idx + 11, len(lines))):
+            line = lines[i]
+            for pattern in self.exit_code_patterns:
+                match = pattern.search(line)
+                if match:
+                    try:
+                        return int(match.group(1))
+                    except (ValueError, IndexError):
+                        pass
+        return None
+    
+    def _associate_errors_with_tools(
+        self,
+        errors: List[ErrorMatch],
+        tool_invocations: List[ToolInvocation]
+    ) -> None:
+        """Associate errors with preceding tool invocations (Requirement 17.4).
+        
+        If an error occurs within TOOL_ERROR_PROXIMITY lines after a tool invocation,
+        associate that error with the tool.
+        """
+        if not tool_invocations or not errors:
+            return
+        
+        for error in errors:
+            # Find the most recent tool invocation before this error
+            # that is within TOOL_ERROR_PROXIMITY lines
+            for tool in reversed(tool_invocations):
+                if tool.line_number < error.line_number:
+                    distance = error.line_number - tool.line_number
+                    if distance <= self.TOOL_ERROR_PROXIMITY:
+                        error.related_tool = tool
+                    break  # Stop at the most recent tool before the error
     
     def _find_failed_method(self, lines: List[str]) -> Tuple[Optional[str], List[str], List[str]]:
         """Find the shared library method that was running when failure occurred.

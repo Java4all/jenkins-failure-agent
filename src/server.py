@@ -37,6 +37,8 @@ class AnalyzeRequest(BaseModel):
     pr_sha: Optional[str] = None  # Commit SHA for status updates
     # Analysis mode (Requirement 5.9)
     mode: str = "iterative"  # "iterative" (default) or "deep"
+    # User hint for focused analysis (Requirement 18.1)
+    user_hint: Optional[str] = None  # e.g., "I think the issue is in the deploy stage"
     # Notification options
     notify_slack: bool = False
     update_jenkins_description: bool = True
@@ -286,6 +288,12 @@ def create_app(config: Config) -> FastAPI:
             # - mode="deep": full MCP tool agent investigation
             deep_mode = request.mode == "deep"
             
+            # Req 18.8: Truncate user_hint to 500 characters
+            user_hint = request.user_hint
+            if user_hint and len(user_hint) > 500:
+                logger.debug(f"User hint truncated from {len(user_hint)} to 500 characters")
+                user_hint = user_hint[:500]
+            
             hybrid_result = hybrid_analyzer.analyze(
                 build_info=build_info,
                 parsed_log=parsed_log,
@@ -296,6 +304,7 @@ def create_app(config: Config) -> FastAPI:
                 library_sources=library_sources,
                 deep=deep_mode,
                 pr_url=request.pr_url,
+                user_hint=user_hint,
             )
             
             # Check if analysis was skipped (Requirement 14)
@@ -313,9 +322,10 @@ def create_app(config: Config) -> FastAPI:
             result = hybrid_result.result
             analysis_mode = hybrid_result.mode.value
             iterations_used = hybrid_result.iterations_used
+            tool_calls_made = hybrid_result.tool_calls_made
             source_files_fetched = hybrid_result.source_files_fetched
             
-            logger.info(f"Analysis complete: mode={analysis_mode}, iterations={iterations_used}")
+            logger.info(f"Analysis complete: mode={analysis_mode}, iterations={iterations_used}, tool_calls={tool_calls_made}")
             
             # Generate report if requested
             report_url = None
@@ -435,7 +445,7 @@ def create_app(config: Config) -> FastAPI:
                 "pr_comment_posted": pr_comment_posted,
                 # Analysis mode info
                 "analysis_mode": analysis_mode,
-                "agentic_enhanced": agentic_enhanced,
+                "iterations_used": iterations_used,
                 "tool_calls_made": tool_calls_made,
                 # Include full analysis data
                 **result_to_dict(result)

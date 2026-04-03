@@ -10,14 +10,14 @@ Supports multiple analysis modes:
 - Agentic: Deep investigation with MCP tools for code/library issues
 """
 
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 
 from .config import (
     Config, JenkinsConfig, AIConfig, GitConfig, GitHubConfig,
     SCMConfig, ReporterConfig, RCAnalyzerConfig, SourceLocation
 )
 from .jenkins_client import JenkinsClient, BuildInfo, TestResult
-from .log_parser import LogParser, ParsedLog, FailureCategory
+from .log_parser import LogParser, ParsedLog, FailureCategory, ToolInvocation
 from .git_analyzer import GitAnalyzer, GitAnalysis
 from .github_client import GitHubClient, GitHubConfig as GitHubClientConfig, FetchResult
 from .groovy_analyzer import GroovyAnalyzer, GroovyAnalysis, GroovyFailureType
@@ -41,7 +41,7 @@ __all__ = [
     # Jenkins
     "JenkinsClient", "BuildInfo", "TestResult",
     # Log parsing
-    "LogParser", "ParsedLog", "FailureCategory",
+    "LogParser", "ParsedLog", "FailureCategory", "ToolInvocation",
     # Git analysis
     "GitAnalyzer", "GitAnalysis",
     # GitHub code fetching

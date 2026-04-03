@@ -405,6 +405,31 @@ parsing:
     # Add your custom ignore patterns:
     # - "^\\[INFO\\] Download"
     # - "^Pulling docker image"
+  
+  # ==========================================================================
+  # TOOL RECOGNITION PATTERNS (Requirement 17.7)
+  # ==========================================================================
+  # Custom tool patterns to detect in logs (supplements built-in patterns)
+  # Built-in tools: aws, az, gcloud, kubectl, helm, docker, terraform,
+  #                 mvn, gradle, npm, yarn, pip, sh, curl, wget
+  #
+  # Each entry needs:
+  #   - name: Tool identifier (used in reports)
+  #   - pattern: Regex to match command invocation
+  #
+  # The first capture group should contain the full command line.
+  tool_patterns: []
+  # tool_patterns:
+  #   - name: "ansible"
+  #     pattern: "^\\s*\\+?\\s*(ansible-playbook\\s+.+)"
+  #   - name: "packer"
+  #     pattern: "^\\s*\\+?\\s*(packer\\s+.+)"
+  #   - name: "vault"
+  #     pattern: "^\\s*\\+?\\s*(vault\\s+.+)"
+  #   - name: "argo"
+  #     pattern: "^\\s*\\+?\\s*(argocd\\s+.+)"
+  #   - name: "skaffold"
+  #     pattern: "^\\s*\\+?\\s*(skaffold\\s+.+)"
 
 # =============================================================================
 # NOTIFICATIONS CONFIGURATION

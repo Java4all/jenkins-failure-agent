@@ -177,7 +177,12 @@ class HybridAnalyzer:
                 )
         return self._investigator
     
-    def _check_build_status(self, build_info: BuildInfo) -> Optional[HybridAnalysisResult]:
+    def _check_build_status(
+        self,
+        build_info: BuildInfo,
+        parsed_log: ParsedLog = None,
+        user_hint: str = None,
+    ) -> Optional[HybridAnalysisResult]:
         """
         Pre-check build status before analysis (Requirement 14).
         
@@ -216,7 +221,28 @@ class HybridAnalyzer:
                 skip_reason="Build was manually aborted",
             )
         
-        # Req 14.1: Only proceed for FAILURE or UNSTABLE
+        # Req 14.6: UNSTABLE builds - lightweight scan for serious issues
+        if status == "UNSTABLE" and parsed_log:
+            serious_issues = self._scan_for_serious_issues(parsed_log)
+            
+            if not serious_issues:
+                # Req 14.6b: No serious issues found
+                # Req 18.6: If user_hint provided, do targeted search
+                if user_hint:
+                    logger.info(f"UNSTABLE build with user hint - will do targeted search")
+                    return None  # Proceed with analysis using hint
+                
+                logger.info(f"UNSTABLE build with no critical errors detected")
+                return HybridAnalysisResult(
+                    mode=AnalysisMode.ITERATIVE,
+                    result=None,
+                    skipped=True,
+                    skip_reason="Build is unstable but no critical errors were detected. "
+                               "If you can provide more context about what you expected, "
+                               "I can look more carefully. Use --hint or the hint field in the UI.",
+                )
+        
+        # Req 14.1: Only proceed for FAILURE or UNSTABLE (with issues)
         if status not in ("FAILURE", "UNSTABLE", None):
             logger.warning(f"Unexpected build status: {status}")
             return HybridAnalysisResult(
@@ -227,6 +253,42 @@ class HybridAnalyzer:
             )
         
         return None  # Proceed with analysis
+    
+    def _scan_for_serious_issues(self, parsed_log: ParsedLog) -> bool:
+        """
+        Lightweight scan for serious issues in UNSTABLE builds (Req 14.6).
+        
+        Searches for ERROR, FATAL, Exception, and stack traces.
+        Returns True if serious issues found.
+        """
+        # Check for stack traces
+        if parsed_log.stack_traces:
+            logger.debug(f"Found {len(parsed_log.stack_traces)} stack traces")
+            return True
+        
+        # Check for serious error categories
+        serious_categories = {
+            FailureCategory.COMPILATION_ERROR,
+            FailureCategory.INFRASTRUCTURE,
+            FailureCategory.PERMISSION,
+            FailureCategory.CREDENTIAL_ERROR,
+            FailureCategory.GROOVY_LIBRARY,
+            FailureCategory.GROOVY_CPS,
+            FailureCategory.GROOVY_SANDBOX,
+        }
+        
+        for error in parsed_log.errors:
+            if error.category in serious_categories:
+                logger.debug(f"Found serious error category: {error.category}")
+                return True
+            
+            # Check for serious patterns in error text
+            error_lower = error.line.lower()
+            if any(p in error_lower for p in ['fatal', 'exception', 'error:', 'failed']):
+                logger.debug(f"Found serious pattern in error: {error.line[:100]}")
+                return True
+        
+        return False
     
     def _check_parsed_log(self, parsed_log: ParsedLog) -> Optional[HybridAnalysisResult]:
         """
@@ -305,6 +367,7 @@ class HybridAnalyzer:
         library_sources: Dict[str, str] = None,
         deep: bool = False,  # Req 5.8: --deep flag
         pr_url: str = None,
+        user_hint: str = None,  # Req 18.1: Optional user hint
     ) -> HybridAnalysisResult:
         """
         Analyze a build failure.
@@ -314,6 +377,7 @@ class HybridAnalyzer:
         - deep: Full MCP tool investigation
         
         Per Requirement 14: Pre-check build status before analysis.
+        Per Requirement 18: Accept user_hint for focused analysis.
         
         Args:
             build_info: Jenkins build information
@@ -325,6 +389,7 @@ class HybridAnalyzer:
             library_sources: Library source code if available
             deep: Use deep investigation mode (Req 5.8)
             pr_url: PR URL for posting results
+            user_hint: Optional user hint for focused analysis (Req 18.1)
             
         Returns:
             HybridAnalysisResult with analysis findings.
@@ -332,17 +397,25 @@ class HybridAnalyzer:
         job_build = f"{build_info.job_name}#{build_info.build_number}"
         mode = AnalysisMode.DEEP if deep else AnalysisMode.ITERATIVE
         
+        # Req 18.8: Truncate user_hint to 500 characters
+        if user_hint and len(user_hint) > 500:
+            logger.debug(f"User hint truncated from {len(user_hint)} to 500 characters")
+            user_hint = user_hint[:500]
+        
         logger.info(f"Starting {mode.value} analysis for {job_build}")
+        if user_hint:
+            logger.info(f"User hint provided: {user_hint[:100]}...")
         
-        # Requirement 14.1-14.4: Pre-check build status
-        skip_result = self._check_build_status(build_info)
+        # Requirement 14.1-14.6: Pre-check build status (with UNSTABLE handling)
+        skip_result = self._check_build_status(build_info, parsed_log, user_hint)
         if skip_result:
             return skip_result
         
-        # Requirement 14.6: Check for actual errors
-        skip_result = self._check_parsed_log(parsed_log)
-        if skip_result:
-            return skip_result
+        # Requirement 14.8: Check for actual errors (skip if user_hint provided)
+        if not user_hint:
+            skip_result = self._check_parsed_log(parsed_log)
+            if skip_result:
+                return skip_result
         
         # Requirement 6.4: Check if RC analyzer is disabled
         if not deep and not self.config.rc_analyzer.enabled:
@@ -357,6 +430,7 @@ class HybridAnalyzer:
                 parsed_log=parsed_log,
                 console_log_snippet=console_log_snippet,
                 pr_url=pr_url,
+                user_hint=user_hint,
             )
         else:
             # Iterative mode (default): Use RCAnalyzer
@@ -366,6 +440,7 @@ class HybridAnalyzer:
                 console_log_snippet=console_log_snippet,
                 jenkinsfile_content=jenkinsfile_content,
                 library_sources=library_sources,
+                user_hint=user_hint,
             )
     
     def _run_iterative_analysis(
@@ -375,6 +450,7 @@ class HybridAnalyzer:
         console_log_snippet: str,
         jenkinsfile_content: str = None,
         library_sources: Dict[str, str] = None,
+        user_hint: str = None,
     ) -> HybridAnalysisResult:
         """Run iterative RC analysis (Requirement 5.2)."""
         from .rc_finder import RootCauseFinder
@@ -383,25 +459,35 @@ class HybridAnalyzer:
         
         try:
             # Get focused context from RootCauseFinder
-            rc_finder = RootCauseFinder(
-                method_prefix=self.config.parsing.method_execution_prefix
-            )
-            rc_context = rc_finder.find(console_log_snippet or "")
+            # Pass tool_invocations if available (Req 17.5)
+            rc_finder = RootCauseFinder({
+                'method_execution_prefix': self.config.parsing.method_execution_prefix
+            })
+            tool_invocations = getattr(parsed_log, 'tool_invocations', None)
+            rc_context = rc_finder.find(console_log_snippet or "", tool_invocations)
             
-            # Run RC analyzer
+            # Run RC analyzer (Req 18.4: pass user_hint)
             rc_result = self.rc_analyzer.analyze(
                 parsed_log=parsed_log,
                 rc_context=rc_context,
                 build_info={
                     "job_name": build_info.job_name,
                     "build_number": build_info.build_number,
+                    "status": build_info.status,  # Include status for UNSTABLE labeling
                 },
                 jenkinsfile_content=jenkinsfile_content,
                 library_sources=library_sources,
+                user_hint=user_hint,
             )
             
             # Convert RC result to AnalysisResult
             analysis_result = self._rc_result_to_analysis_result(rc_result, build_info, parsed_log)
+            
+            # Req 18.7: Store user_hint in result metadata
+            if user_hint and analysis_result:
+                if not hasattr(analysis_result, 'metadata'):
+                    analysis_result.metadata = {}
+                analysis_result.metadata['user_hint'] = user_hint
             
             return HybridAnalysisResult(
                 mode=AnalysisMode.ITERATIVE,
@@ -421,6 +507,7 @@ class HybridAnalyzer:
         parsed_log: ParsedLog,
         console_log_snippet: str,
         pr_url: str = None,
+        user_hint: str = None,
     ) -> HybridAnalysisResult:
         """Run deep investigation with MCP tools (Requirement 5.3)."""
         logger.info("Running deep MCP investigation")
@@ -433,11 +520,16 @@ class HybridAnalyzer:
         category = parsed_log.primary_category.value if parsed_log.primary_category else "UNKNOWN"
         failed_stage = parsed_log.failed_stage or ""
         
+        # Req 18: Include user_hint in initial_error context
+        initial_context = primary_error or console_log_snippet[:500]
+        if user_hint:
+            initial_context = f"USER HINT: {user_hint}\n\nERROR: {initial_context}"
+        
         try:
             investigation = self.investigator.investigate(
                 job=build_info.job_name,
                 build=build_info.build_number,
-                initial_error=primary_error or console_log_snippet[:500],
+                initial_error=initial_context,
                 error_category=category,
                 failed_stage=failed_stage,
                 pr_url=pr_url,
@@ -445,6 +537,12 @@ class HybridAnalyzer:
             
             # Convert investigation to AnalysisResult
             analysis_result = self._investigation_to_analysis_result(investigation, build_info, parsed_log)
+            
+            # Req 18.7: Store user_hint in result metadata
+            if user_hint and analysis_result:
+                if not hasattr(analysis_result, 'metadata'):
+                    analysis_result.metadata = {}
+                analysis_result.metadata['user_hint'] = user_hint
             
             return HybridAnalysisResult(
                 mode=AnalysisMode.DEEP,

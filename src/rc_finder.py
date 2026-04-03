@@ -58,6 +58,9 @@ class RootCauseContext:
     # Related lines (lines that mention the identifiers)
     related_lines: List[Tuple[int, str]] = field(default_factory=list)
     
+    # Requirement 17.5: Related tool invocation
+    related_tool: Optional[Dict[str, Any]] = None
+    
     # Summary for AI
     def get_ai_prompt_context(self) -> str:
         """Generate focused context for AI analysis."""
@@ -67,6 +70,16 @@ class RootCauseContext:
             parts.append(f"FAILED STAGE: {self.failed_stage}")
         if self.failed_method:
             parts.append(f"FAILED METHOD: {self.failed_method}")
+        
+        # Requirement 17.5, 17.6: Include tool context
+        if self.related_tool:
+            parts.append("\n" + "="*50)
+            parts.append("TOOL CONTEXT:")
+            parts.append("="*50)
+            parts.append(f"TOOL: {self.related_tool.get('tool_name', 'unknown')}")
+            parts.append(f"COMMAND: {self.related_tool.get('command_line', 'unknown')}")
+            exit_code = self.related_tool.get('exit_code')
+            parts.append(f"EXIT CODE: {exit_code if exit_code is not None else 'unknown'}")
         
         parts.append(f"\nERROR TYPE: {self.error_type.value}")
         parts.append(f"ERROR: {self.error_line}")
@@ -198,9 +211,14 @@ class RootCauseFinder:
         self.context_after = self.config.get('context_after', self.CONTEXT_AFTER)
         self.method_prefix = self.config.get('method_execution_prefix', '')
     
-    def find(self, log: str) -> RootCauseContext:
+    def find(self, log: str, tool_invocations: Optional[List[Any]] = None) -> RootCauseContext:
         """
         Find root cause context from log.
+        
+        Args:
+            log: The log content to analyze
+            tool_invocations: Optional list of ToolInvocation objects from LogParser
+                              (Requirement 17.5)
         
         Returns RootCauseContext with focused, relevant data for AI analysis.
         """
@@ -243,7 +261,60 @@ class RootCauseFinder:
         if context.identifiers:
             context.related_lines = self._find_related_lines(lines, context.identifiers, context.error_line_number)
         
+        # Step 8 (Req 17.5): Find related tool invocation
+        if tool_invocations:
+            context.related_tool = self._find_related_tool(
+                context.error_line_number, tool_invocations
+            )
+        
         return context
+    
+    def _find_related_tool(
+        self,
+        error_line_number: int,
+        tool_invocations: List[Any],
+        max_distance: int = 20
+    ) -> Optional[Dict[str, Any]]:
+        """Find the tool invocation most likely related to the error (Req 17.5).
+        
+        Looks for the most recent tool invocation within max_distance lines
+        before the error.
+        """
+        if not tool_invocations:
+            return None
+        
+        best_tool = None
+        best_distance = max_distance + 1
+        
+        for tool in tool_invocations:
+            # Get line number (handle both object and dict)
+            tool_line = (
+                tool.line_number if hasattr(tool, 'line_number')
+                else tool.get('line_number', 0)
+            )
+            
+            # Tool must be before the error
+            if tool_line < error_line_number:
+                distance = error_line_number - tool_line
+                if distance <= max_distance and distance < best_distance:
+                    best_distance = distance
+                    best_tool = tool
+        
+        if best_tool is None:
+            return None
+        
+        # Convert to dict if needed
+        if hasattr(best_tool, 'to_dict'):
+            return best_tool.to_dict()
+        elif isinstance(best_tool, dict):
+            return best_tool
+        else:
+            return {
+                'tool_name': getattr(best_tool, 'tool_name', 'unknown'),
+                'command_line': getattr(best_tool, 'command_line', ''),
+                'line_number': getattr(best_tool, 'line_number', 0),
+                'exit_code': getattr(best_tool, 'exit_code', None),
+            }
     
     def _find_last_stage(self, lines: List[str]) -> Tuple[Optional[str], int]:
         """Find the last pipeline stage."""

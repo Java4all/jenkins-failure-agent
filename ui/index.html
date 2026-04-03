@@ -312,6 +312,9 @@
             // Analysis mode: 'iterative' (default) or 'deep' (Req 5.10)
             const [analysisMode, setAnalysisMode] = useState('iterative');
             
+            // User hint for focused analysis (Req 18.3)
+            const [userHint, setUserHint] = useState('');
+            
             // Source code options
             const [projectRepo, setProjectRepo] = useState('');
             const [projectRef, setProjectRef] = useState('');
@@ -333,6 +336,7 @@
                     job,
                     latest_failed: latestFailed,
                     mode: analysisMode,  // Req 5.9: single mode field
+                    user_hint: userHint || null,  // Req 18.3: user hint
                     update_jenkins_description: updateJenkinsDesc,
                     post_to_pr: postToPr,
                     notify_slack: notifySlack,
@@ -416,6 +420,25 @@
                                     </div>
                                 </div>
                             </div>
+                        </div>
+                        
+                        {/* User Hint / Additional Context (Req 18.3) */}
+                        <div className="space-y-2">
+                            <label className="text-sm font-medium text-gray-300">
+                                Hint / Additional Context <span className="text-gray-500">(optional)</span>
+                            </label>
+                            <textarea 
+                                value={userHint || ''} 
+                                onChange={e => setUserHint(e.target.value)}
+                                placeholder="e.g., 'I think the issue is in the deploy stage with AWS credentials' or 'terraform apply failed on the VPC module'"
+                                className="w-full px-3 py-2 bg-gray-700/50 border border-gray-600 rounded-lg text-gray-200 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none text-sm"
+                                rows={2}
+                                maxLength={500}
+                            />
+                            <p className="text-xs text-gray-500">
+                                Provide a hint about where you think the problem is. The AI will prioritize investigating this area.
+                                {userHint && <span className="ml-2 text-gray-400">({userHint.length}/500 chars)</span>}
+                            </p>
                         </div>
                         
                         {/* Advanced Options */}

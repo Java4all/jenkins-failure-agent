@@ -154,15 +154,19 @@ RULES:
         build_info: Optional[Dict[str, Any]] = None,
         jenkinsfile_content: Optional[str] = None,
         library_sources: Optional[Dict[str, str]] = None,
+        user_hint: Optional[str] = None,  # Req 18.4: User hint for focused analysis
     ) -> RCAnalysisResult:
         """
         Run iterative root cause analysis.
         
         Implements Requirement 3: Multi-Call Iterative AI Root Cause Flow
         Implements Requirement 7: Source-Aware Error Classification
+        Implements Requirement 18: User hint for focused analysis
         """
         logger.info(f"Starting iterative RC analysis (max_iterations={self.config.max_rc_iterations}, "
                    f"confidence_threshold={self.config.confidence_threshold})")
+        if user_hint:
+            logger.info(f"User hint provided: {user_hint[:100]}...")
         
         # Initialize tracking
         iterations: List[IterationResult] = []
@@ -205,12 +209,14 @@ RULES:
             mismatch_context = self.build_signature_comparison_prompt(mismatch)
         
         # Build initial prompt using RootCauseFinder output (Requirement 4.1)
+        # Includes user_hint if provided (Requirement 18.4)
         current_prompt = self._build_initial_prompt(
             rc_context=rc_context,
             parsed_log=parsed_log,
             build_info=build_info,
             source_context=source_context,
             mismatch_context=mismatch_context,
+            user_hint=user_hint,
         )
         
         # Iterative analysis loop (Requirement 3.1)
@@ -495,6 +501,7 @@ RULES:
         build_info: Optional[Dict[str, Any]],
         source_context: str,
         mismatch_context: str = "",
+        user_hint: str = None,
     ) -> str:
         """
         Build the initial prompt for first iteration.
@@ -505,12 +512,28 @@ RULES:
         Implements Requirement 11.12: Include METHOD CALL SEQUENCE
         Implements Requirement 13.7: Include PIPELINE STAGE SEQUENCE
         Implements Requirement 15.5: Include SIMILAR PAST CASES (few-shot)
+        Implements Requirement 18.4: Include USER CONTEXT section
         """
         parts = []
         
         # Build info
         if build_info:
-            parts.append(f"JOB: {build_info.get('job_name', 'unknown')} #{build_info.get('build_number', '?')}")
+            job_info = f"JOB: {build_info.get('job_name', 'unknown')} #{build_info.get('build_number', '?')}"
+            status = build_info.get('status', '')
+            if status == 'UNSTABLE':
+                job_info += " (UNSTABLE BUILD)"
+            parts.append(job_info)
+        
+        # Requirement 18.4: USER CONTEXT section (placed early, before error context)
+        if user_hint:
+            parts.append("\n## USER CONTEXT ##")
+            parts.append("=" * 50)
+            parts.append("The user provided this context about what they think the issue is.")
+            parts.append("Treat this as a strong signal and prioritize investigating this area,")
+            parts.append("while still verifying it against the actual log evidence.")
+            parts.append("=" * 50)
+            parts.append(user_hint)
+            parts.append("")
         
         # Failed method info
         if parsed_log and hasattr(parsed_log, 'failed_method') and parsed_log.failed_method:
