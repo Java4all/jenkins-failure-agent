@@ -689,6 +689,10 @@ class HybridAnalyzer:
         category = rc_result.category or "UNKNOWN"
         tier = CATEGORY_TO_TIER.get(category, "unknown")
         
+        # DEBUG: Check what we have
+        logger.info(f"=== DEBUG _rc_result: rc_result.failing_tool = {rc_result.failing_tool is not None if hasattr(rc_result, 'failing_tool') else 'no attr'}")
+        logger.info(f"=== DEBUG _rc_result: parsed_log.tool_invocations = {len(parsed_log.tool_invocations) if hasattr(parsed_log, 'tool_invocations') and parsed_log.tool_invocations else 0}")
+        
         # Build failure_analysis with failing_tool if available
         failure_analysis = {
             "category": category,
@@ -701,11 +705,13 @@ class HybridAnalyzer:
         # Include failing tool info for UI display
         if hasattr(rc_result, 'failing_tool') and rc_result.failing_tool:
             failure_analysis["failing_tool"] = rc_result.failing_tool
+            logger.info(f"=== DEBUG _rc_result: Added failing_tool from rc_result: {rc_result.failing_tool.get('tool_name', 'unknown')}")
         
         # FALLBACK: If no specific failing_tool but we have tool_invocations,
         # find the most likely failing tool (one with exit_code != 0 or has errors)
         if "failing_tool" not in failure_analysis and parsed_log and hasattr(parsed_log, 'tool_invocations'):
             tool_invocations = parsed_log.tool_invocations
+            logger.info(f"=== DEBUG _rc_result: FALLBACK checking tool_invocations: {len(tool_invocations) if tool_invocations else 0}")
             if tool_invocations:
                 # Find tool with non-zero exit or error output
                 for tool in reversed(tool_invocations):  # Check last tools first
@@ -716,14 +722,14 @@ class HybridAnalyzer:
                     )
                     if has_error or has_error_output:
                         failure_analysis["failing_tool"] = tool.to_dict()
-                        logger.debug(f"Fallback: using tool {tool.tool_name} as failing_tool")
+                        logger.info(f"=== DEBUG _rc_result: FALLBACK using tool {tool.tool_name} as failing_tool")
                         break
                 
                 # If still no failing tool, just use the last one
                 if "failing_tool" not in failure_analysis and tool_invocations:
                     last_tool = tool_invocations[-1]
                     failure_analysis["failing_tool"] = last_tool.to_dict()
-                    logger.debug(f"Fallback: using last tool {last_tool.tool_name} as failing_tool")
+                    logger.info(f"=== DEBUG _rc_result: FALLBACK using last tool {last_tool.tool_name} as failing_tool")
         
         # Build metadata
         metadata = {}
@@ -735,6 +741,11 @@ class HybridAnalyzer:
             failure_analysis["tool_invocations"] = [
                 t.to_dict() for t in parsed_log.tool_invocations
             ]
+            logger.info(f"=== DEBUG _rc_result: Added {len(parsed_log.tool_invocations)} tool_invocations to failure_analysis")
+        else:
+            logger.warning("=== DEBUG _rc_result: NO tool_invocations to add!")
+        
+        logger.info(f"=== DEBUG _rc_result: Final failure_analysis keys: {list(failure_analysis.keys())}")
         
         return AnalysisResult(
             build_info={
@@ -766,19 +777,40 @@ class HybridAnalyzer:
         category = parsed_log.primary_category.value if parsed_log.primary_category else "UNKNOWN"
         tier = CATEGORY_TO_TIER.get(category, "unknown")
         
+        # Build failure_analysis with tool info
+        failure_analysis = {
+            "category": category,
+            "primary_error": investigation.root_cause[:200] if investigation.root_cause else "",
+            "failed_stage": parsed_log.failed_stage,
+            "confidence": investigation.confidence,
+            "tier": tier,
+        }
+        
+        # Include tool_invocations
+        if parsed_log and hasattr(parsed_log, 'tool_invocations') and parsed_log.tool_invocations:
+            failure_analysis["tool_invocations"] = [
+                t.to_dict() for t in parsed_log.tool_invocations
+            ]
+            # Set failing_tool to tool with error
+            for tool in reversed(parsed_log.tool_invocations):
+                has_error = tool.exit_code and tool.exit_code != 0
+                has_error_output = any(
+                    'error' in line.lower() or 'fail' in line.lower()
+                    for line in (tool.output_lines or [])
+                )
+                if has_error or has_error_output:
+                    failure_analysis["failing_tool"] = tool.to_dict()
+                    break
+            if "failing_tool" not in failure_analysis and parsed_log.tool_invocations:
+                failure_analysis["failing_tool"] = parsed_log.tool_invocations[-1].to_dict()
+        
         return AnalysisResult(
             build_info={
                 "job_name": build_info.job_name,
                 "build_number": build_info.build_number,
                 "status": build_info.status,
             },
-            failure_analysis={
-                "category": category,
-                "primary_error": investigation.root_cause[:200] if investigation.root_cause else "",
-                "failed_stage": parsed_log.failed_stage,
-                "confidence": investigation.confidence,
-                "tier": tier,
-            },
+            failure_analysis=failure_analysis,
             root_cause=RootCause(
                 summary=investigation.root_cause or "Unable to determine root cause",
                 details=investigation.details or "",
@@ -799,8 +831,38 @@ class HybridAnalyzer:
     
     def _create_fallback_result(self, build_info: BuildInfo, parsed_log: ParsedLog, error: str) -> HybridAnalysisResult:
         """Create a fallback result when analysis fails (Requirement 5.5)."""
+        logger.warning(f"=== DEBUG: Creating FALLBACK result due to error: {error[:100]}")
+        
         category = parsed_log.primary_category.value if parsed_log.primary_category else "UNKNOWN"
         primary_error = parsed_log.errors[0].line if parsed_log.errors else "Unknown error"
+        
+        # Build failure_analysis with tool info even in fallback
+        failure_analysis = {
+            "category": category,
+            "primary_error": primary_error,
+            "failed_stage": parsed_log.failed_stage,
+            "confidence": 0.3,
+            "tier": "unknown",
+            "analysis_error": error,
+        }
+        
+        # Include tool_invocations even in fallback
+        if parsed_log and hasattr(parsed_log, 'tool_invocations') and parsed_log.tool_invocations:
+            failure_analysis["tool_invocations"] = [
+                t.to_dict() for t in parsed_log.tool_invocations
+            ]
+            # Also set failing_tool to last tool with error
+            for tool in reversed(parsed_log.tool_invocations):
+                has_error = tool.exit_code and tool.exit_code != 0
+                has_error_output = any(
+                    'error' in line.lower() or 'fail' in line.lower()
+                    for line in (tool.output_lines or [])
+                )
+                if has_error or has_error_output:
+                    failure_analysis["failing_tool"] = tool.to_dict()
+                    break
+            if "failing_tool" not in failure_analysis and parsed_log.tool_invocations:
+                failure_analysis["failing_tool"] = parsed_log.tool_invocations[-1].to_dict()
         
         return HybridAnalysisResult(
             mode=AnalysisMode.ITERATIVE,
@@ -810,14 +872,7 @@ class HybridAnalyzer:
                     "build_number": build_info.build_number,
                     "status": build_info.status,
                 },
-                failure_analysis={
-                    "category": category,
-                    "primary_error": primary_error,
-                    "failed_stage": parsed_log.failed_stage,
-                    "confidence": 0.3,
-                    "tier": "unknown",
-                    "analysis_error": error,
-                },
+                failure_analysis=failure_analysis,
                 root_cause=RootCause(
                     summary=f"Analysis incomplete: {primary_error}",
                     details=f"Analysis error: {error}",

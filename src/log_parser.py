@@ -3,9 +3,12 @@ Log parser for extracting errors, stack traces, and patterns from Jenkins logs.
 """
 
 import re
+import logging
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple
 from enum import Enum
+
+logger = logging.getLogger("jenkins-agent.log-parser")
 
 
 class FailureCategory(Enum):
@@ -475,8 +478,18 @@ class LogParser:
     ]
     
     # Requirement 20.2: Shell command pattern - HH:MM:SS + <command>
-    # The + might have optional space after it
+    # Allow ANY amount of whitespace between parts
+    # Format: "09:00:01 + aws s3 cp file s3://bucket/"
     SHELL_COMMAND_PATTERN = re.compile(r"^\d{2}:\d{2}:\d{2}\s+\+\s*(.+)")
+    
+    # Alternative patterns for shell commands with + prefix
+    # Pattern 2: Just "+ command" at start (no timestamp)
+    SHELL_COMMAND_PATTERN_ALT1 = re.compile(r"^\+\s+(.+)")
+    # Pattern 3: Bracketed timestamp: [09:00:01] + command
+    SHELL_COMMAND_PATTERN_ALT2 = re.compile(r"^\[?\d{2}:\d{2}:\d{2}[.\d]*\]?\s+\+\s*(.+)")
+    # Pattern 4: Inline shell script continuation - timestamp + spaces + command (NO +)
+    # Example: "09:00:01     curl -ssL URL" (continuation after "09:00:01 + #!/bin/sh -e")
+    SHELL_SCRIPT_CONTINUATION = re.compile(r"^\d{2}:\d{2}:\d{2}\s{2,}([a-zA-Z_/][^\s].*)")
     
     # Requirement 19.8: Failure indicators in command output
     OUTPUT_FAILURE_PATTERNS = [
@@ -547,6 +560,26 @@ class LogParser:
             except ValueError:
                 pass
     
+    def _matches_shell_command_pattern(self, line: str) -> bool:
+        """Check if line matches any shell command pattern (HH:MM:SS + command)."""
+        line_stripped = line.strip()
+        return (
+            self.SHELL_COMMAND_PATTERN.match(line_stripped) or
+            self.SHELL_COMMAND_PATTERN_ALT1.match(line_stripped) or
+            self.SHELL_COMMAND_PATTERN_ALT2.match(line_stripped)
+        )
+    
+    def _matches_script_continuation(self, line: str) -> bool:
+        """Check if line is a shell script continuation (HH:MM:SS   command, no +)."""
+        return bool(self.SHELL_SCRIPT_CONTINUATION.match(line.strip()))
+    
+    def _extract_script_continuation_command(self, line: str) -> Optional[str]:
+        """Extract command from script continuation line."""
+        match = self.SHELL_SCRIPT_CONTINUATION.match(line.strip())
+        if match:
+            return match.group(1)
+        return None
+    
     def classify_line(self, line: str, in_sh_block: bool = False, prev_line_type: PipelineLineType = None) -> PipelineLineType:
         """
         Classify a Jenkins Pipeline log line by type (Requirement 20.7).
@@ -584,7 +617,7 @@ class LogParser:
         
         # Shell command detection (Req 20.2, 20.8)
         if in_sh_block:
-            if self.SHELL_COMMAND_PATTERN.match(line_stripped):
+            if self._matches_shell_command_pattern(line_stripped):
                 return PipelineLineType.SHELL_COMMAND
             else:
                 return PipelineLineType.SHELL_OUTPUT
@@ -596,12 +629,27 @@ class LogParser:
         Extract command from shell command line (Req 20.8).
         Strips timestamp and + prefix.
         
-        Example: "09:00:01 + abc_tool --s -file_config=filepath"
-        Returns: "abc_tool --s -file_config=filepath"
+        Example: "09:00:01 + aws s3 cp file s3://bucket/"
+        Returns: "aws s3 cp file s3://bucket/"
         """
-        match = self.SHELL_COMMAND_PATTERN.match(line.strip())
+        line_stripped = line.strip()
+        
+        # Try main pattern first: HH:MM:SS + command
+        match = self.SHELL_COMMAND_PATTERN.match(line_stripped)
         if match:
             return match.group(1)
+        
+        # Try alternative patterns
+        # ALT1: + command (no timestamp)
+        match = self.SHELL_COMMAND_PATTERN_ALT1.match(line_stripped)
+        if match:
+            return match.group(1)
+        
+        # ALT2: [HH:MM:SS] + command (bracketed timestamp)
+        match = self.SHELL_COMMAND_PATTERN_ALT2.match(line_stripped)
+        if match:
+            return match.group(1)
+        
         return None
     
     def _detect_output_failure(self, output_lines: List[str]) -> bool:
@@ -702,6 +750,21 @@ class LogParser:
         current_command: Optional[ToolInvocation] = None
         prev_line_type = PipelineLineType.OTHER
         
+        logger.info(f"=== TOOL EXTRACT: Processing {len(lines)} lines")
+        
+        # Find [Pipeline] sh blocks
+        sh_lines = [i for i, l in enumerate(lines) if '[Pipeline] sh' in l]
+        logger.info(f"=== FOUND {len(sh_lines)} [Pipeline] sh blocks at lines: {sh_lines[:10]}")
+        
+        # Log first few lines INSIDE each shell block to see the actual format
+        for sh_line_num in sh_lines[:3]:  # Check first 3 shell blocks
+            logger.info(f"=== SHELL BLOCK at line {sh_line_num}, next 5 lines:")
+            for offset in range(1, 6):
+                if sh_line_num + offset < len(lines):
+                    inside_line = lines[sh_line_num + offset]
+                    matches = self._matches_shell_command_pattern(inside_line.strip())
+                    logger.info(f"    [{sh_line_num + offset}]: {repr(inside_line[:80])} -> match={bool(matches)}")
+        
         for i, line in enumerate(lines):
             line_type = self.classify_line(line, in_sh_block, prev_line_type)
             
@@ -753,10 +816,9 @@ class LogParser:
             
             # Also detect tools from non-shell context (original behavior)
             elif line_type == PipelineLineType.OTHER:
-                # First check if this is a HH:MM:SS + command pattern (may appear outside shell block)
-                shell_cmd_match = self.SHELL_COMMAND_PATTERN.match(line.strip())
-                if shell_cmd_match:
-                    command = shell_cmd_match.group(1)
+                # First check if this is a shell command pattern (may appear outside shell block)
+                command = self._extract_shell_command(line)
+                if command:
                     tool_name = self._detect_tool_name(command)
                     if current_command:
                         invocations.append(current_command)
@@ -766,6 +828,19 @@ class LogParser:
                         line_number=i + 1,
                         output_lines=[],
                     )
+                # Check for script continuation: "HH:MM:SS    curl -ssL URL" (no +)
+                elif self._matches_script_continuation(line):
+                    cont_command = self._extract_script_continuation_command(line)
+                    if cont_command:
+                        tool_name = self._detect_tool_name(cont_command)
+                        if current_command:
+                            invocations.append(current_command)
+                        current_command = ToolInvocation(
+                            tool_name=tool_name,
+                            command_line=cont_command,
+                            line_number=i + 1,
+                            output_lines=[],
+                        )
                 else:
                     # Check against known tool patterns
                     for tool_name, pattern in self.tool_patterns:

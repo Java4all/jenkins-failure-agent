@@ -267,6 +267,15 @@ def create_app(config: Config) -> FastAPI:
             # Parse logs
             parsed_log = log_parser.parse(console_log)
             
+            # DEBUG: Check if tool_invocations exist after parsing
+            tool_inv = getattr(parsed_log, 'tool_invocations', None)
+            logger.info(f"=== DEBUG PARSE: tool_invocations count = {len(tool_inv) if tool_inv else 0}")
+            if tool_inv:
+                for t in tool_inv[:3]:  # Log first 3
+                    logger.info(f"=== DEBUG PARSE: tool = {t.tool_name}, cmd = {t.command_line[:50]}...")
+            else:
+                logger.warning("=== DEBUG PARSE: NO tool_invocations found by LogParser!")
+            
             # Get test results
             test_results = jenkins_client.get_test_results(request.job, build_number)
             
