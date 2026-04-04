@@ -884,12 +884,34 @@
                     <div className="p-6">
                         {activeTab === 'overview' && (
                             <div className="space-y-6">
-                                {/* Root Cause */}
+                                {/* Root Cause - Expandable for long text */}
                                 <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-lg">
                                     <h4 className="font-semibold text-red-300 mb-2 flex items-center gap-2">
                                         <i className="fas fa-crosshairs"></i> Root Cause
                                     </h4>
-                                    <p className="text-lg">{root_cause?.summary}</p>
+                                    {(() => {
+                                        const summary = root_cause?.summary || '';
+                                        const isLong = summary.length > 300;
+                                        const [expanded, setExpanded] = React.useState(false);
+                                        
+                                        if (!isLong) {
+                                            return <p className="text-lg whitespace-pre-wrap">{summary}</p>;
+                                        }
+                                        
+                                        return (
+                                            <div>
+                                                <p className="text-lg whitespace-pre-wrap">
+                                                    {expanded ? summary : summary.substring(0, 300) + '...'}
+                                                </p>
+                                                <button 
+                                                    onClick={() => setExpanded(!expanded)}
+                                                    className="mt-2 text-sm text-blue-400 hover:text-blue-300 flex items-center gap-1">
+                                                    <i className={`fas fa-chevron-${expanded ? 'up' : 'down'}`}></i>
+                                                    {expanded ? 'Show less' : 'Show full root cause'}
+                                                </button>
+                                            </div>
+                                        );
+                                    })()}
                                 </div>
                                 
                                 {/* Retry Assessment */}

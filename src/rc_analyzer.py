@@ -59,6 +59,462 @@ class IterationResult:
     fix: str = ""
     needs_source: List[str] = field(default_factory=list)
     raw_response: str = ""
+    related_tool_line: Optional[int] = None  # AI-identified related tool line number
+
+
+# =============================================================================
+# KNOWN FAILURE PATTERNS - AI Guidance for Common DevOps Tool Failures
+# =============================================================================
+# When a tool fails with a known pattern, we provide the AI with:
+# 1. Likely root causes to investigate
+# 2. What to look for in the log
+# 3. Confidence guidance
+# =============================================================================
+
+KNOWN_FAILURE_PATTERNS = {
+    # =========================================================================
+    # KUBERNETES / KUBECTL
+    # =========================================================================
+    r"progress deadline exceeded|timed out waiting for rollout": {
+        "tool": "kubectl rollout",
+        "symptom": "Deployment rollout timed out",
+        "likely_causes": [
+            "Pod failed readiness probe (application not responding on health endpoint)",
+            "Pod failed liveness probe (application crashed or hanging)",
+            "Container in CrashLoopBackOff (application startup failure)",
+            "ImagePullBackOff (wrong image tag, registry auth, or image doesn't exist)",
+            "Insufficient resources (CPU/memory limits exceeded, quota reached)",
+            "PersistentVolumeClaim not bound (storage not available)",
+            "Node scheduling failed (taints, affinity rules, no capacity)",
+            "Init container failed (dependency not ready)",
+        ],
+        "look_for_in_log": [
+            "CrashLoopBackOff", "ImagePullBackOff", "ErrImagePull",
+            "OOMKilled", "Error from server", "Readiness probe failed",
+            "Liveness probe failed", "Back-off restarting failed container",
+            "pod has unbound", "FailedScheduling", "Insufficient",
+            "Init:Error", "Init:CrashLoopBackOff",
+        ],
+        "confidence_when_matched": 0.75,
+        "category": "INFRASTRUCTURE",
+        "is_retriable": True,
+    },
+    
+    r"error: the server doesn't have a resource type|error: the server could not find the requested resource": {
+        "tool": "kubectl",
+        "symptom": "Kubernetes resource type not found",
+        "likely_causes": [
+            "CRD (Custom Resource Definition) not installed in cluster",
+            "API version mismatch (using deprecated or wrong apiVersion)",
+            "Namespace doesn't exist or wrong namespace context",
+            "RBAC permissions missing for resource type",
+        ],
+        "look_for_in_log": [
+            "apiVersion:", "kind:", "CRD", "CustomResourceDefinition",
+            "no matches for kind", "namespace", "forbidden",
+        ],
+        "confidence_when_matched": 0.85,
+        "category": "CONFIGURATION",
+        "is_retriable": False,
+    },
+    
+    r"Unable to connect to the server|connection refused|no such host": {
+        "tool": "kubectl",
+        "symptom": "Cannot connect to Kubernetes cluster",
+        "likely_causes": [
+            "Kubernetes cluster is down or unreachable",
+            "KUBECONFIG not set or invalid",
+            "VPN/network connectivity issue to cluster",
+            "Cluster endpoint URL incorrect",
+            "Certificate expired or invalid",
+        ],
+        "look_for_in_log": [
+            "KUBECONFIG", "certificate", "expired", "context",
+            "cluster", "connection", "timeout", "refused",
+        ],
+        "confidence_when_matched": 0.85,
+        "category": "NETWORK",
+        "is_retriable": True,
+    },
+    
+    r"forbidden|cannot .* in the namespace|User .* cannot": {
+        "tool": "kubectl",
+        "symptom": "Kubernetes RBAC permission denied",
+        "likely_causes": [
+            "ServiceAccount missing required RBAC role/binding",
+            "User/SA not authorized for this namespace",
+            "ClusterRole vs Role scope mismatch",
+            "Token expired or invalid",
+        ],
+        "look_for_in_log": [
+            "ServiceAccount", "RoleBinding", "ClusterRole", "RBAC",
+            "token", "forbidden", "cannot", "namespace",
+        ],
+        "confidence_when_matched": 0.90,
+        "category": "PERMISSION",
+        "is_retriable": False,
+    },
+    
+    # =========================================================================
+    # DOCKER
+    # =========================================================================
+    r"Cannot connect to the Docker daemon|Is the docker daemon running": {
+        "tool": "docker",
+        "symptom": "Docker daemon not accessible",
+        "likely_causes": [
+            "Docker service not running on host/agent",
+            "Docker socket permissions (user not in docker group)",
+            "Docker socket path incorrect",
+            "Docker Desktop not started (on Mac/Windows)",
+        ],
+        "look_for_in_log": [
+            "/var/run/docker.sock", "permission denied", "docker.service",
+            "systemctl", "docker group",
+        ],
+        "confidence_when_matched": 0.90,
+        "category": "INFRASTRUCTURE",
+        "is_retriable": True,
+    },
+    
+    r"denied: requested access to the resource is denied|unauthorized: authentication required": {
+        "tool": "docker push/pull",
+        "symptom": "Docker registry authentication failed",
+        "likely_causes": [
+            "Docker login credentials expired or missing",
+            "ECR/GCR/ACR token expired (need refresh)",
+            "Wrong registry URL",
+            "Repository doesn't exist or no push permission",
+        ],
+        "look_for_in_log": [
+            "docker login", "ecr get-login", "gcloud auth",
+            "registry", "401", "403", "unauthorized",
+        ],
+        "confidence_when_matched": 0.90,
+        "category": "CREDENTIAL",
+        "is_retriable": True,
+    },
+    
+    r"manifest .* not found|tag does not exist|pull access denied": {
+        "tool": "docker pull",
+        "symptom": "Docker image or tag not found",
+        "likely_causes": [
+            "Image tag doesn't exist in registry",
+            "Image was deleted or never pushed",
+            "Typo in image name or tag",
+            "Private registry needs authentication",
+        ],
+        "look_for_in_log": [
+            "image:", "tag:", "FROM", "docker pull",
+            "registry", "repository",
+        ],
+        "confidence_when_matched": 0.90,
+        "category": "CONFIGURATION",
+        "is_retriable": False,
+    },
+    
+    r"no space left on device": {
+        "tool": "docker/general",
+        "symptom": "Disk space exhausted",
+        "likely_causes": [
+            "Docker images/containers consuming all disk",
+            "Build cache too large",
+            "Log files consuming disk",
+            "Workspace not cleaned between builds",
+        ],
+        "look_for_in_log": [
+            "docker system prune", "df -h", "disk", "volume",
+            "COPY", "cache", "/var/lib/docker",
+        ],
+        "confidence_when_matched": 0.95,
+        "category": "INFRASTRUCTURE",
+        "is_retriable": True,
+    },
+    
+    # =========================================================================
+    # HELM
+    # =========================================================================
+    r"UPGRADE FAILED|INSTALLATION FAILED|helm.*failed": {
+        "tool": "helm",
+        "symptom": "Helm release deployment failed",
+        "likely_causes": [
+            "Values file has invalid YAML or wrong structure",
+            "Chart version incompatible with values",
+            "Kubernetes resources failed to create (RBAC, quota, etc.)",
+            "Previous release in failed state (need rollback or delete)",
+            "Timeout waiting for resources to be ready",
+        ],
+        "look_for_in_log": [
+            "values.yaml", "Error:", "Release", "timeout",
+            "invalid", "template", "YAML", "cannot",
+        ],
+        "confidence_when_matched": 0.75,
+        "category": "CONFIGURATION",
+        "is_retriable": False,
+    },
+    
+    r"chart .* not found|failed to fetch chart": {
+        "tool": "helm",
+        "symptom": "Helm chart not accessible",
+        "likely_causes": [
+            "Helm repo not added or needs update",
+            "Chart name or version incorrect",
+            "Helm repo credentials missing or expired",
+            "Network issue reaching chart repository",
+        ],
+        "look_for_in_log": [
+            "helm repo add", "helm repo update", "repository",
+            "Chart.yaml", "version", "index",
+        ],
+        "confidence_when_matched": 0.85,
+        "category": "CONFIGURATION",
+        "is_retriable": True,
+    },
+    
+    # =========================================================================
+    # TERRAFORM
+    # =========================================================================
+    r"Error acquiring the state lock|lock ID|ConditionalCheckFailedException": {
+        "tool": "terraform",
+        "symptom": "Terraform state lock conflict",
+        "likely_causes": [
+            "Another Terraform process is running",
+            "Previous run crashed without releasing lock",
+            "Stale lock in S3/DynamoDB backend",
+        ],
+        "look_for_in_log": [
+            "force-unlock", "lock", "DynamoDB", "S3",
+            "state", "backend", "ID",
+        ],
+        "confidence_when_matched": 0.95,
+        "category": "INFRASTRUCTURE",
+        "is_retriable": True,
+    },
+    
+    r"Provider .* not found|failed to query available provider packages": {
+        "tool": "terraform",
+        "symptom": "Terraform provider installation failed",
+        "likely_causes": [
+            "Provider version constraint cannot be satisfied",
+            "Network issue reaching registry.terraform.io",
+            "Private registry configuration incorrect",
+            "terraform init not run or cache cleared",
+        ],
+        "look_for_in_log": [
+            "required_providers", "terraform init", "registry",
+            "version", "constraint", "provider",
+        ],
+        "confidence_when_matched": 0.85,
+        "category": "CONFIGURATION",
+        "is_retriable": True,
+    },
+    
+    # =========================================================================
+    # AWS CLI
+    # =========================================================================
+    r"Unable to locate credentials|NoCredentialProviders|ExpiredToken": {
+        "tool": "aws",
+        "symptom": "AWS credentials not available or expired",
+        "likely_causes": [
+            "AWS credentials not configured in environment",
+            "IAM role not attached to EC2/Jenkins agent",
+            "STS session token expired",
+            "AWS_PROFILE pointing to non-existent profile",
+        ],
+        "look_for_in_log": [
+            "AWS_ACCESS_KEY", "AWS_SECRET", "AWS_PROFILE", "IAM",
+            "assume-role", "STS", "credentials",
+        ],
+        "confidence_when_matched": 0.90,
+        "category": "CREDENTIAL",
+        "is_retriable": True,
+    },
+    
+    r"AccessDenied|not authorized to perform|UnauthorizedAccess": {
+        "tool": "aws",
+        "symptom": "AWS IAM permission denied",
+        "likely_causes": [
+            "IAM policy missing required action",
+            "Resource-based policy denying access",
+            "SCP (Service Control Policy) restriction",
+            "Condition in policy not met (IP, MFA, etc.)",
+        ],
+        "look_for_in_log": [
+            "arn:", "Action", "Resource", "Policy",
+            "IAM", "role", "user", "permission",
+        ],
+        "confidence_when_matched": 0.90,
+        "category": "PERMISSION",
+        "is_retriable": False,
+    },
+    
+    # =========================================================================
+    # NPM / YARN
+    # =========================================================================
+    r"npm ERR! 404|package .* not found|ETARGET": {
+        "tool": "npm",
+        "symptom": "NPM package not found",
+        "likely_causes": [
+            "Package name typo in package.json",
+            "Package was unpublished or deprecated",
+            "Private registry not configured",
+            "Version doesn't exist",
+        ],
+        "look_for_in_log": [
+            "package.json", "version", "registry",
+            "@scope/", "npm install", "yarn add",
+        ],
+        "confidence_when_matched": 0.90,
+        "category": "CONFIGURATION",
+        "is_retriable": False,
+    },
+    
+    r"EACCES|permission denied.*npm|EPERM": {
+        "tool": "npm",
+        "symptom": "NPM permission error",
+        "likely_causes": [
+            "Global npm packages require sudo (bad practice)",
+            "node_modules owned by different user",
+            "npm cache permissions broken",
+        ],
+        "look_for_in_log": [
+            "node_modules", "cache", "prefix", "global",
+            "chown", "chmod", "root",
+        ],
+        "confidence_when_matched": 0.85,
+        "category": "PERMISSION",
+        "is_retriable": False,
+    },
+    
+    # =========================================================================
+    # MAVEN / GRADLE
+    # =========================================================================
+    r"Could not resolve dependencies|Could not find artifact": {
+        "tool": "maven/gradle",
+        "symptom": "Build dependency resolution failed",
+        "likely_causes": [
+            "Artifact not in configured repositories",
+            "Private Nexus/Artifactory credentials missing",
+            "Dependency version doesn't exist",
+            "Network issue reaching Maven Central/repo",
+        ],
+        "look_for_in_log": [
+            "pom.xml", "build.gradle", "repository", "nexus",
+            "artifactory", "version", "SNAPSHOT",
+        ],
+        "confidence_when_matched": 0.85,
+        "category": "CONFIGURATION",
+        "is_retriable": True,
+    },
+    
+    r"Compilation failure|cannot find symbol|package .* does not exist": {
+        "tool": "maven/gradle",
+        "symptom": "Java compilation error",
+        "likely_causes": [
+            "Missing import or dependency",
+            "Code syntax error",
+            "Incompatible Java version",
+            "Dependency scope incorrect (e.g., test vs compile)",
+        ],
+        "look_for_in_log": [
+            ".java:", "import", "class", "method",
+            "symbol", "cannot find", "does not exist",
+        ],
+        "confidence_when_matched": 0.80,
+        "category": "BUILD",
+        "is_retriable": False,
+    },
+    
+    # =========================================================================
+    # GIT
+    # =========================================================================
+    r"Permission denied \(publickey\)|Could not read from remote repository": {
+        "tool": "git",
+        "symptom": "Git SSH authentication failed",
+        "likely_causes": [
+            "SSH key not configured or not added to agent",
+            "SSH key not added to GitHub/GitLab/Bitbucket",
+            "Wrong SSH key being used",
+            "Known hosts not configured",
+        ],
+        "look_for_in_log": [
+            "ssh-agent", "id_rsa", "ssh-add", "git@",
+            "known_hosts", "StrictHostKeyChecking",
+        ],
+        "confidence_when_matched": 0.90,
+        "category": "CREDENTIAL",
+        "is_retriable": False,
+    },
+    
+    r"fatal: Authentication failed|403.*Forbidden|401.*Unauthorized": {
+        "tool": "git",
+        "symptom": "Git HTTPS authentication failed",
+        "likely_causes": [
+            "Personal Access Token expired or revoked",
+            "Wrong credentials in credential store",
+            "2FA enabled but not using token",
+            "GitHub App token expired",
+        ],
+        "look_for_in_log": [
+            "https://", "token", "credential", "username",
+            "password", "GITHUB_TOKEN", "GIT_ASKPASS",
+        ],
+        "confidence_when_matched": 0.90,
+        "category": "CREDENTIAL",
+        "is_retriable": False,
+    },
+}
+
+
+def find_matching_failure_pattern(error_text: str, command: str = "") -> Optional[Dict[str, Any]]:
+    """
+    Find a known failure pattern that matches the error.
+    
+    Returns the pattern details if matched, None otherwise.
+    """
+    if not error_text:
+        return None
+    
+    combined_text = f"{error_text} {command}".lower()
+    
+    for pattern, details in KNOWN_FAILURE_PATTERNS.items():
+        if re.search(pattern, combined_text, re.IGNORECASE):
+            return {
+                "pattern": pattern,
+                **details
+            }
+    
+    return None
+
+
+def build_failure_pattern_context(matched_pattern: Dict[str, Any]) -> str:
+    """
+    Build AI prompt context for a known failure pattern.
+    """
+    if not matched_pattern:
+        return ""
+    
+    lines = [
+        "\n## KNOWN FAILURE PATTERN DETECTED ##",
+        f"Tool: {matched_pattern.get('tool', 'unknown')}",
+        f"Symptom: {matched_pattern.get('symptom', '')}",
+        "",
+        "LIKELY ROOT CAUSES (investigate in order of probability):",
+    ]
+    
+    for i, cause in enumerate(matched_pattern.get('likely_causes', []), 1):
+        lines.append(f"  {i}. {cause}")
+    
+    look_for = matched_pattern.get('look_for_in_log', [])
+    if look_for:
+        lines.append("")
+        lines.append("LOOK FOR THESE IN THE LOG:")
+        lines.append(f"  {', '.join(look_for)}")
+    
+    lines.append("")
+    lines.append(f"Minimum confidence for this pattern: {matched_pattern.get('confidence_when_matched', 0.7)}")
+    lines.append("If you find evidence of a specific cause, confidence should be HIGHER.")
+    
+    return "\n".join(lines)
 
 
 @dataclass
@@ -125,14 +581,25 @@ RESPONSE FORMAT (JSON only):
   "confidence": 0.0-1.0,
   "is_retriable": true|false,
   "fix": "Specific steps or commands to fix the issue",
-  "needs_source": ["path/to/file.groovy"] // Optional: request additional source files
+  "related_tool_line": null or line_number,
+  "needs_source": ["path/to/file.groovy"]
 }
+
+CONFIDENCE GUIDELINES:
+- 0.9-1.0: Error message is explicit and unambiguous (e.g., "Could not find credentials entry with ID 'X'")
+- 0.7-0.9: Strong evidence pointing to specific cause (error + related command/file identified)
+- 0.5-0.7: Probable cause but some ambiguity remains
+- 0.3-0.5: Hypothesis based on patterns, needs more evidence
+- 0.0-0.3: Uncertain, multiple possible causes
 
 RULES:
 - Be SPECIFIC: use exact names, IDs, paths from the evidence
 - If you need source code to confirm your hypothesis, request it via "needs_source"
-- Increase confidence only when you have concrete evidence
-- If a library method signature doesn't match how it's called, classify as GROOVY_LIBRARY"""
+- If error message explicitly states the problem (e.g., "credentials not found", "file not found"), confidence should be HIGH (0.85+)
+- If a library method signature doesn't match how it's called, classify as GROOVY_LIBRARY
+- IMPORTANT: If tool invocations are provided, identify which tool (by line number) is MOST RELATED to the failure.
+  For example: if error says "credentials 'X' not found" and a command uses "X", that command is related.
+  Set "related_tool_line" to the line number of the most related tool, or null if none are related."""
 
     def __init__(
         self,
@@ -291,11 +758,29 @@ RULES:
             final_category = 'GROOVY_LIBRARY'
             logger.info(f"Overriding category to GROOVY_LIBRARY due to signature mismatch")
         
-        # Extract failing tool from rc_context (Issue 1)
+        # AI-driven tool relationship: Use AI-identified tool line if available
         failing_tool = None
-        if rc_context and hasattr(rc_context, 'related_tool') and rc_context.related_tool:
+        
+        # First: Try AI-identified related_tool_line
+        if best_result.related_tool_line is not None and parsed_log:
+            tool_invocations = getattr(parsed_log, 'tool_invocations', [])
+            for tool in tool_invocations:
+                tool_line = tool.line_number if hasattr(tool, 'line_number') else 0
+                if tool_line == best_result.related_tool_line:
+                    failing_tool = tool.to_dict() if hasattr(tool, 'to_dict') else {
+                        'tool_name': getattr(tool, 'tool_name', 'unknown'),
+                        'command_line': getattr(tool, 'command_line', ''),
+                        'line_number': tool_line,
+                        'output_lines': getattr(tool, 'output_lines', []),
+                        'exit_code': getattr(tool, 'exit_code', None),
+                    }
+                    logger.info(f"AI-identified failing tool at line {tool_line}: {failing_tool.get('tool_name', 'unknown')}")
+                    break
+        
+        # Fallback: Use rule-based related_tool from rc_context
+        if failing_tool is None and rc_context and hasattr(rc_context, 'related_tool') and rc_context.related_tool:
             failing_tool = rc_context.related_tool
-            logger.debug(f"Failing tool: {failing_tool.get('tool_name', 'unknown')}")
+            logger.debug(f"Fallback to rule-based failing tool: {failing_tool.get('tool_name', 'unknown')}")
         
         final_result = RCAnalysisResult(
             root_cause=best_result.root_cause,
@@ -619,6 +1104,7 @@ RULES:
         Implements Requirement 13.7: Include PIPELINE STAGE SEQUENCE
         Implements Requirement 15.5: Include SIMILAR PAST CASES (few-shot)
         Implements Requirement 18.4: Include USER CONTEXT section
+        Implements AI-driven tool relationship analysis
         """
         parts = []
         
@@ -662,6 +1148,30 @@ RULES:
                 marker = " <-- ACTIVE (did not finish)" if method in active_methods else ""
                 parts.append(f"  {i}. {method}{marker}")
         
+        # TOOL INVOCATIONS - AI-driven relationship analysis
+        if parsed_log and hasattr(parsed_log, 'tool_invocations') and parsed_log.tool_invocations:
+            parts.append("\n## TOOL INVOCATIONS ##")
+            parts.append("Shell commands executed during the build:")
+            parts.append("Identify which tool (by line number) is MOST RELATED to the failure.")
+            parts.append("-" * 50)
+            for tool in parsed_log.tool_invocations:
+                line_num = tool.line_number if hasattr(tool, 'line_number') else 0
+                tool_name = tool.tool_name if hasattr(tool, 'tool_name') else 'unknown'
+                command = tool.command_line if hasattr(tool, 'command_line') else ''
+                exit_code = tool.exit_code if hasattr(tool, 'exit_code') else None
+                
+                exit_info = f" [exit: {exit_code}]" if exit_code is not None else ""
+                parts.append(f"  [line {line_num}] {tool_name}: {command[:100]}{exit_info}")
+                
+                # Include first few output lines if they contain errors
+                output_lines = tool.output_lines if hasattr(tool, 'output_lines') else []
+                error_outputs = [l for l in output_lines[:3] if any(
+                    kw in l.lower() for kw in ['error', 'fail', 'exception', 'denied']
+                )]
+                for out_line in error_outputs[:2]:
+                    parts.append(f"           └─ {out_line[:80]}")
+            parts.append("-" * 50)
+        
         # Method execution trace (Requirement 19.6)
         if parsed_log and hasattr(parsed_log, 'method_execution_trace') and parsed_log.method_execution_trace:
             trace = parsed_log.method_execution_trace
@@ -681,6 +1191,30 @@ RULES:
             parts.append("\n## ERROR CONTEXT ##")
             parts.append(rc_context.get_ai_prompt_context())
         
+        # KNOWN FAILURE PATTERN - AI guidance for common tool failures
+        # Extract error text and failing command for pattern matching
+        error_text = ""
+        failing_command = ""
+        if rc_context:
+            error_text = getattr(rc_context, 'error_line', '') or ''
+        if parsed_log and hasattr(parsed_log, 'tool_invocations') and parsed_log.tool_invocations:
+            # Check the last few tools for errors
+            for tool in reversed(parsed_log.tool_invocations[-5:]):
+                cmd = tool.command_line if hasattr(tool, 'command_line') else ''
+                exit_code = tool.exit_code if hasattr(tool, 'exit_code') else None
+                output = ' '.join(tool.output_lines[:5]) if hasattr(tool, 'output_lines') else ''
+                if exit_code and exit_code != 0:
+                    failing_command = cmd
+                    error_text = f"{error_text} {output}"
+                    break
+        
+        matched_pattern = find_matching_failure_pattern(error_text, failing_command)
+        if matched_pattern:
+            pattern_context = build_failure_pattern_context(matched_pattern)
+            if pattern_context:
+                parts.append(pattern_context)
+                logger.info(f"Matched known failure pattern: {matched_pattern.get('tool', 'unknown')} - {matched_pattern.get('symptom', '')}")
+        
         # Source code context (Requirement 4.2)
         if source_context:
             parts.append("\n" + source_context)
@@ -692,6 +1226,7 @@ RULES:
                 parts.append(f"\n## FUNCTION SIGNATURE ##\n{signature.raw_signature}")
         
         parts.append("\nAnalyze the above and provide root cause analysis.")
+        parts.append("If tool invocations are provided, set 'related_tool_line' to the line number of the most related tool.")
         
         return "\n".join(parts)
     
@@ -824,6 +1359,7 @@ RULES:
         Parse AI response for an iteration.
         
         Implements Requirement 8.3: Log parse failures at WARNING level
+        Implements AI-driven tool relationship analysis
         """
         try:
             # Clean response
@@ -834,6 +1370,14 @@ RULES:
             
             data = json.loads(response)
             
+            # Extract related_tool_line (AI-identified)
+            related_tool_line = data.get('related_tool_line')
+            if related_tool_line is not None:
+                try:
+                    related_tool_line = int(related_tool_line)
+                except (ValueError, TypeError):
+                    related_tool_line = None
+            
             return IterationResult(
                 iteration=iteration,
                 root_cause=data.get('root_cause', ''),
@@ -843,6 +1387,7 @@ RULES:
                 fix=data.get('fix', ''),
                 needs_source=data.get('needs_source', []),
                 raw_response=raw_response,
+                related_tool_line=related_tool_line,
             )
         except json.JSONDecodeError as e:
             logger.warning(f"Iteration {iteration}: Failed to parse AI response as JSON: {e}")

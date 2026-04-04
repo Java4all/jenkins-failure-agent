@@ -294,11 +294,99 @@ class RootCauseFinder:
         
         # Step 8 (Req 17.5): Find related tool invocation
         if tool_invocations:
-            context.related_tool = self._find_related_tool(
-                context.error_line_number, tool_invocations
-            )
+            if self._is_pipeline_level_error(context.error_line):
+                # For pipeline errors, find tool that references the same identifier
+                context.related_tool = self._find_tool_by_identifier(
+                    context.error_line, tool_invocations
+                )
+            else:
+                context.related_tool = self._find_related_tool(
+                    context.error_line_number, tool_invocations
+                )
         
         return context
+    
+    def _find_tool_by_identifier(self, error_line: str, tool_invocations: List[Any]) -> Optional[Dict[str, Any]]:
+        """
+        Find a tool invocation that references the same identifier as in the error.
+        
+        Example: Error mentions 'CI_GB-SVC-SHPE-PRD', find the aws command that uses it.
+        """
+        if not error_line or not tool_invocations:
+            return None
+        
+        # Extract identifiers from error (quoted strings, paths, IDs)
+        identifier_patterns = [
+            r"'([A-Za-z0-9_-]{4,})'",  # Single quoted
+            r'"([A-Za-z0-9_-]{4,})"',  # Double quoted
+            r'/([A-Za-z0-9_-]{4,})(?:\s|$|\'|")',  # Path component
+        ]
+        
+        identifiers = set()
+        for pattern in identifier_patterns:
+            for match in re.finditer(pattern, error_line):
+                identifiers.add(match.group(1))
+        
+        if not identifiers:
+            return None
+        
+        # Find tool that references any of these identifiers
+        for tool in reversed(tool_invocations):  # Check last tools first
+            command = (
+                tool.command_line if hasattr(tool, 'command_line')
+                else tool.get('command_line', '')
+            )
+            for identifier in identifiers:
+                if identifier in command:
+                    if hasattr(tool, 'to_dict'):
+                        return tool.to_dict()
+                    elif isinstance(tool, dict):
+                        return tool
+                    else:
+                        return {
+                            'tool_name': getattr(tool, 'tool_name', 'unknown'),
+                            'command_line': command,
+                            'line_number': getattr(tool, 'line_number', 0),
+                            'output_lines': getattr(tool, 'output_lines', []),
+                            'exit_code': getattr(tool, 'exit_code', None),
+                        }
+        
+        return None
+    
+    def _is_pipeline_level_error(self, error_line: str) -> bool:
+        """
+        Check if error is a Jenkins pipeline-level error (not from shell command).
+        
+        These errors should NOT be attributed to a shell command/tool because
+        they occur at the Jenkins pipeline level, not inside a sh/bat step.
+        """
+        if not error_line:
+            return False
+        
+        pipeline_error_patterns = [
+            r"Could not find credentials entry with ID",
+            r"Credentials .+ not found",
+            r"No such DSL method",
+            r"java\.lang\.\w+Exception:",
+            r"java\.io\.\w+Exception:",
+            r"hudson\.\w+Exception:",
+            r"org\.jenkinsci\.\w+Exception:",
+            r"Timeout .+ exceeded",
+            r"Script approval required",
+            r"RejectedAccessException",
+            r"CpsCallableInvocation",
+            r"WorkflowScript:",
+            r"groovy\.lang\.\w+Exception:",
+            r"No signature of method",
+            r"Cannot invoke method .+ on null",
+            r"MissingPropertyException",
+        ]
+        
+        for pattern in pipeline_error_patterns:
+            if re.search(pattern, error_line, re.IGNORECASE):
+                return True
+        
+        return False
     
     def _find_related_tool(
         self,

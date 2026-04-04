@@ -10,7 +10,7 @@ Supports multiple analysis modes:
 - Agentic: Deep investigation with MCP tools for code/library issues
 """
 
-__version__ = "1.9.17"
+__version__ = "1.9.21"
 
 from .config import (
     Config, JenkinsConfig, AIConfig, GitConfig, GitHubConfig,

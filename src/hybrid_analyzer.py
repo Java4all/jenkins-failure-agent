@@ -696,7 +696,7 @@ class HybridAnalyzer:
         # Build failure_analysis with failing_tool if available
         failure_analysis = {
             "category": category,
-            "primary_error": rc_result.root_cause[:200] if rc_result.root_cause else "",
+            "primary_error": rc_result.root_cause[:2000] if rc_result.root_cause else "",
             "failed_stage": parsed_log.failed_stage,
             "confidence": rc_result.confidence,
             "tier": tier,
@@ -708,12 +708,24 @@ class HybridAnalyzer:
             logger.info(f"=== DEBUG _rc_result: Added failing_tool from rc_result: {rc_result.failing_tool.get('tool_name', 'unknown')}")
         
         # FALLBACK: If no specific failing_tool but we have tool_invocations,
-        # find the most likely failing tool (one with exit_code != 0 or has errors)
+        # find the most likely failing tool
+        primary_error = rc_result.root_cause if rc_result.root_cause else ""
+        is_pipeline_error = self._is_pipeline_level_error(primary_error)
+        
         if "failing_tool" not in failure_analysis and parsed_log and hasattr(parsed_log, 'tool_invocations'):
             tool_invocations = parsed_log.tool_invocations
             logger.info(f"=== DEBUG _rc_result: FALLBACK checking tool_invocations: {len(tool_invocations) if tool_invocations else 0}")
-            if tool_invocations:
-                # Find tool with non-zero exit or error output
+            
+            if is_pipeline_error and tool_invocations:
+                # For pipeline errors, find tool that references the same identifier
+                # E.g., credentials error mentions 'CI_GB-SVC-SHPE-PRD', find aws command using it
+                matched_tool = self._find_tool_by_identifier(primary_error, tool_invocations)
+                if matched_tool:
+                    failure_analysis["failing_tool"] = matched_tool
+                    logger.info(f"=== DEBUG _rc_result: FALLBACK matched tool by identifier: {matched_tool.get('tool_name', 'unknown')}")
+                # If no match, don't show any failing_tool (better than showing unrelated command)
+            elif tool_invocations:
+                # For regular errors, find tool with non-zero exit or error output
                 for tool in reversed(tool_invocations):  # Check last tools first
                     has_error = tool.exit_code and tool.exit_code != 0
                     has_error_output = any(
@@ -780,29 +792,40 @@ class HybridAnalyzer:
         # Build failure_analysis with tool info
         failure_analysis = {
             "category": category,
-            "primary_error": investigation.root_cause[:200] if investigation.root_cause else "",
+            "primary_error": investigation.root_cause[:2000] if investigation.root_cause else "",
             "failed_stage": parsed_log.failed_stage,
             "confidence": investigation.confidence,
             "tier": tier,
         }
+        
+        # Check if this is a pipeline-level error (not from shell command)
+        primary_error = investigation.root_cause or ""
+        is_pipeline_error = self._is_pipeline_level_error(primary_error)
         
         # Include tool_invocations
         if parsed_log and hasattr(parsed_log, 'tool_invocations') and parsed_log.tool_invocations:
             failure_analysis["tool_invocations"] = [
                 t.to_dict() for t in parsed_log.tool_invocations
             ]
-            # Set failing_tool to tool with error
-            for tool in reversed(parsed_log.tool_invocations):
-                has_error = tool.exit_code and tool.exit_code != 0
-                has_error_output = any(
-                    'error' in line.lower() or 'fail' in line.lower()
-                    for line in (tool.output_lines or [])
-                )
-                if has_error or has_error_output:
-                    failure_analysis["failing_tool"] = tool.to_dict()
-                    break
-            if "failing_tool" not in failure_analysis and parsed_log.tool_invocations:
-                failure_analysis["failing_tool"] = parsed_log.tool_invocations[-1].to_dict()
+            
+            if is_pipeline_error:
+                # For pipeline errors, find tool that references the same identifier
+                matched_tool = self._find_tool_by_identifier(primary_error, parsed_log.tool_invocations)
+                if matched_tool:
+                    failure_analysis["failing_tool"] = matched_tool
+            else:
+                # Set failing_tool to tool with error
+                for tool in reversed(parsed_log.tool_invocations):
+                    has_error = tool.exit_code and tool.exit_code != 0
+                    has_error_output = any(
+                        'error' in line.lower() or 'fail' in line.lower()
+                        for line in (tool.output_lines or [])
+                    )
+                    if has_error or has_error_output:
+                        failure_analysis["failing_tool"] = tool.to_dict()
+                        break
+                if "failing_tool" not in failure_analysis and parsed_log.tool_invocations:
+                    failure_analysis["failing_tool"] = parsed_log.tool_invocations[-1].to_dict()
         
         return AnalysisResult(
             build_info={
@@ -851,18 +874,26 @@ class HybridAnalyzer:
             failure_analysis["tool_invocations"] = [
                 t.to_dict() for t in parsed_log.tool_invocations
             ]
-            # Also set failing_tool to last tool with error
-            for tool in reversed(parsed_log.tool_invocations):
-                has_error = tool.exit_code and tool.exit_code != 0
-                has_error_output = any(
-                    'error' in line.lower() or 'fail' in line.lower()
-                    for line in (tool.output_lines or [])
-                )
-                if has_error or has_error_output:
-                    failure_analysis["failing_tool"] = tool.to_dict()
-                    break
-            if "failing_tool" not in failure_analysis and parsed_log.tool_invocations:
-                failure_analysis["failing_tool"] = parsed_log.tool_invocations[-1].to_dict()
+            
+            is_pipeline_error = self._is_pipeline_level_error(primary_error)
+            if is_pipeline_error:
+                # For pipeline errors, find tool that references the same identifier
+                matched_tool = self._find_tool_by_identifier(primary_error, parsed_log.tool_invocations)
+                if matched_tool:
+                    failure_analysis["failing_tool"] = matched_tool
+            else:
+                # Also set failing_tool to last tool with error
+                for tool in reversed(parsed_log.tool_invocations):
+                    has_error = tool.exit_code and tool.exit_code != 0
+                    has_error_output = any(
+                        'error' in line.lower() or 'fail' in line.lower()
+                        for line in (tool.output_lines or [])
+                    )
+                    if has_error or has_error_output:
+                        failure_analysis["failing_tool"] = tool.to_dict()
+                        break
+                if "failing_tool" not in failure_analysis and parsed_log.tool_invocations:
+                    failure_analysis["failing_tool"] = parsed_log.tool_invocations[-1].to_dict()
         
         return HybridAnalysisResult(
             mode=AnalysisMode.ITERATIVE,
@@ -885,3 +916,71 @@ class HybridAnalyzer:
             ),
             iterations_used=0,
         )
+    
+    def _is_pipeline_level_error(self, error_text: str) -> bool:
+        """
+        Check if error is a Jenkins pipeline-level error (not from shell command).
+        
+        Note: Even for pipeline errors, we should still try to find related tools
+        that reference the same identifiers (e.g., credential ID used in AWS command).
+        This method is used to avoid picking RANDOM unrelated tools as failing_tool.
+        """
+        if not error_text:
+            return False
+        
+        pipeline_error_patterns = [
+            r"Could not find credentials entry with ID",
+            r"Credentials .+ not found",
+            r"No such DSL method",
+            r"Timeout .+ exceeded",
+            r"Script approval required",
+            r"RejectedAccessException",
+            r"CpsCallableInvocation",
+            r"WorkflowScript:",
+            r"No signature of method",
+            r"Cannot invoke method .+ on null",
+            r"MissingPropertyException",
+            r"CredentialNotFoundException",
+        ]
+        
+        for pattern in pipeline_error_patterns:
+            if re.search(pattern, error_text, re.IGNORECASE):
+                return True
+        
+        return False
+    
+    def _find_tool_by_identifier(self, error_text: str, tool_invocations: list) -> dict:
+        """
+        Find a tool invocation that references the same identifier as in the error.
+        
+        Example: Error mentions 'CI_GB-SVC-SHPE-PRD', find the aws command that uses it.
+        """
+        if not error_text or not tool_invocations:
+            return None
+        
+        # Extract identifiers from error (quoted strings, paths, IDs)
+        # Pattern matches: 'ID', "ID", /path/ID, ID-with-dashes
+        identifier_patterns = [
+            r"'([A-Za-z0-9_-]{4,})'",  # Single quoted
+            r'"([A-Za-z0-9_-]{4,})"',  # Double quoted
+            r'/([A-Za-z0-9_-]{4,})(?:\s|$)',  # Path component
+        ]
+        
+        identifiers = set()
+        for pattern in identifier_patterns:
+            for match in re.finditer(pattern, error_text):
+                identifiers.add(match.group(1))
+        
+        if not identifiers:
+            return None
+        
+        # Find tool that references any of these identifiers
+        for tool in reversed(tool_invocations):  # Check last tools first
+            command = tool.command_line if hasattr(tool, 'command_line') else tool.get('command_line', '')
+            for identifier in identifiers:
+                if identifier in command:
+                    if hasattr(tool, 'to_dict'):
+                        return tool.to_dict()
+                    return tool
+        
+        return None

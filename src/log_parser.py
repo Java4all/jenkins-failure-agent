@@ -40,11 +40,44 @@ class PipelineLineType(Enum):
     PIPELINE_ECHO = "pipeline_echo"       # [Pipeline] echo
     ECHO_OUTPUT = "echo_output"           # Line following [Pipeline] echo
     PIPELINE_SH = "pipeline_sh"           # [Pipeline] sh
-    SHELL_COMMAND = "shell_command"       # HH:MM:SS + <command>
+    SHELL_COMMAND = "shell_command"       # HH:MM:SS + <command> or $ <command>
     SHELL_OUTPUT = "shell_output"         # Output of shell command
     PIPELINE_STAGE = "pipeline_stage"     # [Pipeline] stage or [Pipeline] { (stage_name)
+    PIPELINE_BLOCK_START = "block_start"  # [Pipeline] withCredentials, withDockerContainer, etc.
+    PIPELINE_BLOCK_END = "block_end"      # [Pipeline] // withCredentials, // withDockerContainer, etc.
     METHOD_TAG = "method_tag"             # Method execution tag
     OTHER = "other"                       # Anything else
+
+
+# Known Jenkins Pipeline wrapper blocks that use start/end pattern
+# [Pipeline] withCredentials ... [Pipeline] // withCredentials
+JENKINS_WRAPPER_BLOCKS = {
+    'withCredentials',
+    'withDockerContainer',
+    'withDockerRegistry',
+    'withDockerServer',
+    'withEnv',
+    'withMaven',
+    'withGradle',
+    'withAnt',
+    'withSonarQubeEnv',
+    'withAWS',
+    'withKubeConfig',
+    'withVault',
+    'dir',
+    'node',
+    'timestamps',
+    'timeout',
+    'retry',
+    'lock',
+    'parallel',
+    'script',
+    'catchError',
+    'warnError',
+    'container',  # Kubernetes plugin
+    'podTemplate',
+    'sshagent',
+}
 
 
 @dataclass
@@ -668,6 +701,15 @@ class LogParser:
                 return PipelineLineType.PIPELINE_ECHO
             elif rest == "sh":
                 return PipelineLineType.PIPELINE_SH
+            # Block end marker: [Pipeline] // withCredentials, // withDockerContainer, etc.
+            elif rest.startswith("//"):
+                block_name = rest[2:].strip()
+                if block_name in JENKINS_WRAPPER_BLOCKS:
+                    return PipelineLineType.PIPELINE_BLOCK_END
+                return PipelineLineType.PIPELINE_STEP
+            # Block start marker: [Pipeline] withCredentials, withDockerContainer, etc.
+            elif rest in JENKINS_WRAPPER_BLOCKS:
+                return PipelineLineType.PIPELINE_BLOCK_START
             else:
                 return PipelineLineType.PIPELINE_STEP
         
