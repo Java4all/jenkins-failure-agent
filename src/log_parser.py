@@ -465,6 +465,9 @@ class LogParser:
         # Network tools
         ("curl", r"^\s*\+?\s*(curl\s+.+)"),
         ("wget", r"^\s*\+?\s*(wget\s+.+)"),
+        # Custom tools
+        ("p2l", r"^\s*\+?\s*(p2l\s+.+)"),
+        ("a2l", r"^\s*\+?\s*(a2l\s+.+)"),
     ]
     
     # Exit code detection patterns
@@ -487,9 +490,35 @@ class LogParser:
     SHELL_COMMAND_PATTERN_ALT1 = re.compile(r"^\+\s+(.+)")
     # Pattern 3: Bracketed timestamp: [09:00:01] + command
     SHELL_COMMAND_PATTERN_ALT2 = re.compile(r"^\[?\d{2}:\d{2}:\d{2}[.\d]*\]?\s+\+\s*(.+)")
-    # Pattern 4: Inline shell script continuation - timestamp + spaces + command (NO +)
+    # Pattern 4: ISO timestamp with brackets: [2025-12-10T07:25:34.270Z] + command
+    SHELL_COMMAND_PATTERN_ISO = re.compile(r"^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[.\d]*Z?\]\s+\+\s*(.+)")
+    
+    # Pattern 5-8: $ prefix patterns (used by docker commands in Jenkins)
+    # Format: "09:26:16 $ docker top container"
+    SHELL_COMMAND_PATTERN_DOLLAR = re.compile(r"^\d{2}:\d{2}:\d{2}\s+\$\s*(.+)")
+    SHELL_COMMAND_PATTERN_DOLLAR_ALT1 = re.compile(r"^\$\s+(.+)")
+    SHELL_COMMAND_PATTERN_DOLLAR_ALT2 = re.compile(r"^\[?\d{2}:\d{2}:\d{2}[.\d]*\]?\s+\$\s*(.+)")
+    SHELL_COMMAND_PATTERN_DOLLAR_ISO = re.compile(r"^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[.\d]*Z?\]\s+\$\s*(.+)")
+    
+    # Pattern 9: Inline shell script continuation - timestamp + spaces + command (NO + or $)
     # Example: "09:00:01     curl -ssL URL" (continuation after "09:00:01 + #!/bin/sh -e")
-    SHELL_SCRIPT_CONTINUATION = re.compile(r"^\d{2}:\d{2}:\d{2}\s{2,}([a-zA-Z_/][^\s].*)")
+    # Number of spaces can vary - we use \s+ and rely on command detection
+    SHELL_SCRIPT_CONTINUATION = re.compile(r"^\d{2}:\d{2}:\d{2}\s+([a-zA-Z_/][a-zA-Z0-9_/.-]*(?:\s+.*)?)$")
+    # Pattern 10: ISO timestamp continuation (no + or $): [2025-12-10T07:25:34.270Z]   command
+    SHELL_SCRIPT_CONTINUATION_ISO = re.compile(r"^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[.\d]*Z?\]\s+([a-zA-Z_/][a-zA-Z0-9_/.-]*(?:\s+.*)?)$")
+    
+    # Known shell commands that indicate a script continuation (not regular output)
+    KNOWN_SHELL_COMMANDS = {
+        'curl', 'wget', 'aws', 'az', 'gcloud', 'kubectl', 'helm', 'docker',
+        'terraform', 'ansible', 'mvn', 'gradle', 'npm', 'yarn', 'pip', 'python',
+        'java', 'node', 'ruby', 'perl', 'bash', 'sh', 'zsh', 'cat', 'echo',
+        'grep', 'sed', 'awk', 'find', 'ls', 'cd', 'cp', 'mv', 'rm', 'mkdir',
+        'chmod', 'chown', 'tar', 'gzip', 'unzip', 'zip', 'ssh', 'scp', 'rsync',
+        'git', 'make', 'cmake', 'go', 'cargo', 'dotnet', 'vault', 'consul',
+        'a2l', 'p2l', 'hiera', 'puppet', 'chef', 'salt', 'packer', 'vagrant',
+        'jq', 'yq', 'xargs', 'tee', 'head', 'tail', 'sort', 'uniq', 'wc',
+        'env', 'export', 'set', 'source', 'eval', 'exec', 'test', 'true', 'false',
+    }
     
     # Requirement 19.8: Failure indicators in command output
     OUTPUT_FAILURE_PATTERNS = [
@@ -505,6 +534,11 @@ class LogParser:
         r"(?i)access denied",
         r"(?i)unable to",
         r"(?i)failed to",
+        # Custom error tags from p2l and other tools
+        r"ERRORMSG",
+        r"ERRMSG",
+        r"\[ERROR\]",
+        r"\[FATAL\]",
     ]
     
     # How many lines after a tool invocation to look for related errors
@@ -561,21 +595,47 @@ class LogParser:
                 pass
     
     def _matches_shell_command_pattern(self, line: str) -> bool:
-        """Check if line matches any shell command pattern (HH:MM:SS + command)."""
+        """Check if line matches any shell command pattern (HH:MM:SS + command or [ISO] + command)."""
         line_stripped = line.strip()
         return (
             self.SHELL_COMMAND_PATTERN.match(line_stripped) or
             self.SHELL_COMMAND_PATTERN_ALT1.match(line_stripped) or
-            self.SHELL_COMMAND_PATTERN_ALT2.match(line_stripped)
+            self.SHELL_COMMAND_PATTERN_ALT2.match(line_stripped) or
+            self.SHELL_COMMAND_PATTERN_ISO.match(line_stripped) or
+            # $ prefix patterns (docker commands from withDockerContainer)
+            self.SHELL_COMMAND_PATTERN_DOLLAR.match(line_stripped) or
+            self.SHELL_COMMAND_PATTERN_DOLLAR_ALT1.match(line_stripped) or
+            self.SHELL_COMMAND_PATTERN_DOLLAR_ALT2.match(line_stripped) or
+            self.SHELL_COMMAND_PATTERN_DOLLAR_ISO.match(line_stripped)
         )
     
     def _matches_script_continuation(self, line: str) -> bool:
-        """Check if line is a shell script continuation (HH:MM:SS   command, no +)."""
-        return bool(self.SHELL_SCRIPT_CONTINUATION.match(line.strip()))
+        """Check if line is a shell script continuation (HH:MM:SS command or [ISO] command, no +)."""
+        line_stripped = line.strip()
+        match = self.SHELL_SCRIPT_CONTINUATION.match(line_stripped)
+        if not match:
+            match = self.SHELL_SCRIPT_CONTINUATION_ISO.match(line_stripped)
+        if not match:
+            return False
+        
+        # Check if first word is a known command
+        command_part = match.group(1)
+        first_word = command_part.split()[0] if command_part else ""
+        
+        # Strip path prefix to get command name
+        if '/' in first_word:
+            first_word = first_word.rsplit('/', 1)[-1]
+        
+        return first_word.lower() in self.KNOWN_SHELL_COMMANDS
     
     def _extract_script_continuation_command(self, line: str) -> Optional[str]:
         """Extract command from script continuation line."""
-        match = self.SHELL_SCRIPT_CONTINUATION.match(line.strip())
+        line_stripped = line.strip()
+        match = self.SHELL_SCRIPT_CONTINUATION.match(line_stripped)
+        if match:
+            return match.group(1)
+        # Try ISO format
+        match = self.SHELL_SCRIPT_CONTINUATION_ISO.match(line_stripped)
         if match:
             return match.group(1)
         return None
@@ -622,15 +682,32 @@ class LogParser:
             else:
                 return PipelineLineType.SHELL_OUTPUT
         
+        # $ prefix commands can appear OUTSIDE [Pipeline] sh blocks
+        # (e.g., docker commands from withDockerContainer wrapper)
+        if self._matches_dollar_command_pattern(line_stripped):
+            return PipelineLineType.SHELL_COMMAND
+        
         return PipelineLineType.OTHER
+    
+    def _matches_dollar_command_pattern(self, line: str) -> bool:
+        """Check if line matches $ prefix pattern (docker commands from withDockerContainer)."""
+        line_stripped = line.strip()
+        return (
+            self.SHELL_COMMAND_PATTERN_DOLLAR.match(line_stripped) or
+            self.SHELL_COMMAND_PATTERN_DOLLAR_ALT1.match(line_stripped) or
+            self.SHELL_COMMAND_PATTERN_DOLLAR_ALT2.match(line_stripped) or
+            self.SHELL_COMMAND_PATTERN_DOLLAR_ISO.match(line_stripped)
+        )
     
     def _extract_shell_command(self, line: str) -> Optional[str]:
         """
         Extract command from shell command line (Req 20.8).
-        Strips timestamp and + prefix.
+        Strips timestamp and + or $ prefix.
         
-        Example: "09:00:01 + aws s3 cp file s3://bucket/"
-        Returns: "aws s3 cp file s3://bucket/"
+        Examples:
+          "09:00:01 + aws s3 cp" -> "aws s3 cp"
+          "[2025-12-10T07:25:34.270Z] + env" -> "env"
+          "15:06:19 $ docker top container" -> "docker top container"
         """
         line_stripped = line.strip()
         
@@ -647,6 +724,28 @@ class LogParser:
         
         # ALT2: [HH:MM:SS] + command (bracketed timestamp)
         match = self.SHELL_COMMAND_PATTERN_ALT2.match(line_stripped)
+        if match:
+            return match.group(1)
+        
+        # ISO: [2025-12-10T07:25:34.270Z] + command
+        match = self.SHELL_COMMAND_PATTERN_ISO.match(line_stripped)
+        if match:
+            return match.group(1)
+        
+        # $ prefix patterns (docker commands from withDockerContainer)
+        match = self.SHELL_COMMAND_PATTERN_DOLLAR.match(line_stripped)
+        if match:
+            return match.group(1)
+        
+        match = self.SHELL_COMMAND_PATTERN_DOLLAR_ALT1.match(line_stripped)
+        if match:
+            return match.group(1)
+        
+        match = self.SHELL_COMMAND_PATTERN_DOLLAR_ALT2.match(line_stripped)
+        if match:
+            return match.group(1)
+        
+        match = self.SHELL_COMMAND_PATTERN_DOLLAR_ISO.match(line_stripped)
         if match:
             return match.group(1)
         

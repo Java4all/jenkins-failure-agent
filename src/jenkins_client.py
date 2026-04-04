@@ -67,6 +67,22 @@ class JenkinsClient:
         self.session.verify = config.verify_ssl
         self.session.timeout = config.timeout
     
+    def update_config(self, url: str = None, username: str = None, api_token: str = None):
+        """Update Jenkins connection configuration at runtime."""
+        if url:
+            self.config.url = url
+            self.base_url = url.rstrip("/")
+        if username:
+            self.config.username = username
+        if api_token:
+            self.config.api_token = api_token
+        
+        # Recreate session with new credentials
+        self.session = requests.Session()
+        self.session.auth = (self.config.username, self.config.api_token)
+        self.session.verify = self.config.verify_ssl
+        self.session.timeout = self.config.timeout
+    
     def _get(self, path: str, **kwargs) -> requests.Response:
         """Make a GET request to Jenkins API."""
         url = f"{self.base_url}{path}"

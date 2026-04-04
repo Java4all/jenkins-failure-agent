@@ -83,6 +83,22 @@ class HealthResponse(BaseModel):
     timestamp: str
 
 
+class JenkinsConfigRequest(BaseModel):
+    """Request body for updating Jenkins configuration."""
+    url: Optional[str] = None
+    username: Optional[str] = None
+    api_token: Optional[str] = None
+
+
+class JenkinsConfigResponse(BaseModel):
+    """Response for Jenkins configuration endpoint."""
+    success: bool
+    url: str
+    username: str
+    has_token: bool
+    message: str = ""
+
+
 def create_app(config: Config) -> FastAPI:
     """Create and configure the FastAPI application."""
     
@@ -188,6 +204,57 @@ def create_app(config: Config) -> FastAPI:
             scm_connected=scm_connected,
             timestamp=datetime.now().isoformat()
         )
+    
+    @app.get("/config/jenkins", response_model=JenkinsConfigResponse)
+    async def get_jenkins_config():
+        """Get current Jenkins configuration (token masked)."""
+        return JenkinsConfigResponse(
+            success=True,
+            url=jenkins_client.config.url,
+            username=jenkins_client.config.username,
+            has_token=bool(jenkins_client.config.api_token),
+            message="Current Jenkins configuration"
+        )
+    
+    @app.post("/config/jenkins", response_model=JenkinsConfigResponse)
+    async def update_jenkins_config(request: JenkinsConfigRequest):
+        """
+        Update Jenkins configuration at runtime.
+        
+        Only provided fields will be updated. Empty fields are ignored.
+        This updates the running configuration only - not the config file.
+        """
+        try:
+            # Update only provided fields
+            jenkins_client.update_config(
+                url=request.url if request.url else None,
+                username=request.username if request.username else None,
+                api_token=request.api_token if request.api_token else None
+            )
+            
+            # Test connection with new config
+            connected = jenkins_client.test_connection()
+            
+            if connected:
+                logger.info(f"Jenkins config updated: {jenkins_client.config.url}")
+                return JenkinsConfigResponse(
+                    success=True,
+                    url=jenkins_client.config.url,
+                    username=jenkins_client.config.username,
+                    has_token=bool(jenkins_client.config.api_token),
+                    message="Jenkins configuration updated successfully"
+                )
+            else:
+                return JenkinsConfigResponse(
+                    success=False,
+                    url=jenkins_client.config.url,
+                    username=jenkins_client.config.username,
+                    has_token=bool(jenkins_client.config.api_token),
+                    message="Configuration updated but connection test failed"
+                )
+        except Exception as e:
+            logger.error(f"Failed to update Jenkins config: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
     
     @app.post("/analyze")
     async def analyze_build(

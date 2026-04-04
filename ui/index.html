@@ -300,6 +300,139 @@
         }
 
         // =====================================================================
+        // Jenkins Settings Panel
+        // =====================================================================
+        
+        function JenkinsSettings() {
+            const [expanded, setExpanded] = useState(false);
+            const [loading, setLoading] = useState(false);
+            const [saving, setSaving] = useState(false);
+            const [config, setConfig] = useState({ url: '', username: '', has_token: false });
+            const [form, setForm] = useState({ url: '', username: '', api_token: '' });
+            const [message, setMessage] = useState({ text: '', type: '' });
+            
+            useEffect(() => {
+                if (expanded) fetchConfig();
+            }, [expanded]);
+            
+            const fetchConfig = async () => {
+                setLoading(true);
+                try {
+                    const res = await fetch(`${API_BASE}/config/jenkins`);
+                    if (res.ok) {
+                        const data = await res.json();
+                        setConfig(data);
+                        setForm({ url: data.url || '', username: data.username || '', api_token: '' });
+                    }
+                } catch (e) {
+                    console.error('Failed to fetch Jenkins config:', e);
+                }
+                setLoading(false);
+            };
+            
+            const handleSave = async () => {
+                setSaving(true);
+                setMessage({ text: '', type: '' });
+                
+                try {
+                    const payload = {};
+                    if (form.url && form.url !== config.url) payload.url = form.url;
+                    if (form.username && form.username !== config.username) payload.username = form.username;
+                    if (form.api_token) payload.api_token = form.api_token;
+                    
+                    if (Object.keys(payload).length === 0) {
+                        setMessage({ text: 'No changes to save', type: 'info' });
+                        setSaving(false);
+                        return;
+                    }
+                    
+                    const res = await fetch(`${API_BASE}/config/jenkins`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    
+                    const data = await res.json();
+                    
+                    if (data.success) {
+                        setConfig(data);
+                        setForm({ ...form, api_token: '' });
+                        setMessage({ text: data.message, type: 'success' });
+                    } else {
+                        setMessage({ text: data.message || 'Update failed', type: 'error' });
+                    }
+                } catch (e) {
+                    setMessage({ text: 'Failed to update configuration', type: 'error' });
+                }
+                setSaving(false);
+            };
+            
+            return (
+                <Card className="p-4">
+                    <button onClick={() => setExpanded(!expanded)}
+                        className="w-full flex items-center justify-between text-left">
+                        <h3 className="text-lg font-semibold flex items-center gap-2">
+                            <i className="fab fa-jenkins text-red-400"></i>
+                            Jenkins Settings
+                        </h3>
+                        <i className={`fas fa-chevron-${expanded ? 'up' : 'down'} text-gray-500`}></i>
+                    </button>
+                    
+                    {expanded && (
+                        <div className="mt-4 space-y-3 fade-in">
+                            {loading ? (
+                                <div className="text-center py-4">
+                                    <i className="fas fa-spinner fa-spin text-gray-500"></i>
+                                </div>
+                            ) : (
+                                <>
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-400 mb-1">Jenkins URL</label>
+                                        <input type="text" value={form.url} onChange={(e) => setForm({...form, url: e.target.value})}
+                                            placeholder="https://jenkins.example.com"
+                                            className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                                    </div>
+                                    
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-400 mb-1">Username</label>
+                                        <input type="text" value={form.username} onChange={(e) => setForm({...form, username: e.target.value})}
+                                            placeholder="jenkins-user"
+                                            className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                                    </div>
+                                    
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-400 mb-1">
+                                            API Token {config.has_token && <span className="text-green-400 text-xs">(configured)</span>}
+                                        </label>
+                                        <input type="password" value={form.api_token} onChange={(e) => setForm({...form, api_token: e.target.value})}
+                                            placeholder={config.has_token ? "••••••••" : "Enter API token"}
+                                            className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                                        <p className="text-xs text-gray-500 mt-1">Leave empty to keep current token</p>
+                                    </div>
+                                    
+                                    {message.text && (
+                                        <div className={`p-2 rounded text-sm ${
+                                            message.type === 'success' ? 'bg-green-500/20 text-green-300' :
+                                            message.type === 'error' ? 'bg-red-500/20 text-red-300' :
+                                            'bg-gray-600/50 text-gray-300'
+                                        }`}>
+                                            <i className={`fas fa-${message.type === 'success' ? 'check' : message.type === 'error' ? 'times' : 'info'}-circle mr-2`}></i>
+                                            {message.text}
+                                        </div>
+                                    )}
+                                    
+                                    <Button onClick={handleSave} loading={saving} className="w-full" size="sm">
+                                        <i className="fas fa-save mr-2"></i> Save Settings
+                                    </Button>
+                                </>
+                            )}
+                        </div>
+                    )}
+                </Card>
+            );
+        }
+
+        // =====================================================================
         // Full-Featured Analysis Form
         // =====================================================================
         
@@ -1188,6 +1321,7 @@
                             {/* Left Sidebar */}
                             <div className="space-y-6">
                                 <HealthPanel health={health} />
+                                <JenkinsSettings />
                                 <AnalysisForm onSubmit={handleAnalyze} loading={loading} />
                                 <HistoryPanel history={history} onSelect={setResult} onClear={() => setHistory([])} />
                             </div>
