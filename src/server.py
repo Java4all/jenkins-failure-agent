@@ -837,6 +837,92 @@ def create_app(config: Config) -> FastAPI:
             "stats": store.get_stats(),
         }
     
+    @app.get("/feedback/stats")
+    async def get_feedback_stats(api_key: str = Depends(verify_api_key)):
+        """
+        Get feedback statistics - accuracy metrics over time.
+        """
+        from .feedback_store import FeedbackStore
+        
+        store = FeedbackStore()
+        stats = store.get_stats()
+        
+        return {
+            "total_feedback": stats.get("total_entries", 0),
+            "correct_predictions": stats.get("correct_predictions", 0),
+            "accuracy_percent": round(stats.get("accuracy", 0) * 100, 1),
+            "by_category": stats.get("by_category", {}),
+        }
+    
+    @app.get("/feedback/export")
+    async def export_feedback(
+        format: str = "jsonl",
+        correct_only: bool = False,
+        api_key: str = Depends(verify_api_key)
+    ):
+        """
+        Export feedback for model fine-tuning.
+        
+        Query params:
+        - format: 'jsonl' (OpenAI format) or 'json' (raw)
+        - correct_only: If true, only export confirmed correct analyses
+        
+        Returns JSONL format suitable for fine-tuning:
+        {"messages": [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}
+        """
+        from .feedback_store import FeedbackStore
+        import json
+        
+        store = FeedbackStore()
+        entries = store.get_recent(limit=1000)  # Get all for export
+        
+        if correct_only:
+            entries = [e for e in entries if e.was_correct]
+        
+        if format == "jsonl":
+            # OpenAI fine-tuning format
+            lines = []
+            for entry in entries:
+                if not entry.error_snippet or not entry.confirmed_root_cause:
+                    continue
+                    
+                training_example = {
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are an expert Jenkins CI/CD failure analyst. Analyze build failures and provide root cause analysis in JSON format."
+                        },
+                        {
+                            "role": "user", 
+                            "content": f"Analyze this Jenkins build failure:\n\nJob: {entry.job_name}\nStage: {entry.failed_stage}\nError: {entry.error_snippet}"
+                        },
+                        {
+                            "role": "assistant",
+                            "content": json.dumps({
+                                "root_cause": entry.confirmed_root_cause,
+                                "category": entry.error_category,
+                                "fix": entry.confirmed_fix,
+                                "confidence": 0.9
+                            })
+                        }
+                    ]
+                }
+                lines.append(json.dumps(training_example))
+            
+            from starlette.responses import Response
+            return Response(
+                content="\n".join(lines),
+                media_type="application/jsonl",
+                headers={"Content-Disposition": "attachment; filename=feedback_finetune.jsonl"}
+            )
+        else:
+            # Raw JSON format
+            return {
+                "entries": [e.to_dict() for e in entries],
+                "count": len(entries),
+                "export_date": datetime.utcnow().isoformat(),
+            }
+    
     return app
 
 

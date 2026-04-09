@@ -745,6 +745,142 @@
         }
 
         // =====================================================================
+        // Feedback Panel - User voting on analysis quality
+        // =====================================================================
+        
+        function FeedbackPanel({ result }) {
+            const [feedbackState, setFeedbackState] = useState('pending'); // pending, submitted, correcting
+            const [showCorrection, setShowCorrection] = useState(false);
+            const [correction, setCorrection] = useState({ root_cause: '', fix: '' });
+            const [submitting, setSubmitting] = useState(false);
+            
+            if (!result) return null;
+            
+            const { build_info, failure_analysis, root_cause } = result;
+            
+            const submitFeedback = async (wasCorrect, correctedData = null) => {
+                setSubmitting(true);
+                try {
+                    const payload = {
+                        job: build_info?.job_name || '',
+                        build: build_info?.build_number || 0,
+                        was_correct: wasCorrect,
+                        error_category: failure_analysis?.category || root_cause?.category || '',
+                        error_snippet: failure_analysis?.primary_error || '',
+                        failed_stage: failure_analysis?.failed_stage || '',
+                        failed_method: failure_analysis?.failed_method || '',
+                        ai_root_cause: root_cause?.summary || '',
+                        confirmed_root_cause: correctedData?.root_cause || root_cause?.summary || '',
+                        confirmed_fix: correctedData?.fix || root_cause?.fix || '',
+                    };
+                    
+                    const response = await fetch('/feedback', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload),
+                    });
+                    
+                    if (response.ok) {
+                        setFeedbackState('submitted');
+                    }
+                } catch (error) {
+                    console.error('Feedback submission failed:', error);
+                } finally {
+                    setSubmitting(false);
+                }
+            };
+            
+            const handleThumbsUp = () => submitFeedback(true);
+            
+            const handleThumbsDown = () => {
+                setShowCorrection(true);
+                setFeedbackState('correcting');
+            };
+            
+            const submitCorrection = () => {
+                submitFeedback(false, correction);
+                setShowCorrection(false);
+            };
+            
+            if (feedbackState === 'submitted') {
+                return (
+                    <div className="p-4 bg-green-500/10 border border-green-500/30 rounded-lg">
+                        <div className="flex items-center gap-2 text-green-300">
+                            <i className="fas fa-check-circle"></i>
+                            <span>Thank you for your feedback! This helps improve future analyses.</span>
+                        </div>
+                    </div>
+                );
+            }
+            
+            return (
+                <div className="p-4 bg-gray-700/30 border border-gray-600 rounded-lg">
+                    <div className="flex items-center justify-between">
+                        <span className="text-gray-300 font-medium">
+                            <i className="fas fa-comment-dots mr-2"></i>
+                            Was this analysis helpful?
+                        </span>
+                        
+                        {!showCorrection && (
+                            <div className="flex gap-2">
+                                <button
+                                    onClick={handleThumbsUp}
+                                    disabled={submitting}
+                                    className="px-4 py-2 bg-green-500/20 hover:bg-green-500/30 text-green-300 rounded-lg transition-all flex items-center gap-2 disabled:opacity-50">
+                                    <i className="fas fa-thumbs-up"></i>
+                                    Yes
+                                </button>
+                                <button
+                                    onClick={handleThumbsDown}
+                                    disabled={submitting}
+                                    className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-300 rounded-lg transition-all flex items-center gap-2 disabled:opacity-50">
+                                    <i className="fas fa-thumbs-down"></i>
+                                    No
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                    
+                    {showCorrection && (
+                        <div className="mt-4 space-y-3">
+                            <p className="text-sm text-gray-400">
+                                Help us improve! What was the actual root cause?
+                            </p>
+                            <textarea
+                                value={correction.root_cause}
+                                onChange={(e) => setCorrection({...correction, root_cause: e.target.value})}
+                                placeholder="Describe the actual root cause..."
+                                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-sm text-gray-200 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
+                                rows={2}
+                            />
+                            <textarea
+                                value={correction.fix}
+                                onChange={(e) => setCorrection({...correction, fix: e.target.value})}
+                                placeholder="What was the fix? (optional)"
+                                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-sm text-gray-200 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
+                                rows={2}
+                            />
+                            <div className="flex gap-2">
+                                <button
+                                    onClick={submitCorrection}
+                                    disabled={submitting || !correction.root_cause}
+                                    className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-all flex items-center gap-2 disabled:opacity-50">
+                                    <i className="fas fa-paper-plane"></i>
+                                    Submit Correction
+                                </button>
+                                <button
+                                    onClick={() => { setShowCorrection(false); setFeedbackState('pending'); }}
+                                    className="px-4 py-2 bg-gray-600 hover:bg-gray-500 text-gray-200 rounded-lg transition-all">
+                                    Cancel
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // =====================================================================
         // Investigation Details (for deep mode)
         // =====================================================================
         
@@ -922,6 +1058,9 @@
                                     <span className="text-sm text-gray-400">Analysis Confidence</span>
                                     <ConfidenceMeter confidence={failure_analysis?.confidence || 0} />
                                 </div>
+                                
+                                {/* Feedback Panel - User voting */}
+                                <FeedbackPanel result={result} />
                                 
                                 {/* Investigation Details (if deep mode) */}
                                 {agentic_enhanced && <InvestigationDetails result={result} />}

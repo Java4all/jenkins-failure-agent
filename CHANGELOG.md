@@ -1,60 +1,104 @@
 # Changelog
 
-## v1.9.18 - STABLE CHECKPOINT (2026-04-04)
+## v1.9.24 - STABLE CHECKPOINT ✅ (2026-04-04)
 
-### Status: ✅ Working Release - Rollback Point
+### Status: Production-Ready AI-Driven Analysis
 
-### Features Working:
-- Tool invocation detection (+ and $ prefix)
-- HH:MM:SS and ISO timestamp formats
-- Jenkins Settings override in UI
-- Identifier-based tool matching for pipeline errors
-- RC analysis with iterative and deep modes
-- All 17 failure categories
-- GitHub source code fetching
+### Major Features in This Release:
 
-### Rule-Based Tool Matching:
-- Extracts identifiers from error messages
-- Matches tools by identifier (e.g., credential ID → AWS command)
-- Falls back to exit code / error output matching
+#### 1. AI-Driven Tool Relationship Analysis
+- AI semantically identifies which tool caused the failure
+- No more rule-based pattern maintenance
+- Handles novel relationships automatically
+
+#### 2. Known Failure Patterns (KNOWN_FAILURE_PATTERNS)
+- 25+ patterns for common DevOps tool failures
+- Covers: kubectl, docker, helm, terraform, aws, npm, maven, git
+- Provides AI with likely root causes and confidence guidance
+
+#### 3. Multi-Style Natural Language Parser
+- Handles Ollama/Llama prose responses (not just JSON)
+- 5 extraction strategies for root cause
+- Keyword-based category detection with scoring
+- Language certainty confidence estimation
+
+#### 4. Confidence Boosting
+- Pattern-matched failures get minimum confidence floor
+- Category and is_retriable from patterns when AI uncertain
+
+### Supported LLM Response Styles:
+- Markdown sections (**Summary**, ## Root Cause)
+- Bullet points (- Root Cause:)
+- Numbered lists (1. Issue:)
+- Conversational prose
+- Terse responses
+
+### Test Coverage:
+- kubectl rollout timeout → INFRASTRUCTURE, retriable
+- Docker auth failure → CREDENTIAL
+- NPM package not found → BUILD
+- Permission denied → PERMISSION
+- Network timeout → NETWORK, retriable
 
 ---
 
-## v1.9.19+ - AI-Driven Tool Relationship Analysis
+## v1.9.18 - Previous Stable Checkpoint
 
-### Goal:
-Replace rule-based tool matching with AI-driven analysis.
-Send tool invocations to AI prompt, let AI identify which tool
-is semantically related to the failure.
+### Rollback Point (if needed)
+- Rule-based identifier matching
+- JSON-only response parsing
 
-### Rollback:
-If issues arise, rollback to v1.9.18 (stable checkpoint above)
+---
 
-### Implementation (v1.9.19):
-- Added TOOL INVOCATIONS section to AI prompt
-- AI returns `related_tool_line` identifying most related tool
-- Falls back to rule-based matching if AI doesn't identify tool
-- Semantic understanding: AI knows "credentials 'X'" relates to "aws --name X"
+## Version History
 
-## v1.9.21 - Known Failure Patterns (AI Guidance)
+| Version | Key Change |
+|---------|------------|
+| v1.9.24 | Multi-style NL parser, comprehensive |
+| v1.9.23 | NL parser initial (Ollama support) |
+| v1.9.22 | Confidence boosting, better error extraction |
+| v1.9.21 | KNOWN_FAILURE_PATTERNS (25+ patterns) |
+| v1.9.20 | Confidence guidelines in prompt |
+| v1.9.19 | AI-driven tool relationship |
+| v1.9.18 | Stable checkpoint (rule-based) |
+| v1.9.17 | $ prefix docker commands |
+| v1.9.16 | Jenkins Settings UI override |
+| v1.9.15 | ISO timestamp pattern support |
 
-### New Feature: KNOWN_FAILURE_PATTERNS
-When a tool fails with a recognized pattern, AI receives:
-- Symptom description
-- Ranked list of likely root causes
-- Keywords to look for in log
-- Minimum confidence level
+## v1.9.25 - Feedback Loop & Fine-Tuning Export (2026-04-09)
 
-### Patterns Covered:
-- **Kubernetes**: rollout timeout, resource not found, connection, RBAC
-- **Docker**: daemon, registry auth, image not found, disk space
-- **Helm**: release failure, chart not found
-- **Terraform**: state lock, provider installation
-- **AWS**: credentials, IAM permissions
-- **NPM**: package not found, permissions
-- **Maven/Gradle**: dependencies, compilation
-- **Git**: SSH auth, HTTPS auth
+### New Features:
 
-### UI Fix:
-- Root cause summary now expandable for long text
-- primary_error limit increased from 200 to 2000 chars
+#### 1. UI Feedback Panel (Voting)
+- Thumbs up/down buttons after each analysis
+- "Was this analysis helpful?" prompt
+- Correction form for incorrect analyses
+- Stores feedback to SQLite for learning
+
+#### 2. Fine-Tuning Export
+- `GET /feedback/export?format=jsonl` - OpenAI fine-tuning format
+- `GET /feedback/export?format=json` - Raw export
+- `GET /feedback/stats` - Accuracy metrics
+
+#### 3. Few-Shot Learning (Already Working)
+- Similar past cases injected into AI prompts
+- Keyword-based similarity matching
+- Confirmed fixes used as examples
+
+### API Endpoints:
+```
+POST /feedback          - Submit user feedback
+GET  /feedback          - Get feedback history
+GET  /feedback/stats    - Accuracy metrics  
+GET  /feedback/export   - Export for fine-tuning
+```
+
+### Data Flow:
+```
+User votes 👍/👎 → FeedbackStore (SQLite)
+                         │
+         ┌───────────────┴───────────────┐
+         ▼                               ▼
+  Few-Shot Learning              Fine-Tuning Export
+  (Real-time, in-prompt)         (Batch, for retraining)
+```

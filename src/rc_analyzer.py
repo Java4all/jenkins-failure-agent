@@ -683,6 +683,11 @@ RULES:
         if mismatch:
             mismatch_context = self.build_signature_comparison_prompt(mismatch)
         
+        # Pre-check for known failure patterns (for confidence boosting)
+        matched_failure_pattern = self._check_failure_patterns(rc_context, parsed_log)
+        if matched_failure_pattern:
+            logger.info(f"Pre-matched failure pattern: {matched_failure_pattern.get('tool')} - {matched_failure_pattern.get('symptom')}")
+        
         # Build initial prompt using RootCauseFinder output (Requirement 4.1)
         # Includes user_hint if provided (Requirement 18.4)
         current_prompt = self._build_initial_prompt(
@@ -782,11 +787,25 @@ RULES:
             failing_tool = rc_context.related_tool
             logger.debug(f"Fallback to rule-based failing tool: {failing_tool.get('tool_name', 'unknown')}")
         
+        # Confidence boosting: If known pattern matched but AI returned low confidence
+        final_confidence = best_result.confidence
+        if matched_failure_pattern and best_result.confidence < matched_failure_pattern.get('confidence_when_matched', 0.7):
+            min_confidence = matched_failure_pattern.get('confidence_when_matched', 0.7)
+            # Boost confidence to at least the pattern's minimum
+            boosted = max(best_result.confidence, min_confidence)
+            logger.info(f"Boosting confidence from {best_result.confidence} to {boosted} due to matched pattern: {matched_failure_pattern.get('symptom')}")
+            final_confidence = boosted
+            
+            # Also use pattern's category if AI returned UNKNOWN
+            if final_category == 'UNKNOWN' and matched_failure_pattern.get('category'):
+                final_category = matched_failure_pattern.get('category')
+                logger.info(f"Using pattern category: {final_category}")
+        
         final_result = RCAnalysisResult(
             root_cause=best_result.root_cause,
-            confidence=best_result.confidence,
+            confidence=final_confidence,
             category=final_category,
-            is_retriable=best_result.is_retriable,
+            is_retriable=best_result.is_retriable if best_result.is_retriable else matched_failure_pattern.get('is_retriable', False) if matched_failure_pattern else False,
             fix=best_result.fix,
             iterations_used=len(iterations),
             source_files_fetched=source_files_fetched,
@@ -801,6 +820,46 @@ RULES:
                    f"root_cause={final_result.root_cause[:200]}...")
         
         return final_result
+    
+    def _check_failure_patterns(self, rc_context, parsed_log) -> Optional[Dict[str, Any]]:
+        """
+        Check for known failure patterns in the error context.
+        
+        Returns matched pattern details or None.
+        """
+        error_texts = []
+        failing_command = ""
+        
+        # Gather error text from multiple sources
+        if rc_context:
+            if hasattr(rc_context, 'error_line') and rc_context.error_line:
+                error_texts.append(rc_context.error_line)
+            if hasattr(rc_context, 'surrounding_lines') and rc_context.surrounding_lines:
+                error_texts.extend(rc_context.surrounding_lines[-10:])
+        
+        if parsed_log:
+            if hasattr(parsed_log, 'errors') and parsed_log.errors:
+                for err in parsed_log.errors[:5]:
+                    if hasattr(err, 'line'):
+                        error_texts.append(err.line)
+            
+            if hasattr(parsed_log, 'tool_invocations') and parsed_log.tool_invocations:
+                for tool in reversed(parsed_log.tool_invocations[-5:]):
+                    cmd = tool.command_line if hasattr(tool, 'command_line') else ''
+                    exit_code = tool.exit_code if hasattr(tool, 'exit_code') else None
+                    output_lines = tool.output_lines if hasattr(tool, 'output_lines') else []
+                    
+                    if exit_code and exit_code != 0:
+                        failing_command = cmd
+                        error_texts.extend(output_lines[:10])
+                        break
+                    elif output_lines:
+                        for line in output_lines[:5]:
+                            if any(kw in line.lower() for kw in ['error', 'failed', 'timeout', 'denied']):
+                                error_texts.append(line)
+        
+        error_text = ' '.join(error_texts)
+        return find_matching_failure_pattern(error_text, failing_command)
     
     def _build_source_context(
         self,
@@ -1193,20 +1252,45 @@ RULES:
         
         # KNOWN FAILURE PATTERN - AI guidance for common tool failures
         # Extract error text and failing command for pattern matching
-        error_text = ""
+        # Gather error text from multiple sources
+        error_texts = []
         failing_command = ""
+        
+        # Source 1: RootCauseFinder error line
         if rc_context:
-            error_text = getattr(rc_context, 'error_line', '') or ''
+            if hasattr(rc_context, 'error_line') and rc_context.error_line:
+                error_texts.append(rc_context.error_line)
+            # Also check surrounding lines for more context
+            if hasattr(rc_context, 'surrounding_lines') and rc_context.surrounding_lines:
+                error_texts.extend(rc_context.surrounding_lines[-10:])
+        
+        # Source 2: Parsed log errors
+        if parsed_log:
+            if hasattr(parsed_log, 'errors') and parsed_log.errors:
+                for err in parsed_log.errors[:5]:
+                    if hasattr(err, 'line'):
+                        error_texts.append(err.line)
+        
+        # Source 3: Tool invocations with errors
         if parsed_log and hasattr(parsed_log, 'tool_invocations') and parsed_log.tool_invocations:
-            # Check the last few tools for errors
             for tool in reversed(parsed_log.tool_invocations[-5:]):
                 cmd = tool.command_line if hasattr(tool, 'command_line') else ''
                 exit_code = tool.exit_code if hasattr(tool, 'exit_code') else None
-                output = ' '.join(tool.output_lines[:5]) if hasattr(tool, 'output_lines') else ''
+                output_lines = tool.output_lines if hasattr(tool, 'output_lines') else []
+                
                 if exit_code and exit_code != 0:
                     failing_command = cmd
-                    error_text = f"{error_text} {output}"
+                    error_texts.extend(output_lines[:10])
                     break
+                # Also check for error keywords in output even without exit code
+                elif output_lines:
+                    for line in output_lines[:5]:
+                        if any(kw in line.lower() for kw in ['error', 'failed', 'timeout', 'denied']):
+                            error_texts.append(line)
+        
+        error_text = ' '.join(error_texts)
+        logger.debug(f"Pattern matching against error_text ({len(error_text)} chars): {error_text[:200]}...")
+        logger.debug(f"Pattern matching against command: {failing_command}")
         
         matched_pattern = find_matching_failure_pattern(error_text, failing_command)
         if matched_pattern:
@@ -1214,6 +1298,8 @@ RULES:
             if pattern_context:
                 parts.append(pattern_context)
                 logger.info(f"Matched known failure pattern: {matched_pattern.get('tool', 'unknown')} - {matched_pattern.get('symptom', '')}")
+        else:
+            logger.debug(f"No known failure pattern matched")
         
         # Source code context (Requirement 4.2)
         if source_context:
@@ -1360,6 +1446,7 @@ RULES:
         
         Implements Requirement 8.3: Log parse failures at WARNING level
         Implements AI-driven tool relationship analysis
+        Supports both JSON and natural language responses (for Ollama compatibility)
         """
         try:
             # Clean response
@@ -1367,6 +1454,11 @@ RULES:
             if response.startswith('```'):
                 response = re.sub(r'^```\w*\n?', '', response)
                 response = re.sub(r'\n?```$', '', response)
+            
+            # Try to find JSON in the response (might be embedded)
+            json_match = re.search(r'\{[^{}]*"root_cause"[^{}]*\}', response, re.DOTALL)
+            if json_match:
+                response = json_match.group(0)
             
             data = json.loads(response)
             
@@ -1393,14 +1485,9 @@ RULES:
             logger.warning(f"Iteration {iteration}: Failed to parse AI response as JSON: {e}")
             logger.warning(f"Raw response: {raw_response[:500]}...")
             
-            # Try to extract root cause from raw text
-            return IterationResult(
-                iteration=iteration,
-                root_cause=raw_response[:500] if raw_response else "Parse error",
-                confidence=0.3,
-                category="UNKNOWN",
-                raw_response=raw_response,
-            )
+            # FALLBACK: Parse natural language response (Ollama compatibility)
+            return self._parse_natural_language_response(raw_response, iteration)
+            
         except Exception as e:
             logger.warning(f"Iteration {iteration}: Error parsing response: {e}")
             return IterationResult(
@@ -1410,6 +1497,278 @@ RULES:
                 category="UNKNOWN",
                 raw_response=raw_response,
             )
+    
+    def _parse_natural_language_response(self, raw_response: str, iteration: int) -> IterationResult:
+        """
+        Parse natural language AI response when JSON parsing fails.
+        
+        Extracts structured data from prose responses (common with Ollama models).
+        Handles multiple LLM response styles: markdown, bullet points, conversational.
+        """
+        text = raw_response.strip()
+        
+        # =====================================================================
+        # STEP 1: Extract Root Cause (try multiple strategies)
+        # =====================================================================
+        root_cause = ""
+        
+        # Strategy 1: Markdown sections (## or **)
+        section_patterns = [
+            r"\*\*Summary\*\*[:\s]*\n?(.+?)(?=\n\n|\n\*\*|\n##|\Z)",
+            r"\*\*Root Cause(?:\s+Analysis)?\*\*[:\s]*\n?(.+?)(?=\n\n|\n\*\*|\n##|\Z)",
+            r"##\s*Summary[:\s]*\n?(.+?)(?=\n\n|\n##|\Z)",
+            r"##\s*Root Cause[:\s]*\n?(.+?)(?=\n\n|\n##|\Z)",
+        ]
+        
+        for pattern in section_patterns:
+            match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+            if match:
+                root_cause = self._clean_markdown(match.group(1))
+                break
+        
+        # Strategy 2: Bullet/list format (- Root Cause: or * Root Cause:)
+        if not root_cause:
+            list_patterns = [
+                r"[-*]\s*(?:Root Cause|Summary|Issue|Problem)[:\s]+(.+?)(?=\n[-*]|\n\n|\Z)",
+                r"\d+[.)]\s*(?:Root Cause|Summary|Issue|Problem)[:\s]+(.+?)(?=\n\d+[.)]|\n\n|\Z)",
+            ]
+            for pattern in list_patterns:
+                match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+                if match:
+                    root_cause = self._clean_markdown(match.group(1))
+                    break
+        
+        # Strategy 3: Direct statements (order matters - more specific first)
+        if not root_cause:
+            direct_patterns = [
+                # More specific patterns first (they contain actual failure info)
+                r"(?:The build failed|failed|error occurred)[:\s]+(?:because|due to)[:\s]*(.+?)(?=\.\s+This|\.\s+[A-Z][a-z]|\n\n|\Z)",
+                r"(?:Root cause|Primary cause|Main issue)[:\s]+(.+?)(?=\.\s+[A-Z]|\n\n|\Z)",
+                # Generic patterns (might capture partial info like "clear")
+                r"(?:The root cause is|The actual issue is|The problem is)[:\s]+(.+?)(?=\.\s+[A-Z]|\n\n|\Z)",
+            ]
+            for pattern in direct_patterns:
+                match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+                if match:
+                    extracted = self._clean_markdown(match.group(1))
+                    # Skip if too short (likely partial match like "clear")
+                    if len(extracted) > 20:
+                        root_cause = extracted
+                        break
+        
+        # Strategy 4: First substantive paragraph (skip intro phrases)
+        if not root_cause:
+            # Remove common intro phrases
+            cleaned_text = re.sub(
+                r"^(Here'?s?\s+(the|my)\s+)?(root cause\s+)?analysis[:\s]*\n*",
+                "", text, flags=re.IGNORECASE
+            )
+            cleaned_text = re.sub(
+                r"^(Based on|Looking at|After analyzing|I've analyzed)[^.]+\.\s*",
+                "", cleaned_text, flags=re.IGNORECASE
+            )
+            
+            # Get first meaningful paragraph
+            paragraphs = re.split(r'\n\s*\n', cleaned_text)
+            for para in paragraphs:
+                para = para.strip()
+                if para and len(para) > 30 and not para.startswith('#'):
+                    root_cause = self._clean_markdown(para)
+                    break
+        
+        # Strategy 5: Ultimate fallback - cleaned first 500 chars
+        if not root_cause:
+            root_cause = self._clean_markdown(text)[:500]
+        
+        # Truncate to reasonable length
+        root_cause = root_cause[:600].strip()
+        
+        # =====================================================================
+        # STEP 2: Extract Category (keyword-based with scoring)
+        # =====================================================================
+        category = self._detect_category(text)
+        
+        # =====================================================================
+        # STEP 3: Estimate Confidence
+        # =====================================================================
+        confidence = self._estimate_confidence(text)
+        
+        # =====================================================================
+        # STEP 4: Determine if Retriable
+        # =====================================================================
+        is_retriable = self._determine_retriable(text)
+        
+        # =====================================================================
+        # STEP 5: Extract Fix/Solution
+        # =====================================================================
+        fix = self._extract_fix(text)
+        
+        logger.info(f"Parsed NL response: category={category}, confidence={confidence}, "
+                   f"retriable={is_retriable}, root_cause_len={len(root_cause)}")
+        
+        return IterationResult(
+            iteration=iteration,
+            root_cause=root_cause if root_cause else text[:500],
+            confidence=confidence,
+            category=category,
+            is_retriable=is_retriable,
+            fix=fix,
+            raw_response=raw_response,
+        )
+    
+    def _clean_markdown(self, text: str) -> str:
+        """Remove markdown formatting from text."""
+        # Remove bold/italic
+        text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
+        text = re.sub(r'\*([^*]+)\*', r'\1', text)
+        text = re.sub(r'__([^_]+)__', r'\1', text)
+        text = re.sub(r'_([^_]+)_', r'\1', text)
+        # Remove headers
+        text = re.sub(r'^#+\s*', '', text, flags=re.MULTILINE)
+        # Remove list markers
+        text = re.sub(r'^\s*[-*]\s+', '', text, flags=re.MULTILINE)
+        text = re.sub(r'^\s*\d+[.)]\s+', '', text, flags=re.MULTILINE)
+        # Normalize whitespace
+        text = re.sub(r'\n+', ' ', text)
+        text = re.sub(r'\s+', ' ', text)
+        return text.strip()
+    
+    def _detect_category(self, text: str) -> str:
+        """Detect failure category from text using keyword scoring."""
+        text_lower = text.lower()
+        
+        # Category keywords with weights (more specific = higher weight)
+        category_rules = {
+            "CREDENTIAL": {
+                "keywords": ["credential", "authentication", "password", "token", "secret", 
+                            "api key", "login failed", "unauthorized", "401", "access token"],
+                "weight": 1.0
+            },
+            "NETWORK": {
+                "keywords": ["network", "connection refused", "timeout", "unreachable", 
+                            "dns", "socket", "ETIMEDOUT", "ECONNREFUSED", "connection reset",
+                            "clone", "fetch failed", "dial tcp"],
+                "weight": 1.0
+            },
+            "PERMISSION": {
+                "keywords": ["permission denied", "forbidden", "403", "access denied", 
+                            "rbac", "not authorized", "cannot access"],
+                "weight": 1.0
+            },
+            "INFRASTRUCTURE": {
+                "keywords": ["kubernetes", "k8s", "docker", "container", "pod", "deployment",
+                            "rollout", "node", "cluster", "oom", "memory", "cpu", "resource",
+                            "scheduling", "image pull", "crashloop"],
+                "weight": 1.0
+            },
+            "CONFIGURATION": {
+                "keywords": ["configuration", "config", "yaml", "json", "invalid syntax",
+                            "missing parameter", "wrong value", "not found", "undefined",
+                            "environment variable", "env var"],
+                "weight": 0.9
+            },
+            "BUILD": {
+                "keywords": ["build failed", "compile", "compilation", "maven", "gradle", 
+                            "npm", "yarn", "dependency", "artifact", "package"],
+                "weight": 1.0
+            },
+            "TEST": {
+                "keywords": ["test failed", "assertion", "expect", "junit", "pytest", 
+                            "spec", "test case", "unit test", "integration test"],
+                "weight": 1.0
+            },
+        }
+        
+        scores = {}
+        for category, rules in category_rules.items():
+            score = sum(1 for kw in rules["keywords"] if kw in text_lower)
+            scores[category] = score * rules["weight"]
+        
+        # Return highest scoring category, or UNKNOWN if no matches
+        if scores:
+            best = max(scores, key=scores.get)
+            if scores[best] > 0:
+                return best
+        return "UNKNOWN"
+    
+    def _estimate_confidence(self, text: str) -> float:
+        """Estimate confidence based on language patterns."""
+        text_lower = text.lower()
+        
+        # High certainty indicators
+        high_certainty = [
+            "the root cause is", "this is caused by", "the error is",
+            "clearly", "definitely", "certainly", "the issue is",
+            "failed because", "failed due to", "the problem is"
+        ]
+        
+        # Medium certainty indicators
+        medium_certainty = [
+            "indicates", "suggests", "shows that", "points to",
+            "likely", "probably", "appears to be"
+        ]
+        
+        # Low certainty indicators
+        low_certainty = [
+            "might be", "could be", "possibly", "uncertain",
+            "not sure", "may be", "seems like", "perhaps"
+        ]
+        
+        if any(phrase in text_lower for phrase in high_certainty):
+            return 0.80
+        elif any(phrase in text_lower for phrase in low_certainty):
+            return 0.55
+        elif any(phrase in text_lower for phrase in medium_certainty):
+            return 0.70
+        else:
+            return 0.65  # Default moderate confidence
+    
+    def _determine_retriable(self, text: str) -> bool:
+        """Determine if the failure is retriable."""
+        text_lower = text.lower()
+        
+        # Retriable indicators
+        retry_positive = [
+            "retry", "transient", "temporary", "intermittent", 
+            "try again", "rerun", "timeout", "timed out",
+            "network", "connection", "flaky", "sporadic"
+        ]
+        
+        # Non-retriable indicators (these override retry_positive)
+        retry_negative = [
+            "permanent", "fix required", "code change needed",
+            "configuration change", "missing file", "invalid syntax",
+            "wrong password", "invalid credential", "does not exist",
+            "compilation error", "syntax error", "test failure"
+        ]
+        
+        has_retry_positive = any(kw in text_lower for kw in retry_positive)
+        has_retry_negative = any(kw in text_lower for kw in retry_negative)
+        
+        # Negative indicators override positive
+        if has_retry_negative:
+            return False
+        return has_retry_positive
+    
+    def _extract_fix(self, text: str) -> str:
+        """Extract fix/solution suggestion from text."""
+        fix = ""
+        
+        # Try section-based extraction
+        fix_patterns = [
+            r"\*\*(?:Fix|Solution|Recommendation|Resolution|How to fix)\*\*[:\s]*\n?(.+?)(?=\n\n|\n\*\*|\n##|\Z)",
+            r"##\s*(?:Fix|Solution|Recommendation)[:\s]*\n?(.+?)(?=\n\n|\n##|\Z)",
+            r"[-*]\s*(?:Fix|Solution|Recommendation)[:\s]+(.+?)(?=\n[-*]|\n\n|\Z)",
+            r"(?:To fix|To resolve|To solve|Solution:|Fix:|Recommendation:)[:\s]*(.+?)(?=\n\n|\Z)",
+        ]
+        
+        for pattern in fix_patterns:
+            match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+            if match:
+                fix = self._clean_markdown(match.group(1))
+                break
+        
+        return fix[:400] if fix else ""
     
     # =========================================================================
     # Requirement 7: Source-Aware Error Classification
