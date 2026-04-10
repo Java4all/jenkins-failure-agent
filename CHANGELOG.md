@@ -1,39 +1,22 @@
 # Changelog
 
-## v1.9.28 - UI Fixes (2026-04-10)
+## v1.9.28 - UI Bug Fixes (2026-04-10)
 
 ### Bug Fixes
 
 1. **Feedback Yes button now shows visual reaction**
-   - Added `useEffect` to reset feedback state when analysis changes
-   - Previously button appeared stuck after clicking
+   - Added `useEffect` to reset feedback state when analysis result changes
+   - Previously button appeared stuck after clicking on same session
 
-2. **Fix field now displays properly in Overview tab**
-   - Added `ExpandableFix` component to show suggested fix
-   - Handles both string and object `{action, file, code}` formats
-   - Shows "No specific fix suggestion" if fix is empty
+2. **Fix tab now properly displays fix suggestions**
+   - Added fallback to show `root_cause.fix` when `recommendations[]` is empty
+   - Shows "No fix suggestions available" only when truly no fix exists
+   - Previously showed empty content or truncated AI responses
 
-3. **Added `fix` field to RootCause dataclass**
-   - API now returns `root_cause.fix` properly
-   - Previously fix was incorrectly stored in `details` field
-
-### UI Changes
-```
-Overview Tab:
-┌─────────────────────────────────────────┐
-│ 🎯 Root Cause                           │
-│   [expandable root cause text]          │
-├─────────────────────────────────────────┤
-│ 🔧 Suggested Fix        ← NEW!          │
-│   [expandable fix text]                 │
-│   File: path/to/file.yaml               │
-│   [code snippet if available]           │
-├─────────────────────────────────────────┤
-│ Retry Assessment                        │
-│ Confidence Meter                        │
-│ 👍👎 Feedback Panel (now resets properly)│
-└─────────────────────────────────────────┘
-```
+### Technical Changes
+- Added `fix` field to `RootCause` dataclass in `ai_analyzer.py`
+- Added `fix` to API response in `result_to_dict()`
+- Fix tab now checks: `recommendations[]` → `failure_analysis.fix_code` → `root_cause.fix`
 
 ## v1.9.27 - AWS Bedrock Support (2026-04-10)
 

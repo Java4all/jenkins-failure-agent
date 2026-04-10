@@ -768,59 +768,6 @@
             );
         }
         
-        // Expandable Fix component - handles both string and object fix formats
-        function ExpandableFix({ fix }) {
-            const [expanded, setExpanded] = React.useState(false);
-            
-            if (!fix) return <p className="text-gray-400 italic">No fix suggestion available</p>;
-            
-            // Handle fix as object {action, file, code} or as string
-            let fixText = '';
-            let fixCode = null;
-            let fixFile = null;
-            
-            if (typeof fix === 'object') {
-                fixText = fix.action || '';
-                fixCode = fix.code || null;
-                fixFile = fix.file || null;
-            } else {
-                fixText = String(fix);
-            }
-            
-            // Don't show if fix is empty or just generic text
-            if (!fixText || fixText.length < 10) {
-                return <p className="text-gray-400 italic">No specific fix suggestion</p>;
-            }
-            
-            const isLong = fixText.length > 200;
-            const displayText = isLong && !expanded ? fixText.substring(0, 200) + '...' : fixText;
-            
-            return (
-                <div className="space-y-3">
-                    <p className="text-gray-200 whitespace-pre-wrap">{displayText}</p>
-                    {isLong && (
-                        <button 
-                            onClick={() => setExpanded(!expanded)}
-                            className="text-sm text-blue-400 hover:text-blue-300 flex items-center gap-1">
-                            <i className={`fas fa-chevron-${expanded ? 'up' : 'down'}`}></i>
-                            {expanded ? 'Show less' : 'Show full fix'}
-                        </button>
-                    )}
-                    {fixFile && (
-                        <div className="text-sm">
-                            <span className="text-gray-400">File: </span>
-                            <code className="text-yellow-300 bg-gray-800 px-2 py-0.5 rounded">{fixFile}</code>
-                        </div>
-                    )}
-                    {fixCode && (
-                        <pre className="p-3 bg-gray-900 rounded-lg overflow-x-auto text-sm text-green-300 font-mono whitespace-pre-wrap">
-                            {fixCode}
-                        </pre>
-                    )}
-                </div>
-            );
-        }
-        
         function ConfidenceMeter({ confidence }) {
             const percent = Math.round(confidence * 100);
             const color = percent >= 80 ? 'bg-green-500' : percent >= 50 ? 'bg-yellow-500' : 'bg-red-500';
@@ -1146,16 +1093,6 @@
                                     <ExpandableRootCause summary={root_cause?.summary} />
                                 </div>
                                 
-                                {/* Fix Suggestion - Show if available */}
-                                {root_cause?.fix && (
-                                    <div className="p-4 bg-green-500/10 border border-green-500/30 rounded-lg">
-                                        <h4 className="font-semibold text-green-300 mb-2 flex items-center gap-2">
-                                            <i className="fas fa-wrench"></i> Suggested Fix
-                                        </h4>
-                                        <ExpandableFix fix={root_cause.fix} />
-                                    </div>
-                                )}
-                                
                                 {/* Retry Assessment */}
                                 <RetryBadge assessment={retry_assessment} />
                                 
@@ -1224,9 +1161,19 @@
                                     </div>
                                 )}
                                 
-                                {/* Recommendations List */}
-                                {recommendations?.length === 0 && !failure_analysis?.fix_code && (
-                                    <p className="text-gray-500 text-center py-8">No recommendations available</p>
+                                {/* Fallback: Show root_cause.fix if no recommendations */}
+                                {recommendations?.length === 0 && !failure_analysis?.fix_code && root_cause?.fix && (
+                                    <div className="p-4 bg-green-900/20 border border-green-700/50 rounded-lg">
+                                        <h4 className="text-green-300 font-medium flex items-center gap-2 mb-3">
+                                            <i className="fas fa-wrench"></i> Suggested Fix
+                                        </h4>
+                                        <p className="text-gray-200 whitespace-pre-wrap">{root_cause.fix}</p>
+                                    </div>
+                                )}
+                                
+                                {/* No fix available message */}
+                                {recommendations?.length === 0 && !failure_analysis?.fix_code && !root_cause?.fix && (
+                                    <p className="text-gray-500 text-center py-8">No fix suggestions available</p>
                                 )}
                                 {recommendations?.map((rec, i) => (
                                     <div key={i} className="p-4 bg-gray-700/50 rounded-lg cursor-pointer hover:bg-gray-700 transition-colors"
