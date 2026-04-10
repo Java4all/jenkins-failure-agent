@@ -1,0 +1,176 @@
+# =============================================================================
+# Docker Compose - AWS Bedrock Configuration
+# =============================================================================
+#
+# Use this when running with AWS Bedrock instead of local Ollama.
+#
+# Prerequisites:
+# 1. AWS credentials configured (see authentication options below)
+# 2. IAM permissions: bedrock:InvokeModel
+# 3. Bedrock model access enabled in AWS Console
+#
+# Usage:
+#   docker-compose -f docker-compose.bedrock.yml up -d
+#
+# =============================================================================
+# AWS Authentication Options (choose one)
+# =============================================================================
+#
+# OPTION A: Environment Variables (simplest for testing)
+# -------------------------------------------------------
+# Set in .env file:
+#   AWS_ACCESS_KEY_ID=AKIA...
+#   AWS_SECRET_ACCESS_KEY=...
+#   AWS_SESSION_TOKEN=...  # Optional, for temporary credentials
+#   AWS_REGION=us-east-1
+#
+# OPTION B: AWS Profile (recommended for developers)
+# ---------------------------------------------------
+# Uses your existing AWS CLI configuration.
+# Supports: access keys, session tokens, SSO, MFA, assume role
+#
+# 1. Mount ~/.aws directory (see volumes section below)
+# 2. Set AWS_PROFILE or AI_PROFILE to your profile name
+#
+# Example profiles (~/.aws/credentials):
+#   [my-bedrock-profile]
+#   aws_access_key_id = AKIA...
+#   aws_secret_access_key = ...
+#
+# Example SSO profile (~/.aws/config):
+#   [profile my-sso]
+#   sso_start_url = https://my-sso.awsapps.com/start
+#   sso_region = us-east-1
+#   sso_account_id = 123456789012
+#   sso_role_name = BedrockAccess
+#   region = us-east-1
+#
+# For SSO, run first: aws sso login --profile my-sso
+#
+# OPTION C: IAM Role (recommended for production on AWS)
+# -------------------------------------------------------
+# For EC2/ECS/EKS/Lambda - attach IAM role, no credentials needed.
+# boto3 automatically uses instance metadata.
+#
+# =============================================================================
+
+services:
+  agent:
+    build: .
+    container_name: jenkins-failure-agent
+    ports:
+      - "8080:8080"
+    environment:
+      # Jenkins connection
+      - JENKINS_URL=${JENKINS_URL}
+      - JENKINS_USERNAME=${JENKINS_USERNAME}
+      - JENKINS_API_TOKEN=${JENKINS_API_TOKEN}
+      
+      # AI Provider - AWS Bedrock
+      - AI_PROVIDER=bedrock
+      - AI_MODEL=${AI_MODEL:-claude-3-sonnet}
+      
+      # AWS Region (required)
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AI_REGION=${AWS_REGION:-us-east-1}
+      
+      # ----- Choose ONE authentication method -----
+      
+      # Option A: Environment variables (direct credentials)
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:-}
+      
+      # Option B: AWS Profile (from mounted ~/.aws directory)
+      - AWS_PROFILE=${AWS_PROFILE:-}
+      - AI_PROFILE=${AI_PROFILE:-}
+      
+      # GitHub integration (optional)
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      
+      # Server settings
+      - SERVER_API_KEY=${SERVER_API_KEY:-}
+    volumes:
+      - agent_data:/app/data
+      - ./config.yaml:/app/config.yaml:ro
+      # Mount AWS credentials directory for profile-based auth (enabled by default)
+      # This allows the container to read your ~/.aws/credentials and ~/.aws/config
+      - ${HOME}/.aws:/root/.aws:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  ui:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile.ui
+    container_name: jenkins-failure-ui
+    ports:
+      - "3000:80"
+    depends_on:
+      - agent
+    restart: unless-stopped
+
+volumes:
+  agent_data:
+
+# =============================================================================
+# Quick Setup Examples
+# =============================================================================
+#
+# Example 1: Using AWS Profile
+# ----------------------------
+# .env file:
+#   JENKINS_URL=https://jenkins.example.com
+#   JENKINS_USERNAME=admin
+#   JENKINS_API_TOKEN=xxx
+#   AI_MODEL=claude-3-sonnet
+#   AWS_REGION=us-east-1
+#   AWS_PROFILE=my-bedrock-profile
+#
+# Uncomment the ~/.aws volume mount above, then:
+#   docker-compose -f docker-compose.bedrock.yml up -d
+#
+# Example 2: Using Environment Credentials
+# ----------------------------------------
+# .env file:
+#   JENKINS_URL=https://jenkins.example.com
+#   JENKINS_USERNAME=admin
+#   JENKINS_API_TOKEN=xxx
+#   AI_MODEL=claude-3-sonnet
+#   AWS_ACCESS_KEY_ID=AKIA...
+#   AWS_SECRET_ACCESS_KEY=...
+#   AWS_REGION=us-east-1
+#
+# Run:
+#   docker-compose -f docker-compose.bedrock.yml up -d
+#
+# =============================================================================
+# Bedrock Model Options
+# =============================================================================
+#
+# Set AI_MODEL to one of these (or use full model ID):
+#
+# Claude (Anthropic) - Recommended for analysis:
+#   claude-3-sonnet      - Best balance of speed/quality
+#   claude-3-haiku       - Fastest, good for simple errors
+#   claude-3-opus        - Most capable, slowest
+#   claude-3.5-sonnet    - Latest, best quality
+#
+# Titan (Amazon):
+#   titan-express        - Fast, general purpose
+#   titan-lite           - Lightweight
+#
+# Llama (Meta):
+#   llama3-8b            - Fast, good quality
+#   llama3-70b           - Best Llama quality
+#
+# Mistral:
+#   mistral-7b           - Fast
+#   mistral-large        - High quality
+#   mixtral-8x7b         - MoE model
+#
+# =============================================================================

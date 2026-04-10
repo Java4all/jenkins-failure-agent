@@ -8,9 +8,13 @@ Supports multiple analysis modes:
 - Scripted: Fast, single LLM call for simple failures (default)
 - Iterative: Multi-call analysis with source code context (recommended)
 - Agentic: Deep investigation with MCP tools for code/library issues
+
+Supports multiple AI providers:
+- OpenAI-compatible: Ollama, vLLM, LocalAI, OpenAI API
+- AWS Bedrock: Claude, Titan, Llama, Mistral
 """
 
-__version__ = "1.9.26"
+__version__ = "1.9.27"
 
 from .config import (
     Config, JenkinsConfig, AIConfig, GitConfig, GitHubConfig,
@@ -28,6 +32,10 @@ from .config_analyzer import ConfigurationAnalyzer, ConfigurationAnalysis, Confi
 from .ai_analyzer import (
     AIAnalyzer, AnalysisResult, result_to_dict,
     FailureTier, RetryAssessment, CATEGORY_TO_TIER
+)
+from .ai_provider import (
+    AIProvider, OpenAICompatibleProvider, BedrockProvider,
+    ChatMessage, ChatResponse, create_ai_provider, get_provider_from_config
 )
 from .report_generator import ReportGenerator, format_slack_message
 from .scm_client import SCMClient, SCMProvider, PRInfo, format_pr_comment
@@ -57,6 +65,9 @@ __all__ = [
     # AI analysis
     "AIAnalyzer", "AnalysisResult", "result_to_dict",
     "FailureTier", "RetryAssessment", "CATEGORY_TO_TIER",
+    # AI Provider abstraction
+    "AIProvider", "OpenAICompatibleProvider", "BedrockProvider",
+    "ChatMessage", "ChatResponse", "create_ai_provider", "get_provider_from_config",
     # Hybrid analysis (iterative + deep modes)
     "HybridAnalyzer", "HybridAnalysisResult", "AnalysisMode",
     # Root Cause Finder Expert

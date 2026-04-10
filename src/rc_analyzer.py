@@ -1424,21 +1424,35 @@ RULES:
     
     def _call_ai(self, prompt: str) -> str:
         """
-        Call AI using existing AIAnalyzer.
+        Call AI using provider abstraction.
         
         Implements Requirement 3.8: Reuse existing _call_ai method
+        Supports both OpenAI-compatible and AWS Bedrock providers.
         """
-        # Use the AIAnalyzer's client directly
-        response = self.ai_analyzer.client.chat.completions.create(
-            model=self.ai_analyzer.config.model,
-            messages=[
-                {"role": "system", "content": self.SYSTEM_PROMPT},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            max_tokens=1500,
-        )
-        return response.choices[0].message.content
+        # Check if we have the new provider-based system
+        if hasattr(self.ai_analyzer, 'provider'):
+            from .ai_provider import ChatMessage
+            response = self.ai_analyzer.provider.chat(
+                messages=[
+                    ChatMessage(role="system", content=self.SYSTEM_PROMPT),
+                    ChatMessage(role="user", content=prompt),
+                ],
+                temperature=0.3,
+                max_tokens=1500,
+            )
+            return response.content
+        else:
+            # Backward compatibility: use the old client directly
+            response = self.ai_analyzer.client.chat.completions.create(
+                model=self.ai_analyzer.config.model,
+                messages=[
+                    {"role": "system", "content": self.SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=1500,
+            )
+            return response.choices[0].message.content
     
     def _parse_iteration_response(self, raw_response: str, iteration: int) -> IterationResult:
         """

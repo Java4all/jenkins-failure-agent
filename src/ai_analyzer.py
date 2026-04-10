@@ -224,12 +224,32 @@ class AIAnalyzer:
     
     def __init__(self, config: AIConfig):
         self.config = config
-        self.client = OpenAI(
-            base_url=config.base_url,
-            api_key=config.api_key,
-            timeout=config.timeout,
-        )
-        self.model = config.model
+        
+        # Initialize AI provider (new abstraction layer)
+        try:
+            from .ai_provider import get_provider_from_config
+            self.provider = get_provider_from_config(config)
+            self.model = self.provider.model_name
+            # Keep client for backward compatibility with RC Analyzer
+            if hasattr(self.provider, 'client'):
+                self.client = self.provider.client
+            else:
+                # For Bedrock, create a dummy client attribute
+                self.client = None
+        except Exception as e:
+            # Fallback to direct OpenAI client (backward compatibility)
+            import logging
+            logging.getLogger("jenkins-agent.ai").warning(
+                f"Failed to use provider abstraction, falling back to OpenAI client: {e}"
+            )
+            self.provider = None
+            self.client = OpenAI(
+                base_url=config.base_url,
+                api_key=config.api_key,
+                timeout=config.timeout,
+            )
+            self.model = config.model
+        
         self.groovy_analyzer = GroovyAnalyzer()
         self.config_analyzer = ConfigurationAnalyzer()
     
@@ -464,17 +484,30 @@ class AIAnalyzer:
         
         for attempt in range(self.config.max_retries):
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=self.config.temperature,
-                    max_tokens=self.config.max_tokens,
-                )
-                
-                return response.choices[0].message.content
+                # Use provider abstraction if available
+                if self.provider:
+                    from .ai_provider import ChatMessage
+                    response = self.provider.chat(
+                        messages=[
+                            ChatMessage(role="system", content=system_prompt),
+                            ChatMessage(role="user", content=prompt),
+                        ],
+                        temperature=self.config.temperature,
+                        max_tokens=self.config.max_tokens,
+                    )
+                    return response.content
+                else:
+                    # Fallback to direct OpenAI client
+                    response = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": prompt}
+                        ],
+                        temperature=self.config.temperature,
+                        max_tokens=self.config.max_tokens,
+                    )
+                    return response.choices[0].message.content
                 
             except Exception as e:
                 last_error = e
@@ -802,14 +835,17 @@ class AIAnalyzer:
     def test_connection(self) -> bool:
         """Test connection to the AI model."""
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "user", "content": "Respond with 'OK' if you can read this."}
-                ],
-                max_tokens=10,
-            )
-            return "OK" in response.choices[0].message.content.upper()
+            if self.provider:
+                return self.provider.test_connection()
+            else:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "user", "content": "Respond with 'OK' if you can read this."}
+                    ],
+                    max_tokens=10,
+                )
+                return "OK" in response.choices[0].message.content.upper()
         except Exception:
             return False
 

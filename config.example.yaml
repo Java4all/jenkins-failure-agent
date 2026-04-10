@@ -43,9 +43,18 @@ jenkins:
 # AI MODEL CONFIGURATION
 # =============================================================================
 ai:
-  # Provider type (currently only openai_compatible is supported)
+  # ==========================================================================
+  # PROVIDER SELECTION
+  # ==========================================================================
+  # Provider type:
+  #   - "openai_compatible" (default): Ollama, vLLM, LocalAI, OpenAI, Azure
+  #   - "bedrock": AWS Bedrock (Claude, Titan, Llama, Mistral)
+  provider: "${AI_PROVIDER:-openai_compatible}"
+  
+  # ==========================================================================
+  # OPTION 1: OPENAI-COMPATIBLE PROVIDERS (default)
+  # ==========================================================================
   # Works with: Ollama, vLLM, LocalAI, LM Studio, OpenAI, Azure OpenAI
-  provider: "openai_compatible"
   
   # API endpoint URL
   # -----------------
@@ -69,8 +78,95 @@ ai:
   # API key (Ollama doesn't require a real key, but the client needs one)
   api_key: "${AI_API_KEY:-ollama}"
   
-  # Model parameters
-  # ----------------
+  # ==========================================================================
+  # OPTION 2: AWS BEDROCK
+  # ==========================================================================
+  # To use AWS Bedrock:
+  #   1. Set provider: "bedrock"
+  #   2. Set model to a Bedrock model ID or alias
+  #   3. Configure AWS credentials (see below)
+  #
+  # Model aliases (shortcuts):
+  # --------------------------
+  # Claude:   claude-3-sonnet, claude-3-haiku, claude-3-opus, claude-3.5-sonnet
+  # Titan:    titan-express, titan-lite
+  # Llama:    llama3-8b, llama3-70b, llama2-13b, llama2-70b
+  # Mistral:  mistral-7b, mistral-large, mixtral-8x7b
+  #
+  # Or use full model IDs:
+  #   anthropic.claude-3-sonnet-20240229-v1:0
+  #   meta.llama3-70b-instruct-v1:0
+  #
+  # AWS Authentication (in order of precedence):
+  # ---------------------------------------------
+  # 1. Explicit credentials in environment
+  #    AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN
+  #
+  # 2. AWS Profile (~/.aws/credentials and ~/.aws/config)
+  #    Supports: access keys, session tokens, SSO, MFA, assume role
+  #    Set profile name below or via AWS_PROFILE env var
+  #
+  # 3. IAM role (for EC2/ECS/Lambda/EKS)
+  #    No configuration needed - boto3 uses instance metadata
+  #
+  # 4. Container credentials (ECS task role)
+  #
+  # AWS Profile Examples:
+  # ---------------------
+  # ~/.aws/credentials (access keys):
+  #   [my-profile]
+  #   aws_access_key_id = AKIA...
+  #   aws_secret_access_key = ...
+  #   aws_session_token = ...  # Optional, for temporary creds
+  #
+  # ~/.aws/config (SSO):
+  #   [profile my-sso-profile]
+  #   sso_start_url = https://my-sso.awsapps.com/start
+  #   sso_region = us-east-1
+  #   sso_account_id = 123456789012
+  #   sso_role_name = MyRole
+  #   region = us-east-1
+  #
+  # ~/.aws/config (assume role):
+  #   [profile my-assume-role]
+  #   role_arn = arn:aws:iam::123456789012:role/MyRole
+  #   source_profile = default
+  #   region = us-east-1
+  #
+  # Required IAM permissions:
+  #   - bedrock:InvokeModel
+  #
+  # Example Bedrock configuration:
+  # ------------------------------
+  # provider: "bedrock"
+  # model: "claude-3-sonnet"
+  # region: "us-east-1"
+  # profile: "my-bedrock-profile"
+  
+  # AWS region for Bedrock (can also come from profile or AWS_REGION env)
+  region: "${AI_REGION:-}"
+  
+  # AWS profile name (from ~/.aws/credentials or ~/.aws/config)
+  # Leave empty to use default profile or instance role
+  #
+  # IMPORTANT FOR DOCKER: If you set a profile here, you must also mount
+  # your ~/.aws directory in docker-compose.yml:
+  #
+  #   volumes:
+  #     - ${HOME}/.aws:/root/.aws:ro
+  #
+  # Without this mount, the container cannot read your AWS profiles!
+  profile: "${AI_PROFILE:-}"
+  
+  # Custom paths to AWS credential files (optional)
+  # Default: ~/.aws/credentials and ~/.aws/config
+  credentials_file: "${AI_CREDENTIALS_FILE:-}"
+  config_file: "${AI_CONFIG_FILE:-}"
+  
+  # ==========================================================================
+  # COMMON SETTINGS (apply to all providers)
+  # ==========================================================================
+  
   # Temperature: 0.0-1.0 (lower = more deterministic, higher = more creative)
   temperature: 0.1
   

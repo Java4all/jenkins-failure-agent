@@ -66,7 +66,7 @@ ENV PYTHONUNBUFFERED=1 \
 # Labels
 LABEL org.opencontainers.image.title="Jenkins Failure Analysis Agent" \
       org.opencontainers.image.description="AI-powered Jenkins build failure analysis with iterative RC analysis and MCP tools" \
-      org.opencontainers.image.version="1.9.26"
+      org.opencontainers.image.version="1.9.27"
 
 # Default port
 EXPOSE 8080

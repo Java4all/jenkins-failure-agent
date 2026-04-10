@@ -82,12 +82,34 @@ services:
       - ./config.yaml:/app/config.yaml:ro
       - agent_data:/app/data
       - agent_reports:/app/reports
+      # -------------------------------------------------------------------------
+      # AWS Credentials (uncomment if using AWS Bedrock with profile)
+      # -------------------------------------------------------------------------
+      # Mount your AWS credentials directory for profile-based authentication.
+      # Required when config.yaml has: ai.provider: "bedrock" and ai.profile: "xxx"
+      #
+      # Linux/Mac:
+      # - ${HOME}/.aws:/root/.aws:ro
+      #
+      # Windows (Git Bash):
+      # - //c/Users/YOUR_USERNAME/.aws:/root/.aws:ro
+      # -------------------------------------------------------------------------
     environment:
-      # AI Configuration (uses Ollama container)
-      - AI_BASE_URL=http://ollama:11434/v1
+      # AI Configuration (uses Ollama container by default)
+      # For AWS Bedrock, set AI_PROVIDER=bedrock in .env and uncomment AWS volume above
+      - AI_PROVIDER=${AI_PROVIDER:-openai_compatible}
+      - AI_BASE_URL=${AI_BASE_URL:-http://ollama:11434/v1}
       - AI_MODEL=${AI_MODEL:-llama3:8b}
-      - AI_API_KEY=ollama
+      - AI_API_KEY=${AI_API_KEY:-ollama}
       - AI_TIMEOUT=${AI_TIMEOUT:-120}
+      # AWS Bedrock settings (only used when AI_PROVIDER=bedrock)
+      - AI_REGION=${AI_REGION:-}
+      - AI_PROFILE=${AI_PROFILE:-}
+      - AWS_REGION=${AWS_REGION:-}
+      - AWS_PROFILE=${AWS_PROFILE:-}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:-}
       
       # Jenkins Configuration (override in .env or config.yaml)
       - JENKINS_URL=${JENKINS_URL:-http://jenkins:8080}

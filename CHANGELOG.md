@@ -1,5 +1,71 @@
 # Changelog
 
+## v1.9.27 - AWS Bedrock Support (2026-04-10)
+
+### New Feature: Multi-Provider AI Architecture
+
+#### Supported Providers:
+- **OpenAI-compatible** (default): Ollama, vLLM, LocalAI, OpenAI, Azure
+- **AWS Bedrock**: Claude, Titan, Llama, Mistral
+
+#### Bedrock Model Aliases:
+```
+Claude:   claude-3-sonnet, claude-3-haiku, claude-3-opus, claude-3.5-sonnet
+Titan:    titan-express, titan-lite
+Llama:    llama3-8b, llama3-70b, llama2-13b, llama2-70b
+Mistral:  mistral-7b, mistral-large, mixtral-8x7b
+```
+
+#### Configuration:
+```yaml
+# config.yaml
+ai:
+  provider: "bedrock"
+  model: "claude-3-sonnet"
+  region: "us-east-1"
+```
+
+```bash
+# Environment variables
+AI_PROVIDER=bedrock
+AI_MODEL=claude-3-sonnet
+AWS_REGION=us-east-1
+```
+
+#### AWS Authentication:
+- Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+- IAM role (recommended for EC2/ECS/Lambda)
+- AWS credentials file (~/.aws/credentials)
+
+### Architecture:
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    AI PROVIDER LAYER                         │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  ┌─────────────────────┐    ┌─────────────────────┐         │
+│  │ OpenAICompatible    │    │ BedrockProvider     │         │
+│  │ Provider            │    │                     │         │
+│  │                     │    │  • Claude format    │         │
+│  │  • Ollama           │    │  • Titan format     │         │
+│  │  • vLLM             │    │  • Llama format     │         │
+│  │  • OpenAI           │    │  • Mistral format   │         │
+│  │  • LocalAI          │    │                     │         │
+│  └─────────────────────┘    └─────────────────────┘         │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Files Added/Changed:
+- `src/ai_provider.py` - New provider abstraction layer
+- `docker-compose.bedrock.yml` - Bedrock deployment example
+- Updated: config.py, ai_analyzer.py, rc_analyzer.py
+- Updated: config.example.yaml, .env.example, requirements.txt
+
+### Backward Compatibility:
+- ✅ Existing Ollama/OpenAI configurations work unchanged
+- ✅ No breaking changes to API or config format
+
 ## v1.9.24 - STABLE CHECKPOINT ✅ (2026-04-04)
 
 ### Status: Production-Ready AI-Driven Analysis

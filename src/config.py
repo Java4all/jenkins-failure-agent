@@ -21,15 +21,23 @@ class JenkinsConfig:
 
 @dataclass
 class AIConfig:
+    # Provider: "openai_compatible" (default), "bedrock", "azure" (future)
     provider: str = "openai_compatible"
+    # OpenAI-compatible settings
     base_url: str = "http://localhost:11434/v1"
     model: str = "llama3:8b"
     api_key: str = "ollama"
+    # Common settings
     temperature: float = 0.1
     max_tokens: int = 4096
     timeout: int = 120
     max_retries: int = 3
     retry_delay: int = 5
+    # AWS Bedrock settings
+    region: str = ""  # AWS region (e.g., "us-east-1")
+    profile: str = ""  # AWS profile name (from ~/.aws/credentials or ~/.aws/config)
+    credentials_file: str = ""  # Custom path to AWS credentials file
+    config_file: str = ""  # Custom path to AWS config file
 
 
 @dataclass
@@ -235,6 +243,11 @@ def load_config(config_path: Optional[str] = None, env_file: str = ".env") -> Co
         timeout=raw_config.get("ai", {}).get("timeout", 120),
         max_retries=raw_config.get("ai", {}).get("max_retries", 3),
         retry_delay=raw_config.get("ai", {}).get("retry_delay", 5),
+        # AWS Bedrock settings
+        region=raw_config.get("ai", {}).get("region", ""),
+        profile=raw_config.get("ai", {}).get("profile", ""),
+        credentials_file=raw_config.get("ai", {}).get("credentials_file", ""),
+        config_file=raw_config.get("ai", {}).get("config_file", ""),
     )
     
     git_cfg = GitConfig(
@@ -423,9 +436,19 @@ def _apply_env_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
         "JENKINS_URL": ("jenkins", "url"),
         "JENKINS_USERNAME": ("jenkins", "username"),
         "JENKINS_API_TOKEN": ("jenkins", "api_token"),
+        # AI provider settings
+        "AI_PROVIDER": ("ai", "provider"),
         "AI_BASE_URL": ("ai", "base_url"),
         "AI_MODEL": ("ai", "model"),
         "AI_API_KEY": ("ai", "api_key"),
+        # AWS Bedrock settings
+        # Note: AWS_REGION, AWS_PROFILE, AWS_SHARED_CREDENTIALS_FILE, AWS_CONFIG_FILE
+        # are also read directly by boto3, but we support AI_* prefixed versions too
+        "AI_REGION": ("ai", "region"),
+        "AI_PROFILE": ("ai", "profile"),
+        "AI_CREDENTIALS_FILE": ("ai", "credentials_file"),
+        "AI_CONFIG_FILE": ("ai", "config_file"),
+        # GitHub settings
         "GITHUB_BASE_URL": ("github", "base_url"),
         "GITHUB_TOKEN": ("github", "token"),
         "SCM_PROVIDER": ("scm", "provider"),

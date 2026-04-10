@@ -18,6 +18,7 @@ help:
 	@echo "  make start                    - Start with Ollama in Docker (default)"
 	@echo "  make start-external-ollama    - Start with Ollama on host machine"
 	@echo "  make start-remote-ai          - Start with remote AI API (OpenAI, etc.)"
+	@echo "  make start-bedrock            - Start with AWS Bedrock (Claude, Titan, Llama)"
 	@echo ""
 	@echo "Deployment Modes (Pre-built Images - No Build Required):"
 	@echo "  make start-prebuilt           - Pre-built image + Ollama in Docker"
@@ -27,6 +28,7 @@ help:
 	@echo "  make setup                    - First-time setup (copy .env, pull model)"
 	@echo "  make setup-external-ollama    - Setup for external Ollama"
 	@echo "  make setup-deep               - Setup for deep investigation (larger model)"
+	@echo "  make setup-bedrock            - Setup for AWS Bedrock"
 	@echo ""
 	@echo "Stop/Clean:"
 	@echo "  make stop                     - Stop all services (DATA PRESERVED)"
@@ -42,6 +44,7 @@ help:
 	@echo "Development:"
 	@echo "  make build                    - Rebuild agent container"
 	@echo "  make logs                     - Follow agent logs"
+	@echo "  make logs-bedrock             - Follow logs (Bedrock mode)"
 	@echo "  make shell                    - Shell into agent container"
 	@echo ""
 	@echo "AI Models (for local Ollama):"
@@ -116,6 +119,38 @@ setup-external-ollama:
 	@echo "  2. Run: make start-external-ollama"
 	@echo "  3. Open: http://localhost:3000"
 
+setup-bedrock:
+	@if [ ! -f .env ]; then \
+		cp .env.example .env; \
+		echo "[OK] Created .env from template"; \
+	fi
+	@echo ""
+	@echo "┌────────────────────────────────────────────────────────────────┐"
+	@echo "│                    AWS Bedrock Setup                           │"
+	@echo "└────────────────────────────────────────────────────────────────┘"
+	@echo ""
+	@echo "Step 1: Configure .env with:"
+	@echo ""
+	@echo "  # Jenkins credentials"
+	@echo "  JENKINS_URL=https://jenkins.example.com"
+	@echo "  JENKINS_USERNAME=admin"
+	@echo "  JENKINS_API_TOKEN=your-token"
+	@echo ""
+	@echo "  # AWS Bedrock"
+	@echo "  AI_PROVIDER=bedrock"
+	@echo "  AI_MODEL=claude-3-sonnet"
+	@echo "  AI_PROFILE=your-aws-profile"
+	@echo "  AWS_REGION=us-east-1"
+	@echo ""
+	@echo "Step 2: Verify your AWS profile works:"
+	@echo "  aws sts get-caller-identity --profile your-aws-profile"
+	@echo ""
+	@echo "Step 3: Start the agent:"
+	@echo "  make start-bedrock"
+	@echo ""
+	@echo "Note: Your ~/.aws directory will be mounted automatically."
+	@echo ""
+
 # =============================================================================
 # Start/Stop Services
 # =============================================================================
@@ -163,6 +198,40 @@ start-remote-ai:
 	@echo ""
 	@echo "Use 'make logs-remote' to follow logs"
 
+start-bedrock:
+	@echo "Starting with AWS Bedrock..."
+	@echo ""
+	@# Check if AWS credentials are available
+	@if [ -z "$$AWS_PROFILE" ] && [ -z "$$AWS_ACCESS_KEY_ID" ] && ! grep -q "^AI_PROFILE=" .env 2>/dev/null && ! grep -q "^AWS_PROFILE=" .env 2>/dev/null; then \
+		echo "┌────────────────────────────────────────────────────────────────┐"; \
+		echo "│  AWS credentials not detected!                                 │"; \
+		echo "│                                                                │"; \
+		echo "│  Configure ONE of the following:                               │"; \
+		echo "│                                                                │"; \
+		echo "│  Option 1: AWS Profile (recommended)                           │"; \
+		echo "│    - Set AI_PROFILE=your-profile in .env                       │"; \
+		echo "│    - Your ~/.aws directory will be mounted automatically       │"; \
+		echo "│                                                                │"; \
+		echo "│  Option 2: Environment Variables                               │"; \
+		echo "│    - Set AWS_ACCESS_KEY_ID in .env                             │"; \
+		echo "│    - Set AWS_SECRET_ACCESS_KEY in .env                         │"; \
+		echo "│    - Set AWS_REGION in .env                                    │"; \
+		echo "│                                                                │"; \
+		echo "└────────────────────────────────────────────────────────────────┘"; \
+		exit 1; \
+	fi
+	docker-compose -f docker-compose.bedrock.yml up -d
+	@echo ""
+	@echo "[OK] Services running with AWS Bedrock:"
+	@echo "  * UI Dashboard: http://localhost:3000"
+	@echo "  * Agent API:    http://localhost:8080"
+	@echo "  * AI:           AWS Bedrock"
+	@echo ""
+	@echo "Use 'make logs-bedrock' to follow logs"
+
+logs-bedrock:
+	docker-compose -f docker-compose.bedrock.yml logs -f agent
+
 # =============================================================================
 # Pre-built Image Deployment (No Build Required)
 # =============================================================================
@@ -200,6 +269,7 @@ stop:
 	docker-compose down 2>/dev/null || true
 	docker-compose -f docker-compose.external-ollama.yml down 2>/dev/null || true
 	docker-compose -f docker-compose.remote-ai.yml down 2>/dev/null || true
+	docker-compose -f docker-compose.bedrock.yml down 2>/dev/null || true
 	docker-compose -f docker-compose.prebuilt.yml down 2>/dev/null || true
 	docker-compose -f docker-compose.prebuilt-external.yml down 2>/dev/null || true
 	@echo ""
