@@ -820,17 +820,26 @@
                         confirmed_fix: correctedData?.fix || root_cause?.fix || '',
                     };
                     
+                    console.log('Submitting feedback:', payload);
+                    
                     const response = await fetch('/feedback', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(payload),
                     });
                     
+                    console.log('Feedback response status:', response.status);
+                    
                     if (response.ok) {
+                        const data = await response.json();
+                        console.log('Feedback submitted successfully:', data);
                         setFeedbackState(wasCorrect ? 'submitted_positive' : 'submitted_negative');
+                    } else {
+                        const errorText = await response.text();
+                        console.error('Feedback submission failed:', response.status, errorText);
                     }
                 } catch (error) {
-                    console.error('Feedback submission failed:', error);
+                    console.error('Feedback submission error:', error);
                 } finally {
                     setSubmitting(false);
                 }

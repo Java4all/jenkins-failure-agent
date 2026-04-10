@@ -1,5 +1,37 @@
 # Changelog
 
+## v1.9.29 - Feedback Buttons Fixed (2026-04-10)
+
+### Bug Fix: Feedback Yes/No Buttons Not Working
+
+**Root Cause:** nginx proxy was not configured to forward `/feedback` endpoint to the backend API. 
+
+The UI called `fetch('/feedback', ...)` but nginx only had proxy rules for `/health`, `/analyze`, and `/results`. Requests to `/feedback` returned 404.
+
+**Fix:** Added missing nginx proxy location blocks:
+```nginx
+location /feedback {
+    proxy_pass http://agent:8080/feedback;
+}
+
+location /config {
+    proxy_pass http://agent:8080/config;
+}
+```
+
+### Changes
+- `ui/nginx.conf` — Added `/feedback` and `/config` proxy routes
+- `ui/index.html` — Added console logging to debug feedback submissions
+
+### How to Update Running Instance
+```bash
+# Restart nginx to pick up config changes
+docker-compose restart ui
+
+# Or full restart
+make stop && make start
+```
+
 ## v1.9.28 - UI Bug Fixes (2026-04-10)
 
 ### Bug Fixes
