@@ -172,7 +172,7 @@ jenkins-failure-agent/
 
 ## Version
 
-**Current: v1.9.27** | [View changelog](CHANGELOG.md)
+**Current: v1.9.28** | [View changelog](CHANGELOG.md)
 
 ## License
 

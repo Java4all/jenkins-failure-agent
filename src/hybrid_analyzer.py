@@ -768,10 +768,11 @@ class HybridAnalyzer:
             failure_analysis=failure_analysis,
             root_cause=RootCause(
                 summary=rc_result.root_cause,
-                details=rc_result.fix or "",
+                details=rc_result.root_cause,  # Keep details as root cause summary
                 confidence=rc_result.confidence,
                 category=category,
                 tier=tier,
+                fix=rc_result.fix or "",  # Set fix field
             ),
             retry_assessment=RetryAssessment(
                 is_retriable=rc_result.is_retriable,

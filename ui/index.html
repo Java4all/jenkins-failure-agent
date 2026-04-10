@@ -768,6 +768,59 @@
             );
         }
         
+        // Expandable Fix component - handles both string and object fix formats
+        function ExpandableFix({ fix }) {
+            const [expanded, setExpanded] = React.useState(false);
+            
+            if (!fix) return <p className="text-gray-400 italic">No fix suggestion available</p>;
+            
+            // Handle fix as object {action, file, code} or as string
+            let fixText = '';
+            let fixCode = null;
+            let fixFile = null;
+            
+            if (typeof fix === 'object') {
+                fixText = fix.action || '';
+                fixCode = fix.code || null;
+                fixFile = fix.file || null;
+            } else {
+                fixText = String(fix);
+            }
+            
+            // Don't show if fix is empty or just generic text
+            if (!fixText || fixText.length < 10) {
+                return <p className="text-gray-400 italic">No specific fix suggestion</p>;
+            }
+            
+            const isLong = fixText.length > 200;
+            const displayText = isLong && !expanded ? fixText.substring(0, 200) + '...' : fixText;
+            
+            return (
+                <div className="space-y-3">
+                    <p className="text-gray-200 whitespace-pre-wrap">{displayText}</p>
+                    {isLong && (
+                        <button 
+                            onClick={() => setExpanded(!expanded)}
+                            className="text-sm text-blue-400 hover:text-blue-300 flex items-center gap-1">
+                            <i className={`fas fa-chevron-${expanded ? 'up' : 'down'}`}></i>
+                            {expanded ? 'Show less' : 'Show full fix'}
+                        </button>
+                    )}
+                    {fixFile && (
+                        <div className="text-sm">
+                            <span className="text-gray-400">File: </span>
+                            <code className="text-yellow-300 bg-gray-800 px-2 py-0.5 rounded">{fixFile}</code>
+                        </div>
+                    )}
+                    {fixCode && (
+                        <pre className="p-3 bg-gray-900 rounded-lg overflow-x-auto text-sm text-green-300 font-mono whitespace-pre-wrap">
+                            {fixCode}
+                        </pre>
+                    )}
+                </div>
+            );
+        }
+        
         function ConfidenceMeter({ confidence }) {
             const percent = Math.round(confidence * 100);
             const color = percent >= 80 ? 'bg-green-500' : percent >= 50 ? 'bg-yellow-500' : 'bg-red-500';
@@ -786,10 +839,19 @@
         // =====================================================================
         
         function FeedbackPanel({ result }) {
-            const [feedbackState, setFeedbackState] = useState('pending'); // pending, submitted, correcting
+            const [feedbackState, setFeedbackState] = useState('pending');
             const [showCorrection, setShowCorrection] = useState(false);
             const [correction, setCorrection] = useState({ root_cause: '', fix: '' });
             const [submitting, setSubmitting] = useState(false);
+            
+            // Reset state when result changes (new analysis)
+            const resultKey = result?.build_info?.job_name + '-' + result?.build_info?.build_number;
+            React.useEffect(() => {
+                setFeedbackState('pending');
+                setShowCorrection(false);
+                setCorrection({ root_cause: '', fix: '' });
+                setSubmitting(false);
+            }, [resultKey]);
             
             if (!result) return null;
             
@@ -1083,6 +1145,16 @@
                                     </h4>
                                     <ExpandableRootCause summary={root_cause?.summary} />
                                 </div>
+                                
+                                {/* Fix Suggestion - Show if available */}
+                                {root_cause?.fix && (
+                                    <div className="p-4 bg-green-500/10 border border-green-500/30 rounded-lg">
+                                        <h4 className="font-semibold text-green-300 mb-2 flex items-center gap-2">
+                                            <i className="fas fa-wrench"></i> Suggested Fix
+                                        </h4>
+                                        <ExpandableFix fix={root_cause.fix} />
+                                    </div>
+                                )}
                                 
                                 {/* Retry Assessment */}
                                 <RetryBadge assessment={retry_assessment} />

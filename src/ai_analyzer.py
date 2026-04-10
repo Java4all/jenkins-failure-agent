@@ -84,6 +84,7 @@ class RootCause:
     confidence: float
     category: str
     tier: str = ""  # 3-tier classification
+    fix: str = ""  # Suggested fix action
     related_commits: List[str] = field(default_factory=list)
     affected_files: List[str] = field(default_factory=list)
     similar_issues: List[Dict[str, Any]] = field(default_factory=list)
@@ -861,6 +862,7 @@ def result_to_dict(result: AnalysisResult) -> Dict[str, Any]:
             "confidence": result.root_cause.confidence,
             "category": result.root_cause.category,
             "tier": result.root_cause.tier,
+            "fix": result.root_cause.fix,
             "related_commits": result.root_cause.related_commits,
             "affected_files": result.root_cause.affected_files,
             "similar_issues": result.root_cause.similar_issues,
