@@ -47,6 +47,12 @@ help:
 	@echo "  make logs-bedrock             - Follow logs (Bedrock mode)"
 	@echo "  make shell                    - Shell into agent container"
 	@echo ""
+	@echo "Testing (runs in Docker, no local Python needed):"
+	@echo "  make test                     - Run all tests (70 tests)"
+	@echo "  make test-unit                - Run unit tests only (fast)"
+	@echo "  make test-integration         - Run integration tests"
+	@echo "  make test-verbose             - Run tests with full output"
+	@echo ""
 	@echo "AI Models (for local Ollama):"
 	@echo "  make pull-model MODEL=llama3:70b  - Pull a different model"
 	@echo "  make pull-model-deep              - Pull recommended model for deep analysis"
@@ -335,6 +341,42 @@ logs-all:
 
 build:
 	docker-compose build agent
+
+# =============================================================================
+# Testing (runs in Docker - no local Python needed)
+# =============================================================================
+
+# Run all tests
+test:
+	@echo "Running all tests in Docker..."
+	docker run --rm -v $(PWD):/app -w /app python:3.12-slim sh -c \
+		"pip install -q pytest pyyaml beautifulsoup4 && pytest tests/ -v"
+
+# Run unit tests only (fast)
+test-unit:
+	@echo "Running unit tests in Docker..."
+	docker run --rm -v $(PWD):/app -w /app python:3.12-slim sh -c \
+		"pip install -q pytest pyyaml beautifulsoup4 && pytest tests/ -v -m 'unit'"
+
+# Run integration tests
+test-integration:
+	@echo "Running integration tests in Docker..."
+	docker run --rm -v $(PWD):/app -w /app python:3.12-slim sh -c \
+		"pip install -q pytest pyyaml beautifulsoup4 && pytest tests/ -v -m 'integration'"
+
+# Run tests with full output
+test-verbose:
+	@echo "Running tests with full output..."
+	docker run --rm -v $(PWD):/app -w /app python:3.12-slim sh -c \
+		"pip install -q pytest pyyaml beautifulsoup4 && pytest tests/ -v --tb=long"
+
+# Run specific test file
+test-file:
+ifndef FILE
+	$(error FILE is required. Usage: make test-file FILE=test_knowledge_store.py)
+endif
+	docker run --rm -v $(PWD):/app -w /app python:3.12-slim sh -c \
+		"pip install -q pytest pyyaml beautifulsoup4 && pytest tests/$(FILE) -v"
 
 # =============================================================================
 # Analysis Commands

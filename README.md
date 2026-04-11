@@ -242,18 +242,30 @@ jenkins-failure-agent/
 
 ## Testing
 
-```bash
-# Install test dependencies
-pip install pytest pyyaml
+Run tests in Docker (no local Python required):
 
+```bash
 # Run all tests (70 tests)
-pytest tests/ -v
+make test
 
 # Run unit tests only (fast)
-pytest tests/ -m "unit" -v
+make test-unit
 
 # Run integration tests
-pytest tests/ -m "integration" -v
+make test-integration
+
+# Run specific test file
+make test-file FILE=test_knowledge_store.py
+
+# Run with full output
+make test-verbose
+```
+
+Or with local Python:
+
+```bash
+pip install pytest pyyaml beautifulsoup4
+pytest tests/ -v
 ```
 
 ## Documentation

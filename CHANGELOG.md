@@ -94,18 +94,19 @@ GET    /training/stats               — Pipeline statistics
 
 ### Running Tests
 
+Run in Docker (no local Python needed):
+
 ```bash
-# Install dependencies
-pip install pytest pyyaml
+make test              # All tests
+make test-unit         # Unit tests (fast)
+make test-integration  # Integration tests
+```
 
-# Run all tests
+Or with local Python:
+
+```bash
+pip install pytest pyyaml beautifulsoup4
 pytest tests/ -v
-
-# Unit tests only (fast)
-pytest tests/ -m "unit" -v
-
-# Integration tests
-pytest tests/ -m "integration" -v
 ```
 
 ### Upgrade from v1.x
