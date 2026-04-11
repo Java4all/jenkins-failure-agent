@@ -1757,21 +1757,36 @@
                             
                             {importResult && (
                                 <div className={`mt-3 p-3 rounded-lg ${
-                                    importResult.success ? 'bg-green-500/20 text-green-300' : 'bg-red-500/20 text-red-300'
+                                    importResult.success 
+                                        ? (importResult.data.tool_saved ? 'bg-green-500/20 text-green-300' : 'bg-yellow-500/20 text-yellow-300')
+                                        : 'bg-red-500/20 text-red-300'
                                 }`}>
                                     {importResult.success ? (
                                         <div>
                                             <div className="flex items-center">
-                                                <i className="fas fa-check-circle mr-2"></i>
-                                                <span className="font-medium">Imported: {importResult.data.doc?.title || 'Document'}</span>
+                                                <i className={`fas ${importResult.data.tool_saved ? 'fa-check-circle' : 'fa-exclamation-circle'} mr-2`}></i>
+                                                <span className="font-medium">
+                                                    {importResult.data.doc_saved ? 'Doc saved: ' : 'Imported: '}
+                                                    {importResult.data.doc?.title || 'Document'}
+                                                </span>
                                             </div>
-                                            {importResult.data.tool_saved && (
+                                            {importResult.data.tool_saved ? (
                                                 <div className="text-sm mt-1">
                                                     <i className="fas fa-cube mr-1"></i>
-                                                    Tool "{importResult.data.tool?.name}" 
+                                                    Tool "<span className="font-medium">{importResult.data.tool?.name}</span>" 
                                                     {importResult.data.tool_merged ? ' (merged with existing)' : ' (created new)'}
+                                                    {importResult.data.tool_name_source && (
+                                                        <span className="text-gray-400 ml-1">
+                                                            - name {importResult.data.tool_name_source.replace(/_/g, ' ')}
+                                                        </span>
+                                                    )}
                                                 </div>
-                                            )}
+                                            ) : importResult.data.tool_name_required ? (
+                                                <div className="text-sm mt-1">
+                                                    <i className="fas fa-info-circle mr-1"></i>
+                                                    <span className="text-yellow-200">No tool created - enter a Tool Name above and re-import to create a tool</span>
+                                                </div>
+                                            ) : null}
                                             {importResult.data.extracted && (
                                                 <div className="text-sm mt-1 text-gray-400">
                                                     {importResult.data.extracted.commands?.length || 0} commands, 

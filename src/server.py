@@ -1378,9 +1378,24 @@ def create_app(config: Config) -> FastAPI:
                     "confidence": round(info.confidence, 2),
                 }
                 
+                # Try to determine tool name if not provided
+                effective_tool_name = tool_name
+                if not effective_tool_name:
+                    # Try to extract from first command
+                    if info.commands and info.commands[0].get("name"):
+                        effective_tool_name = info.commands[0]["name"]
+                        response["tool_name_source"] = "auto_detected_from_commands"
+                    # Or from document title (first word if it looks like a tool name)
+                    elif doc.title:
+                        first_word = doc.title.split()[0].lower() if doc.title.split() else ""
+                        # Only use if it looks like a tool name (lowercase, no spaces, reasonable length)
+                        if first_word and len(first_word) <= 20 and first_word.replace("-", "").replace("_", "").isalnum():
+                            effective_tool_name = first_word
+                            response["tool_name_source"] = "auto_detected_from_title"
+                
                 # Generate and optionally save tool definition
-                if tool_name:
-                    tool = importer.to_tool_definition(info, tool_name, url)
+                if effective_tool_name:
+                    tool = importer.to_tool_definition(info, effective_tool_name, url)
                     
                     if save_tool:
                         # Use add_or_merge to handle existing tools
@@ -1393,6 +1408,11 @@ def create_app(config: Config) -> FastAPI:
                     else:
                         response["tool"] = tool.to_dict()
                         response["tool_saved"] = False
+                else:
+                    # No tool name - doc saved but no tool created
+                    response["tool_saved"] = False
+                    response["tool_name_required"] = True
+                    response["hint"] = "Provide a tool_name to create a tool from this documentation"
             
             # Save doc if requested
             if save_doc:

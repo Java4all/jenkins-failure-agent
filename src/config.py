@@ -14,7 +14,7 @@ class JenkinsConfig:
     url: str
     username: str
     api_token: str
-    verify_ssl: bool = True
+    verify_ssl: bool = False
     timeout: int = 30
     monitored_jobs: List[str] = field(default_factory=list)
 
@@ -62,7 +62,7 @@ class GitHubConfig:
     # Request timeout in seconds
     timeout: int = 30
     # SSL verification (set False for self-signed certs)
-    verify_ssl: bool = True
+    verify_ssl: bool = False
     # Cache settings
     cache_enabled: bool = True
     cache_ttl_seconds: int = 300
@@ -99,7 +99,7 @@ class SCMConfig:
     provider: str = "github"  # github or gitlab
     api_url: str = "https://api.github.com"  # or https://gitlab.com/api/v4
     token: str = ""
-    verify_ssl: bool = True
+    verify_ssl: bool = False
     # Auto-post analysis to PRs
     auto_comment: bool = True
     # Update existing comment instead of creating new
