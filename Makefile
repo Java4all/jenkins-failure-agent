@@ -12,7 +12,12 @@ COMPOSE_FILE ?= docker-compose.yml
 
 # Backup settings
 BACKUP_DIR ?= ./backups
-TIMESTAMP := $(shell date +%Y%m%d-%H%M%S)
+# Cross-platform timestamp (works on Windows, Mac, Linux)
+ifeq ($(OS),Windows_NT)
+    TIMESTAMP := $(shell powershell -Command "Get-Date -Format 'yyyyMMdd-HHmmss'")
+else
+    TIMESTAMP := $(shell date +%Y%m%d-%H%M%S)
+endif
 
 # Default target
 help:
@@ -780,8 +785,10 @@ docker-login:
 # One-time setup for multi-arch builds
 docker-setup-buildx:
 	@echo "Setting up Docker Buildx for multi-architecture builds..."
-	docker buildx create --name multiarch --driver docker-container --use 2>/dev/null || docker buildx use multiarch
-	docker buildx inspect --bootstrap
+	@docker buildx create --name multiarch --driver docker-container --use 2>/dev/null || \
+		docker buildx use multiarch 2>/dev/null || \
+		echo "Using default builder"
+	@docker buildx inspect --bootstrap || true
 	@echo ""
 	@echo "[OK] Buildx ready for platforms: $(PLATFORMS)"
 
@@ -793,12 +800,12 @@ docker-build:
 	docker buildx build \
 		--platform $(PLATFORMS) \
 		-t $(DOCKER_REPO):$(DOCKER_TAG) \
-		-t $(DOCKER_REPO):v1.9.0 \
+		-t $(DOCKER_REPO):v2.0.0 \
 		--push \
 		.
 	@echo ""
 	@echo "[OK] Built and pushed $(DOCKER_REPO):$(DOCKER_TAG)"
-	@echo "[OK] Built and pushed $(DOCKER_REPO):v1.9.0"
+	@echo "[OK] Built and pushed $(DOCKER_REPO):v2.0.0"
 	@echo "[OK] Platforms: $(PLATFORMS)"
 
 # Build for single platform (local testing, no push)
@@ -834,7 +841,7 @@ docker-release-all: docker-setup-buildx
 	docker buildx build \
 		--platform $(PLATFORMS) \
 		-t $(DOCKER_REPO):$(DOCKER_TAG) \
-		-t $(DOCKER_REPO):v1.9.0 \
+		-t $(DOCKER_REPO):v2.0.0 \
 		--push \
 		.
 	@echo ""
@@ -842,7 +849,7 @@ docker-release-all: docker-setup-buildx
 	docker buildx build \
 		--platform $(PLATFORMS) \
 		-t $(DOCKER_REPO)-ui:$(DOCKER_TAG) \
-		-t $(DOCKER_REPO)-ui:v1.9.0 \
+		-t $(DOCKER_REPO)-ui:v2.0.0 \
 		-f ui/Dockerfile.ui \
 		--push \
 		.
