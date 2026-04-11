@@ -1473,6 +1473,27 @@ def create_app(config: Config) -> FastAPI:
             "total": len(docs),
         }
     
+    @app.delete("/knowledge/docs/{doc_id}")
+    async def delete_knowledge_doc(
+        doc_id: int,
+        api_key: str = Depends(verify_api_key)
+    ):
+        """
+        Delete an imported document.
+        
+        Args:
+            doc_id: Document ID to delete
+        """
+        from .knowledge_store import get_knowledge_store
+        
+        store = get_knowledge_store()
+        success = store.delete_doc(doc_id)
+        
+        if not success:
+            raise HTTPException(status_code=404, detail=f"Document {doc_id} not found")
+        
+        return {"status": "deleted", "id": doc_id}
+    
     # =========================================================================
     # Training Pipeline API
     # =========================================================================

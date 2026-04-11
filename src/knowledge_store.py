@@ -1019,6 +1019,29 @@ class KnowledgeStore:
             
             return [KnowledgeDoc.from_row(row) for row in cursor.fetchall()]
     
+    def delete_doc(self, doc_id: int) -> bool:
+        """
+        Delete a document from the knowledge store.
+        
+        Args:
+            doc_id: ID of document to delete
+            
+        Returns:
+            True if deleted, False if not found
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "DELETE FROM knowledge_docs WHERE id = ?", 
+                (doc_id,)
+            )
+            conn.commit()
+            
+            deleted = cursor.rowcount > 0
+            if deleted:
+                logger.info(f"Deleted document id={doc_id}")
+            
+            return deleted
+    
     # =========================================================================
     # Source Analysis Log
     # =========================================================================

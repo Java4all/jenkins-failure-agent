@@ -18,6 +18,36 @@ This is a major release milestone that completes the AI Learning System with ful
 | **Test Suite** | 70 automated tests with pytest |
 | **Backup/Restore** | Full migration support between environments |
 
+### Knowledge UI Features
+
+| Tab | Features |
+|-----|----------|
+| **Tools** | View, edit, delete tools with command patterns and errors |
+| **Docs** | View imported docs, create tool from doc, delete orphan docs |
+| **Import** | Import from URL with tool name, auto-detection, merge support |
+
+### Import Improvements
+
+- **Auto-save**: Docs and tools saved by default
+- **Tool name auto-detection**: Extracts from first command or doc title
+- **Merge on import**: Re-importing same tool merges patterns (no duplicates)
+- **Command normalization**: `a2l deploy --cluster prod` → `a2l deploy`
+- **Clear feedback**: Green = tool created, Yellow = doc only (need tool name)
+
+### SSL Configuration
+
+SSL verification disabled by default. Single source of truth in `config.py`:
+
+```bash
+# Global setting (in .env)
+VERIFY_SSL=true  # Enable SSL verification
+
+# Per-service overrides
+JENKINS_VERIFY_SSL=false
+GITHUB_VERIFY_SSL=false
+SCM_VERIFY_SSL=false
+```
+
 ### Backup & Restore
 
 Easily migrate between environments (dev → prod, laptop → server):

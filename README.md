@@ -129,12 +129,26 @@ The AI Learning System enables continuous improvement through knowledge manageme
 | Tab | Purpose |
 |-----|---------|
 | **Analysis** | Analyze build failures, view results, provide feedback |
-| **Knowledge** | Manage tools, import docs, view error patterns |
+| **Knowledge** | Manage tools & docs, import from URLs, edit/delete |
 | **Training** | Create training jobs, export data for fine-tuning |
 
 ### Knowledge Store
 
-Store and manage tool definitions with error patterns:
+The Knowledge tab has three sub-tabs:
+
+| Sub-Tab | Features |
+|---------|----------|
+| **Tools** | View, edit, delete tools with command patterns and errors |
+| **Docs** | View imported docs, create tool from doc, delete orphan docs |
+| **Import** | Import from URL with tool name, auto-detection, merge support |
+
+**Import behavior:**
+- With tool name: Creates/merges tool with extracted patterns
+- Without tool name: Saves doc only (yellow warning shown)
+- Auto-detection: Tries to extract tool name from commands or doc title
+- Merge: Re-importing same tool merges patterns (no duplicates)
+
+**API Examples:**
 
 ```bash
 # List all tools
@@ -145,9 +159,16 @@ curl -X POST http://localhost:8080/knowledge/tools \
   -H "Content-Type: application/json" \
   -d '{"name": "a2l", "category": "deployment", "errors": [...]}'
 
-# Import from documentation URL
+# Import from documentation URL (with tool name)
 curl -X POST http://localhost:8080/knowledge/import-doc \
-  -d '{"url": "https://wiki.example.com/a2l-cli"}'
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://wiki.example.com/a2l-cli", "tool_name": "a2l"}'
+
+# List all imported docs
+curl http://localhost:8080/knowledge/docs
+
+# Delete a document
+curl -X DELETE http://localhost:8080/knowledge/docs/1
 
 # Identify tool from log text
 curl "http://localhost:8080/knowledge/identify?query=a2l%20deploy%20--cluster"

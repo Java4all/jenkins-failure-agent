@@ -1445,16 +1445,20 @@
         
         function KnowledgePanel() {
             const [tools, setTools] = useState([]);
+            const [docs, setDocs] = useState([]);
             const [stats, setStats] = useState(null);
             const [loading, setLoading] = useState(true);
             const [activeTab, setActiveTab] = useState('tools');
             const [selectedTool, setSelectedTool] = useState(null);
+            const [selectedDoc, setSelectedDoc] = useState(null);
             const [importUrl, setImportUrl] = useState('');
             const [importToolName, setImportToolName] = useState('');
             const [importLoading, setImportLoading] = useState(false);
             const [importResult, setImportResult] = useState(null);
             const [editingTool, setEditingTool] = useState(null);
             const [editForm, setEditForm] = useState({});
+            const [createToolFromDoc, setCreateToolFromDoc] = useState(null);
+            const [newToolName, setNewToolName] = useState('');
             
             useEffect(() => {
                 loadData();
@@ -1463,9 +1467,10 @@
             const loadData = async () => {
                 setLoading(true);
                 try {
-                    const [toolsRes, statsRes] = await Promise.all([
+                    const [toolsRes, statsRes, docsRes] = await Promise.all([
                         fetch(`${API_BASE}/knowledge/tools`),
-                        fetch(`${API_BASE}/knowledge/stats`)
+                        fetch(`${API_BASE}/knowledge/stats`),
+                        fetch(`${API_BASE}/knowledge/docs`)
                     ]);
                     
                     if (toolsRes.ok) {
@@ -1475,10 +1480,62 @@
                     if (statsRes.ok) {
                         setStats(await statsRes.json());
                     }
+                    if (docsRes.ok) {
+                        const data = await docsRes.json();
+                        setDocs(data.docs || []);
+                    }
                 } catch (e) {
                     console.error('Failed to load knowledge data:', e);
                 } finally {
                     setLoading(false);
+                }
+            };
+            
+            const handleDeleteDoc = async (docId) => {
+                if (!confirm('Delete this document?')) return;
+                
+                try {
+                    const res = await fetch(`${API_BASE}/knowledge/docs/${docId}`, {
+                        method: 'DELETE'
+                    });
+                    
+                    if (res.ok) {
+                        setSelectedDoc(null);
+                        loadData();
+                    }
+                } catch (e) {
+                    console.error('Delete doc failed:', e);
+                }
+            };
+            
+            const handleCreateToolFromDoc = async () => {
+                if (!createToolFromDoc || !newToolName.trim()) return;
+                
+                try {
+                    // Re-import the doc URL with a tool name to create the tool
+                    const res = await fetch(`${API_BASE}/knowledge/import-doc`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ 
+                            url: createToolFromDoc.source_url,
+                            tool_name: newToolName.trim(),
+                            save: false,  // Don't duplicate the doc
+                            save_tool: true
+                        })
+                    });
+                    
+                    if (res.ok) {
+                        setCreateToolFromDoc(null);
+                        setNewToolName('');
+                        loadData();
+                        setActiveTab('tools');
+                    } else {
+                        const data = await res.json();
+                        alert('Failed to create tool: ' + (data.detail || 'Unknown error'));
+                    }
+                } catch (e) {
+                    console.error('Create tool failed:', e);
+                    alert('Failed to create tool: ' + e.message);
                 }
             };
             
@@ -1616,7 +1673,7 @@
                     
                     {/* Tabs */}
                     <div className="flex gap-2 border-b border-gray-700 pb-2">
-                        {['tools', 'import'].map(tab => (
+                        {['tools', 'docs', 'import'].map(tab => (
                             <button
                                 key={tab}
                                 onClick={() => setActiveTab(tab)}
@@ -1626,7 +1683,8 @@
                                         : 'text-gray-400 hover:text-white'
                                 }`}
                             >
-                                {tab === 'tools' && <><i className="fas fa-tools mr-2"></i>Tools</>}
+                                {tab === 'tools' && <><i className="fas fa-tools mr-2"></i>Tools ({tools.length})</>}
+                                {tab === 'docs' && <><i className="fas fa-file-alt mr-2"></i>Docs ({docs.length})</>}
                                 {tab === 'import' && <><i className="fas fa-file-import mr-2"></i>Import</>}
                             </button>
                         ))}
@@ -1714,6 +1772,147 @@
                                 </div>
                             )}
                         </Card>
+                    )}
+                    
+                    {/* Docs Tab */}
+                    {activeTab === 'docs' && (
+                        <Card className="p-4">
+                            {docs.length === 0 ? (
+                                <div className="text-center py-8 text-gray-500">
+                                    <i className="fas fa-file-alt text-4xl mb-3"></i>
+                                    <p>No documents imported yet.</p>
+                                    <p className="text-sm mt-2">Use the Import tab to add documentation.</p>
+                                </div>
+                            ) : (
+                                <div className="space-y-2">
+                                    {docs.map(doc => (
+                                        <div
+                                            key={doc.id}
+                                            onClick={() => setSelectedDoc(selectedDoc?.id === doc.id ? null : doc)}
+                                            className={`p-3 rounded-lg cursor-pointer transition-colors ${
+                                                selectedDoc?.id === doc.id
+                                                    ? 'bg-purple-500/20 border border-purple-500/50'
+                                                    : 'bg-gray-700/50 hover:bg-gray-700'
+                                            }`}
+                                        >
+                                            <div className="flex items-center justify-between">
+                                                <div className="flex items-center gap-3">
+                                                    <i className="fas fa-file-alt text-purple-400"></i>
+                                                    <div>
+                                                        <span className="font-medium">{doc.title || 'Untitled'}</span>
+                                                        <span className="text-xs text-gray-500 ml-2">
+                                                            ({doc.content_type || 'unknown'})
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                                <div className="flex items-center gap-2">
+                                                    {doc.tool_id ? (
+                                                        <span className="text-xs px-2 py-1 rounded bg-green-500/20 text-green-400">
+                                                            <i className="fas fa-link mr-1"></i>Linked to tool
+                                                        </span>
+                                                    ) : (
+                                                        <span className="text-xs px-2 py-1 rounded bg-yellow-500/20 text-yellow-400">
+                                                            No tool
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            </div>
+                                            
+                                            {selectedDoc?.id === doc.id && (
+                                                <div className="mt-3 pt-3 border-t border-gray-600 text-sm">
+                                                    {doc.source_url && (
+                                                        <div className="mb-2">
+                                                            <span className="text-gray-500">Source: </span>
+                                                            <a href={doc.source_url} target="_blank" rel="noopener noreferrer" 
+                                                               className="text-indigo-400 hover:underline break-all">
+                                                                {doc.source_url}
+                                                            </a>
+                                                        </div>
+                                                    )}
+                                                    
+                                                    {doc.created_at && (
+                                                        <div className="mb-2 text-gray-500">
+                                                            Imported: {new Date(doc.created_at).toLocaleString()}
+                                                        </div>
+                                                    )}
+                                                    
+                                                    <div className="flex gap-2 mt-3">
+                                                        {!doc.tool_id && (
+                                                            <button
+                                                                onClick={(e) => { 
+                                                                    e.stopPropagation(); 
+                                                                    setCreateToolFromDoc(doc);
+                                                                    setNewToolName('');
+                                                                }}
+                                                                className="text-xs px-3 py-1 rounded bg-green-500/20 text-green-400 hover:bg-green-500/30"
+                                                            >
+                                                                <i className="fas fa-cube mr-1"></i> Create Tool
+                                                            </button>
+                                                        )}
+                                                        <button
+                                                            onClick={(e) => { e.stopPropagation(); handleDeleteDoc(doc.id); }}
+                                                            className="text-xs px-3 py-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30"
+                                                        >
+                                                            <i className="fas fa-trash mr-1"></i> Delete
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </Card>
+                    )}
+                    
+                    {/* Create Tool from Doc Modal */}
+                    {createToolFromDoc && (
+                        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setCreateToolFromDoc(null)}>
+                            <div className="bg-gray-800 rounded-lg p-6 w-full max-w-md" onClick={e => e.stopPropagation()}>
+                                <div className="flex justify-between items-center mb-4">
+                                    <h3 className="text-lg font-bold">Create Tool from Document</h3>
+                                    <button onClick={() => setCreateToolFromDoc(null)} className="text-gray-400 hover:text-white">
+                                        <i className="fas fa-times"></i>
+                                    </button>
+                                </div>
+                                
+                                <div className="mb-4">
+                                    <p className="text-sm text-gray-400 mb-2">Document: <span className="text-white">{createToolFromDoc.title}</span></p>
+                                    <p className="text-xs text-gray-500 break-all">{createToolFromDoc.source_url}</p>
+                                </div>
+                                
+                                <div className="mb-4">
+                                    <label className="text-xs text-gray-400 block mb-1">Tool Name *</label>
+                                    <input
+                                        type="text"
+                                        value={newToolName}
+                                        onChange={(e) => setNewToolName(e.target.value)}
+                                        placeholder="e.g., kubectl, my-cli"
+                                        className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-sm"
+                                        autoFocus
+                                    />
+                                    <p className="text-xs text-gray-500 mt-1">
+                                        The document will be re-parsed to extract commands and errors for this tool.
+                                    </p>
+                                </div>
+                                
+                                <div className="flex gap-3">
+                                    <button
+                                        onClick={handleCreateToolFromDoc}
+                                        disabled={!newToolName.trim()}
+                                        className="flex-1 px-4 py-2 bg-green-500 hover:bg-green-600 disabled:bg-gray-600 rounded-lg text-sm font-medium"
+                                    >
+                                        <i className="fas fa-cube mr-2"></i>Create Tool
+                                    </button>
+                                    <button
+                                        onClick={() => setCreateToolFromDoc(null)}
+                                        className="px-4 py-2 bg-gray-600 hover:bg-gray-500 rounded-lg text-sm"
+                                    >
+                                        Cancel
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
                     )}
                     
                     {/* Import Tab */}
