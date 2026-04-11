@@ -14,7 +14,7 @@ Supports multiple AI providers:
 - AWS Bedrock: Claude, Titan, Llama, Mistral
 """
 
-__version__ = "1.9.29"
+__version__ = "2.0.0"
 
 from .config import (
     Config, JenkinsConfig, AIConfig, GitConfig, GitHubConfig,
@@ -44,6 +44,21 @@ from .rc_finder import RootCauseFinder, RootCauseContext, ErrorType, find_root_c
 from .rc_analyzer import RCAnalyzer, RCAnalysisResult, IterationResult
 from .iterative_analyzer import IterativeRCAnalyzer, InvestigationResult, InvestigationAction
 from .feedback_store import FeedbackStore, FeedbackEntry, get_feedback_store
+from .knowledge_store import (
+    KnowledgeStore, ToolDefinition, ToolError, ToolArgument,
+    KnowledgeDoc, SourceAnalysisLog, get_knowledge_store
+)
+from .java_analyzer import (
+    JavaSourceAnalyzer, AnalysisResult as JavaAnalysisResult,
+    ExtractedCommand, ExtractedError, analyze_java_source
+)
+from .doc_importer import (
+    DocImporter, ExtractedDocInfo, import_documentation
+)
+from .training_pipeline import (
+    TrainingPipeline, TrainingExample, TrainingJob,
+    TrainingFormat, TrainingJobStatus, get_training_pipeline
+)
 
 __all__ = [
     # Config
@@ -78,6 +93,17 @@ __all__ = [
     "IterativeRCAnalyzer", "InvestigationResult", "InvestigationAction",
     # Feedback Store (Requirement 15)
     "FeedbackStore", "FeedbackEntry", "get_feedback_store",
+    # Knowledge Store (AI Learning System)
+    "KnowledgeStore", "ToolDefinition", "ToolError", "ToolArgument",
+    "KnowledgeDoc", "SourceAnalysisLog", "get_knowledge_store",
+    # Java Source Analyzer (Phase 2A)
+    "JavaSourceAnalyzer", "JavaAnalysisResult", "ExtractedCommand",
+    "ExtractedError", "analyze_java_source",
+    # Doc Importer (Phase 2C)
+    "DocImporter", "ExtractedDocInfo", "import_documentation",
+    # Training Pipeline (Phase 4)
+    "TrainingPipeline", "TrainingExample", "TrainingJob",
+    "TrainingFormat", "TrainingJobStatus", "get_training_pipeline",
     # Reports
     "ReportGenerator", "format_slack_message",
     # SCM (GitHub/GitLab)

@@ -348,12 +348,43 @@ docker cp jenkins-failure-agent:/app/reports ./local-reports/
 
 ## 10. API Reference
 
+### Core Endpoints
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/health` | GET | Health check |
 | `/analyze` | POST | Analyze a build |
 | `/results/{job}/{build}` | GET | Get cached result |
 | `/webhook/jenkins` | POST | Jenkins notification webhook |
+| `/feedback` | POST | Submit feedback |
+| `/feedback/stats` | GET | Feedback statistics |
+| `/feedback/export` | GET | Export feedback data |
+
+### Knowledge Store Endpoints (v2.0)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/knowledge/tools` | GET | List all tools |
+| `/knowledge/tools/{id}` | GET | Get tool details |
+| `/knowledge/tools` | POST | Add new tool |
+| `/knowledge/tools/{id}` | DELETE | Delete tool |
+| `/knowledge/identify` | GET | Identify tool from log query |
+| `/knowledge/match-error` | GET | Match error pattern |
+| `/knowledge/stats` | GET | Knowledge store statistics |
+| `/knowledge/import-doc` | POST | Import from documentation URL |
+| `/knowledge/analyze-source` | POST | Analyze Java source code |
+
+### Training Pipeline Endpoints (v2.0)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/training/jobs` | GET | List training jobs |
+| `/training/jobs` | POST | Create training job |
+| `/training/jobs/{id}` | GET | Get job details |
+| `/training/jobs/{id}/prepare` | POST | Prepare job data |
+| `/training/jobs/{id}/export` | POST | Export to file |
+| `/training/jobs/{id}/download` | GET | Download exported file |
+| `/training/stats` | GET | Pipeline statistics |
 
 ### POST /analyze
 
@@ -393,9 +424,48 @@ docker cp jenkins-failure-agent:/app/reports ./local-reports/
 }
 ```
 
+### POST /knowledge/tools
+
+```json
+{
+  "name": "a2l",
+  "category": "deployment",
+  "description": "A2L deployment tool",
+  "aliases": ["a2l-cli"],
+  "patterns_commands": ["a2l deploy", "a2l rollback"],
+  "patterns_log_signatures": ["A2L_"],
+  "errors": [
+    {
+      "code": "A2L_AUTH_FAILED",
+      "pattern": "A2L_AUTH_FAILED|token expired",
+      "category": "CREDENTIAL",
+      "fix": "Run 'a2l auth refresh'"
+    }
+  ]
+}
+```
+
+### POST /training/jobs
+
+```json
+{
+  "name": "finetune-v1",
+  "description": "First fine-tuning attempt",
+  "format": "jsonl_openai",
+  "include_feedback": true,
+  "include_knowledge": true,
+  "min_confidence": 0.7
+}
+```
+
+**Supported formats:** `jsonl_openai`, `jsonl_anthropic`, `csv`, `json`
+
 ## Next Steps
 
 1. Configure Slack notifications in `.env`
 2. Set up Jenkins webhooks for automatic analysis
 3. Try different AI models for your use case
-4. Check `examples/JENKINS_INTEGRATION.md` for more integration patterns
+4. Add custom tools to the Knowledge Store
+5. Export training data for fine-tuning
+6. Check `examples/JENKINS_INTEGRATION.md` for more integration patterns
+

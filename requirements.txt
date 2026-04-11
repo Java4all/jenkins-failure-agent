@@ -10,6 +10,9 @@ python-jenkins>=1.8.0
 # Git integration
 gitpython>=3.1.40
 
+# HTML parsing (for doc import)
+beautifulsoup4>=4.12.0
+
 # AI client (OpenAI-compatible)
 openai>=1.12.0
 

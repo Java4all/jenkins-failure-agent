@@ -1,6 +1,6 @@
 # Jenkins Failure Analysis AI Agent
 
-AI-powered debugging assistant that analyzes Jenkins build failures, identifies root causes, and suggests fixes. Features **continuous learning from user feedback**.
+AI-powered debugging assistant that analyzes Jenkins build failures, identifies root causes, and suggests fixes. Features **continuous learning from user feedback** and a complete **AI Learning System** for knowledge management and fine-tuning.
 
 ## What It Does
 
@@ -10,6 +10,7 @@ AI-powered debugging assistant that analyzes Jenkins build failures, identifies 
 • Console log              • 200+ tool patterns     • Root cause
 • Test results             • Known failure patterns • Confidence %  
 • Source code              • Few-shot learning      • Fix suggestion
+                           • Knowledge Store        • Training data
 ```
 
 ## Quick Start
@@ -64,29 +65,29 @@ Supports all AWS authentication methods: profiles, SSO, IAM roles, environment v
 ## System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         JENKINS FAILURE AGENT                            │
-│                                                                          │
-│  ┌──────────┐   ┌──────────┐   ┌──────────────────┐   ┌──────────┐     │
-│  │ Jenkins  │   │  GitHub  │   │   AI Provider    │   │  SQLite  │     │
-│  │  Server  │   │   API    │   │ ┌──────────────┐ │   │(Feedback)│     │
-│  │          │   │          │   │ │Ollama/Bedrock│ │   │          │     │
-│  │          │   │          │   │ │OpenAI/vLLM   │ │   │          │     │
-│  └────┬─────┘   └────┬─────┘   │ └──────────────┘ │   └────┬─────┘     │
-│       └──────────────┴─────────┴────────┬─────────┴────────┘           │
-│                                         │                               │
-│                                         ▼                               │
-│  ┌───────────────────────────────────────────────────────────────────┐  │
-│  │                      HYBRID ANALYZER                               │  │
-│  │  Log Parser → RC Finder → RC Analyzer → Result                    │  │
-│  │  (200+ tools)  (context)   (AI + patterns)                        │  │
-│  └───────────────────────────────────────────────────────────────────┘  │
-│                                         │                               │
-│                                         ▼                               │
-│  ┌───────────────────────────────────────────────────────────────────┐  │
-│  │  WEB UI: Results │ 👍👎 Feedback │ Settings │ History              │  │
-│  └───────────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      JENKINS FAILURE AGENT v2.0                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐         │
+│  │   ANALYSIS UI   │    │  KNOWLEDGE UI   │    │  TRAINING UI    │         │
+│  │  Analyze builds │    │  Manage tools   │    │  Export data    │         │
+│  └────────┬────────┘    └────────┬────────┘    └────────┬────────┘         │
+│           └──────────────────────┴──────────────────────┘                   │
+│                                  │                                          │
+│  ┌───────────────────────────────┴───────────────────────────────┐         │
+│  │                         REST API                               │         │
+│  │  /analyze  /knowledge/*  /training/*  /feedback  /health      │         │
+│  └───────────────────────────────────────────────────────────────┘         │
+│                                  │                                          │
+│  ┌───────────┬───────────────────┼───────────────────┬───────────┐         │
+│  │ Jenkins   │   AI Provider     │   Knowledge Store │  Training │         │
+│  │ + GitHub  │   (Ollama/etc)    │   (SQLite)        │  Pipeline │         │
+│  └───────────┴───────────────────┴───────────────────┴───────────┘         │
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────┐         │
+│  │  feedback.db  │  knowledge.db  │  training.db  │  exports/    │         │
+│  └───────────────────────────────────────────────────────────────┘         │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Key Features
@@ -118,6 +119,68 @@ User votes 👍/👎 → SQLite stores feedback
   Few-Shot Learning                Fine-Tuning Export
   (Real-time, in-prompt)           (GET /feedback/export)
 ```
+
+## AI Learning System (v2.0)
+
+The AI Learning System enables continuous improvement through knowledge management and fine-tuning data generation.
+
+### Three UI Tabs
+
+| Tab | Purpose |
+|-----|---------|
+| **Analysis** | Analyze build failures, view results, provide feedback |
+| **Knowledge** | Manage tools, import docs, view error patterns |
+| **Training** | Create training jobs, export data for fine-tuning |
+
+### Knowledge Store
+
+Store and manage tool definitions with error patterns:
+
+```bash
+# List all tools
+curl http://localhost:8080/knowledge/tools
+
+# Add a tool (JSON)
+curl -X POST http://localhost:8080/knowledge/tools \
+  -H "Content-Type: application/json" \
+  -d '{"name": "a2l", "category": "deployment", "errors": [...]}'
+
+# Import from documentation URL
+curl -X POST http://localhost:8080/knowledge/import-doc \
+  -d '{"url": "https://wiki.example.com/a2l-cli"}'
+
+# Identify tool from log text
+curl "http://localhost:8080/knowledge/identify?query=a2l%20deploy%20--cluster"
+
+# Match error pattern
+curl "http://localhost:8080/knowledge/match-error?snippet=A2L_AUTH_FAILED"
+```
+
+### Training Pipeline
+
+Export training data for AI fine-tuning:
+
+```bash
+# Create training job
+curl -X POST http://localhost:8080/training/jobs \
+  -H "Content-Type: application/json" \
+  -d '{"name": "finetune-v1", "format": "jsonl_openai"}'
+
+# Prepare job (imports from feedback + knowledge)
+curl -X POST http://localhost:8080/training/jobs/1/prepare
+
+# Export to file
+curl -X POST http://localhost:8080/training/jobs/1/export
+
+# Download exported file
+curl http://localhost:8080/training/jobs/1/download -o training.jsonl
+```
+
+**Supported Formats:**
+- `jsonl_openai` — OpenAI fine-tuning format
+- `jsonl_anthropic` — Anthropic fine-tuning format  
+- `csv` — Spreadsheet analysis
+- `json` — Generic JSON export
 
 ## API Usage
 
@@ -155,14 +218,42 @@ jenkins-failure-agent/
 ├── Makefile                    # make start, make start-bedrock, etc.
 ├── QUICKSTART.md               # Detailed setup guide
 ├── CHANGELOG.md                # Version history
-├── ui/index.html               # Web dashboard
+├── pytest.ini                  # Test configuration
+├── ui/index.html               # Web dashboard (3 tabs)
+├── tests/                      # Test suite (70 tests)
+│   ├── conftest.py             # Shared fixtures
+│   ├── test_knowledge_store.py # Knowledge Store tests
+│   ├── test_java_analyzer.py   # Java Analyzer tests
+│   ├── test_doc_importer.py    # Doc Importer tests
+│   ├── test_training_pipeline.py # Training Pipeline tests
+│   └── test_integration.py     # Integration tests
 └── src/
     ├── server.py               # REST API
     ├── ai_provider.py          # Multi-provider AI abstraction
     ├── hybrid_analyzer.py      # Analysis orchestrator
     ├── rc_analyzer.py          # AI root cause (iterative)
     ├── log_parser.py           # Tool detection (200+)
-    └── feedback_store.py       # Learning system
+    ├── feedback_store.py       # Feedback learning system
+    ├── knowledge_store.py      # Tool/error knowledge (v2.0)
+    ├── java_analyzer.py        # Java CLI source analyzer (v2.0)
+    ├── doc_importer.py         # Documentation importer (v2.0)
+    └── training_pipeline.py    # Training data export (v2.0)
+```
+
+## Testing
+
+```bash
+# Install test dependencies
+pip install pytest pyyaml
+
+# Run all tests (70 tests)
+pytest tests/ -v
+
+# Run unit tests only (fast)
+pytest tests/ -m "unit" -v
+
+# Run integration tests
+pytest tests/ -m "integration" -v
 ```
 
 ## Documentation
@@ -172,7 +263,16 @@ jenkins-failure-agent/
 
 ## Version
 
-**Current: v1.9.29** | [View changelog](CHANGELOG.md)
+**Current: v2.0.0** | [View changelog](CHANGELOG.md)
+
+### What's New in v2.0
+
+- **Knowledge Store** — SQLite database for tool definitions and error patterns
+- **Doc Importer** — Import tool knowledge from documentation URLs
+- **Java Analyzer** — Extract CLI patterns from Java source (Spring Shell, Picocli)
+- **Training Pipeline** — Export training data for AI fine-tuning
+- **UI Tabs** — Analysis, Knowledge, and Training tabs
+- **Test Suite** — 70 automated tests
 
 ## License
 

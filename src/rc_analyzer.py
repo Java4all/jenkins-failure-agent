@@ -801,6 +801,26 @@ RULES:
                 final_category = matched_failure_pattern.get('category')
                 logger.info(f"Using pattern category: {final_category}")
         
+        # Knowledge store confidence boosting (Phase 3)
+        # If we matched a known error from internal tools, boost confidence
+        knowledge_matched_error = self._check_knowledge_store_errors(rc_context, parsed_log)
+        if knowledge_matched_error:
+            error_info, tool_info, match_confidence = knowledge_matched_error
+            if final_confidence < match_confidence:
+                logger.info(f"Boosting confidence from {final_confidence} to {match_confidence} "
+                           f"due to known error: {error_info.code} from tool {tool_info.name}")
+                final_confidence = match_confidence
+            
+            # Use error category if AI returned UNKNOWN
+            if final_category == 'UNKNOWN' and error_info.category:
+                final_category = error_info.category
+                logger.info(f"Using knowledge store category: {final_category}")
+            
+            # Use error fix if AI didn't provide one
+            if not best_result.fix and error_info.fix:
+                best_result.fix = error_info.fix
+                logger.info(f"Using knowledge store fix: {error_info.fix[:100]}...")
+        
         final_result = RCAnalysisResult(
             root_cause=best_result.root_cause,
             confidence=final_confidence,
@@ -1241,6 +1261,11 @@ RULES:
         if few_shot_context:
             parts.append("\n" + few_shot_context)
         
+        # Internal tools knowledge from knowledge store (Phase 3)
+        internal_tools_context = self._get_internal_tools_knowledge(rc_context, parsed_log)
+        if internal_tools_context:
+            parts.append("\n" + internal_tools_context)
+        
         # Signature mismatch context (Requirement 7.3) - add early for visibility
         if mismatch_context:
             parts.append("\n" + mismatch_context)
@@ -1362,6 +1387,105 @@ RULES:
         except Exception as e:
             logger.debug(f"Could not get few-shot examples: {e}")
             return ""
+    
+    def _get_internal_tools_knowledge(self, rc_context, parsed_log) -> str:
+        """
+        Get internal tools knowledge from knowledge store (Phase 3).
+        
+        Returns formatted prompt section or empty string if no matches.
+        """
+        try:
+            from .knowledge_store import get_knowledge_store
+            
+            store = get_knowledge_store()
+            
+            # Gather text to search for tool matches
+            search_texts = []
+            
+            # Add error line
+            if rc_context and hasattr(rc_context, 'error_line') and rc_context.error_line:
+                search_texts.append(rc_context.error_line)
+            
+            # Add surrounding lines
+            if rc_context and hasattr(rc_context, 'surrounding_lines') and rc_context.surrounding_lines:
+                search_texts.extend(rc_context.surrounding_lines[-10:])
+            
+            # Add tool invocations
+            if parsed_log and hasattr(parsed_log, 'tool_invocations'):
+                for tool in parsed_log.tool_invocations[-10:]:
+                    if hasattr(tool, 'command_line') and tool.command_line:
+                        search_texts.append(tool.command_line)
+                    if hasattr(tool, 'output_lines'):
+                        search_texts.extend(tool.output_lines[:5])
+            
+            # Add errors from parsed log
+            if parsed_log and hasattr(parsed_log, 'errors'):
+                for err in parsed_log.errors[:5]:
+                    if hasattr(err, 'line'):
+                        search_texts.append(err.line)
+            
+            if not search_texts:
+                return ""
+            
+            # Combine and search
+            combined_text = "\n".join(search_texts)
+            
+            # Get relevant knowledge
+            knowledge_context = store.get_relevant_knowledge_for_log(combined_text, limit=3)
+            
+            if knowledge_context:
+                logger.info(f"Found internal tools knowledge ({len(knowledge_context)} chars)")
+            
+            return knowledge_context
+            
+        except Exception as e:
+            logger.debug(f"Could not get internal tools knowledge: {e}")
+            return ""
+    
+    def _check_knowledge_store_errors(self, rc_context, parsed_log):
+        """
+        Check if any known errors from knowledge store match the current failure.
+        
+        Returns tuple of (ToolError, ToolDefinition, confidence) or None.
+        """
+        try:
+            from .knowledge_store import get_knowledge_store
+            
+            store = get_knowledge_store()
+            
+            # Gather error text
+            error_texts = []
+            
+            if rc_context:
+                if hasattr(rc_context, 'error_line') and rc_context.error_line:
+                    error_texts.append(rc_context.error_line)
+                if hasattr(rc_context, 'surrounding_lines') and rc_context.surrounding_lines:
+                    error_texts.extend(rc_context.surrounding_lines[-5:])
+            
+            if parsed_log and hasattr(parsed_log, 'tool_invocations'):
+                for tool in parsed_log.tool_invocations[-5:]:
+                    if hasattr(tool, 'output_lines'):
+                        error_texts.extend(tool.output_lines[:5])
+            
+            if not error_texts:
+                return None
+            
+            combined_text = "\n".join(error_texts)
+            
+            # Match against known errors
+            matches = store.match_error(combined_text)
+            
+            if matches:
+                # Return best match
+                error, tool, confidence = matches[0]
+                logger.info(f"Knowledge store matched error: {error.code} from {tool.name} (confidence={confidence})")
+                return (error, tool, confidence)
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"Could not check knowledge store errors: {e}")
+            return None
     
     def _build_followup_prompt(
         self,

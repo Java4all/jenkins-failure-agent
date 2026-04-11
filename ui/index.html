@@ -1440,6 +1440,571 @@
         }
 
         // =====================================================================
+        // Knowledge Management Panel
+        // =====================================================================
+        
+        function KnowledgePanel() {
+            const [tools, setTools] = useState([]);
+            const [stats, setStats] = useState(null);
+            const [loading, setLoading] = useState(true);
+            const [activeTab, setActiveTab] = useState('tools');
+            const [selectedTool, setSelectedTool] = useState(null);
+            const [importUrl, setImportUrl] = useState('');
+            const [importLoading, setImportLoading] = useState(false);
+            const [importResult, setImportResult] = useState(null);
+            
+            useEffect(() => {
+                loadData();
+            }, []);
+            
+            const loadData = async () => {
+                setLoading(true);
+                try {
+                    const [toolsRes, statsRes] = await Promise.all([
+                        fetch(`${API_BASE}/knowledge/tools`),
+                        fetch(`${API_BASE}/knowledge/stats`)
+                    ]);
+                    
+                    if (toolsRes.ok) {
+                        const data = await toolsRes.json();
+                        setTools(data.tools || []);
+                    }
+                    if (statsRes.ok) {
+                        setStats(await statsRes.json());
+                    }
+                } catch (e) {
+                    console.error('Failed to load knowledge data:', e);
+                } finally {
+                    setLoading(false);
+                }
+            };
+            
+            const handleImportDoc = async () => {
+                if (!importUrl) return;
+                
+                setImportLoading(true);
+                setImportResult(null);
+                
+                try {
+                    const res = await fetch(`${API_BASE}/knowledge/import-doc`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ url: importUrl, save: true })
+                    });
+                    
+                    const data = await res.json();
+                    
+                    if (res.ok) {
+                        setImportResult({ success: true, data });
+                        setImportUrl('');
+                        loadData();
+                    } else {
+                        setImportResult({ success: false, error: data.detail || 'Import failed' });
+                    }
+                } catch (e) {
+                    setImportResult({ success: false, error: e.message });
+                } finally {
+                    setImportLoading(false);
+                }
+            };
+            
+            const handleDeleteTool = async (toolId) => {
+                if (!confirm('Delete this tool?')) return;
+                
+                try {
+                    const res = await fetch(`${API_BASE}/knowledge/tools/${toolId}`, {
+                        method: 'DELETE'
+                    });
+                    
+                    if (res.ok) {
+                        setSelectedTool(null);
+                        loadData();
+                    }
+                } catch (e) {
+                    console.error('Delete failed:', e);
+                }
+            };
+            
+            if (loading) {
+                return (
+                    <Card className="p-8 text-center">
+                        <i className="fas fa-spinner fa-spin text-2xl text-indigo-400"></i>
+                        <p className="mt-2 text-gray-400">Loading knowledge base...</p>
+                    </Card>
+                );
+            }
+            
+            return (
+                <div className="space-y-4">
+                    {/* Stats Overview */}
+                    {stats && (
+                        <div className="grid grid-cols-4 gap-4">
+                            <Card className="p-4 text-center">
+                                <div className="text-2xl font-bold text-indigo-400">{stats.total_tools || 0}</div>
+                                <div className="text-xs text-gray-500">Tools</div>
+                            </Card>
+                            <Card className="p-4 text-center">
+                                <div className="text-2xl font-bold text-green-400">{stats.total_errors || 0}</div>
+                                <div className="text-xs text-gray-500">Error Patterns</div>
+                            </Card>
+                            <Card className="p-4 text-center">
+                                <div className="text-2xl font-bold text-purple-400">{stats.total_docs || 0}</div>
+                                <div className="text-xs text-gray-500">Docs</div>
+                            </Card>
+                            <Card className="p-4 text-center">
+                                <div className="text-2xl font-bold text-yellow-400">{stats.total_analyses || 0}</div>
+                                <div className="text-xs text-gray-500">Source Analyses</div>
+                            </Card>
+                        </div>
+                    )}
+                    
+                    {/* Tabs */}
+                    <div className="flex gap-2 border-b border-gray-700 pb-2">
+                        {['tools', 'import'].map(tab => (
+                            <button
+                                key={tab}
+                                onClick={() => setActiveTab(tab)}
+                                className={`px-4 py-2 rounded-t text-sm font-medium transition-colors ${
+                                    activeTab === tab 
+                                        ? 'bg-gray-700 text-white' 
+                                        : 'text-gray-400 hover:text-white'
+                                }`}
+                            >
+                                {tab === 'tools' && <><i className="fas fa-tools mr-2"></i>Tools</>}
+                                {tab === 'import' && <><i className="fas fa-file-import mr-2"></i>Import</>}
+                            </button>
+                        ))}
+                    </div>
+                    
+                    {/* Tools List */}
+                    {activeTab === 'tools' && (
+                        <Card className="p-4">
+                            {tools.length === 0 ? (
+                                <div className="text-center py-8 text-gray-500">
+                                    <i className="fas fa-database text-4xl mb-3"></i>
+                                    <p>No tools in knowledge base yet.</p>
+                                    <p className="text-sm mt-2">Import documentation or analyze source code to add tools.</p>
+                                </div>
+                            ) : (
+                                <div className="space-y-2">
+                                    {tools.map(tool => (
+                                        <div
+                                            key={tool.id}
+                                            onClick={() => setSelectedTool(selectedTool?.id === tool.id ? null : tool)}
+                                            className={`p-3 rounded-lg cursor-pointer transition-colors ${
+                                                selectedTool?.id === tool.id
+                                                    ? 'bg-indigo-500/20 border border-indigo-500/50'
+                                                    : 'bg-gray-700/50 hover:bg-gray-700'
+                                            }`}
+                                        >
+                                            <div className="flex items-center justify-between">
+                                                <div className="flex items-center gap-3">
+                                                    <i className="fas fa-cube text-indigo-400"></i>
+                                                    <div>
+                                                        <span className="font-medium">{tool.name}</span>
+                                                        {tool.aliases?.length > 0 && (
+                                                            <span className="text-xs text-gray-500 ml-2">
+                                                                ({tool.aliases.join(', ')})
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                                <div className="flex items-center gap-2">
+                                                    <span className="text-xs px-2 py-1 rounded bg-gray-600">
+                                                        {tool.category}
+                                                    </span>
+                                                    <span className="text-xs text-gray-500">
+                                                        {tool.errors_count || 0} errors
+                                                    </span>
+                                                </div>
+                                            </div>
+                                            
+                                            {selectedTool?.id === tool.id && (
+                                                <div className="mt-3 pt-3 border-t border-gray-600 text-sm">
+                                                    <p className="text-gray-400 mb-2">{tool.description || 'No description'}</p>
+                                                    
+                                                    {tool.patterns_commands?.length > 0 && (
+                                                        <div className="mb-2">
+                                                            <span className="text-gray-500">Commands: </span>
+                                                            <span className="text-green-400">{tool.patterns_commands.join(', ')}</span>
+                                                        </div>
+                                                    )}
+                                                    
+                                                    {tool.patterns_env_vars?.length > 0 && (
+                                                        <div className="mb-2">
+                                                            <span className="text-gray-500">Env Vars: </span>
+                                                            <span className="text-yellow-400">{tool.patterns_env_vars.join(', ')}</span>
+                                                        </div>
+                                                    )}
+                                                    
+                                                    <div className="flex gap-2 mt-3">
+                                                        <button
+                                                            onClick={(e) => { e.stopPropagation(); handleDeleteTool(tool.id); }}
+                                                            className="text-xs px-3 py-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30"
+                                                        >
+                                                            <i className="fas fa-trash mr-1"></i> Delete
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </Card>
+                    )}
+                    
+                    {/* Import Tab */}
+                    {activeTab === 'import' && (
+                        <Card className="p-4">
+                            <h4 className="font-medium mb-3">Import from Documentation URL</h4>
+                            <div className="flex gap-2">
+                                <input
+                                    type="url"
+                                    value={importUrl}
+                                    onChange={(e) => setImportUrl(e.target.value)}
+                                    placeholder="https://wiki.company.com/tools/my-tool"
+                                    className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                                />
+                                <button
+                                    onClick={handleImportDoc}
+                                    disabled={!importUrl || importLoading}
+                                    className="px-4 py-2 bg-indigo-500 hover:bg-indigo-600 disabled:bg-gray-600 rounded-lg text-sm font-medium transition-colors"
+                                >
+                                    {importLoading ? (
+                                        <i className="fas fa-spinner fa-spin"></i>
+                                    ) : (
+                                        <><i className="fas fa-download mr-2"></i>Import</>
+                                    )}
+                                </button>
+                            </div>
+                            
+                            {importResult && (
+                                <div className={`mt-3 p-3 rounded-lg ${
+                                    importResult.success ? 'bg-green-500/20 text-green-300' : 'bg-red-500/20 text-red-300'
+                                }`}>
+                                    {importResult.success ? (
+                                        <>
+                                            <i className="fas fa-check-circle mr-2"></i>
+                                            Imported: {importResult.data.doc?.title || 'Document'}
+                                            {importResult.data.extracted && (
+                                                <span className="text-sm ml-2">
+                                                    ({importResult.data.extracted.commands?.length || 0} commands, 
+                                                    {importResult.data.extracted.errors?.length || 0} errors)
+                                                </span>
+                                            )}
+                                        </>
+                                    ) : (
+                                        <>
+                                            <i className="fas fa-times-circle mr-2"></i>
+                                            {importResult.error}
+                                        </>
+                                    )}
+                                </div>
+                            )}
+                            
+                            <div className="mt-4 p-3 bg-gray-700/50 rounded-lg text-sm text-gray-400">
+                                <p className="font-medium text-gray-300 mb-2">Supported formats:</p>
+                                <ul className="list-disc list-inside space-y-1">
+                                    <li>Markdown files (GitHub, GitLab READMEs)</li>
+                                    <li>HTML pages (Confluence, wikis)</li>
+                                    <li>Plain text documentation</li>
+                                </ul>
+                            </div>
+                        </Card>
+                    )}
+                </div>
+            );
+        }
+
+        // =====================================================================
+        // Training Dashboard Panel
+        // =====================================================================
+        
+        function TrainingPanel() {
+            const [stats, setStats] = useState(null);
+            const [jobs, setJobs] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [creating, setCreating] = useState(false);
+            const [newJobName, setNewJobName] = useState('');
+            const [newJobFormat, setNewJobFormat] = useState('jsonl_openai');
+            const [actionLoading, setActionLoading] = useState(null);
+            
+            useEffect(() => {
+                loadData();
+            }, []);
+            
+            const loadData = async () => {
+                setLoading(true);
+                try {
+                    const [statsRes, jobsRes] = await Promise.all([
+                        fetch(`${API_BASE}/training/stats`),
+                        fetch(`${API_BASE}/training/jobs`)
+                    ]);
+                    
+                    if (statsRes.ok) setStats(await statsRes.json());
+                    if (jobsRes.ok) {
+                        const data = await jobsRes.json();
+                        setJobs(data.jobs || []);
+                    }
+                } catch (e) {
+                    console.error('Failed to load training data:', e);
+                } finally {
+                    setLoading(false);
+                }
+            };
+            
+            const createJob = async () => {
+                if (!newJobName) return;
+                
+                setCreating(true);
+                try {
+                    const res = await fetch(`${API_BASE}/training/jobs`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            name: newJobName,
+                            format: newJobFormat,
+                            include_feedback: true,
+                            include_knowledge: true
+                        })
+                    });
+                    
+                    if (res.ok) {
+                        setNewJobName('');
+                        loadData();
+                    }
+                } catch (e) {
+                    console.error('Failed to create job:', e);
+                } finally {
+                    setCreating(false);
+                }
+            };
+            
+            const runJobAction = async (jobId, action) => {
+                setActionLoading(`${jobId}-${action}`);
+                try {
+                    const res = await fetch(`${API_BASE}/training/jobs/${jobId}/${action}`, {
+                        method: 'POST'
+                    });
+                    
+                    if (res.ok) {
+                        loadData();
+                    }
+                } catch (e) {
+                    console.error(`Failed to ${action} job:`, e);
+                } finally {
+                    setActionLoading(null);
+                }
+            };
+            
+            const downloadJob = (jobId) => {
+                window.open(`${API_BASE}/training/jobs/${jobId}/download`, '_blank');
+            };
+            
+            const getStatusBadge = (status) => {
+                const styles = {
+                    pending: 'bg-gray-500',
+                    preparing: 'bg-yellow-500',
+                    ready: 'bg-blue-500',
+                    exporting: 'bg-purple-500',
+                    completed: 'bg-green-500',
+                    failed: 'bg-red-500'
+                };
+                return `text-xs px-2 py-1 rounded ${styles[status] || 'bg-gray-500'}`;
+            };
+            
+            if (loading) {
+                return (
+                    <Card className="p-8 text-center">
+                        <i className="fas fa-spinner fa-spin text-2xl text-indigo-400"></i>
+                        <p className="mt-2 text-gray-400">Loading training data...</p>
+                    </Card>
+                );
+            }
+            
+            return (
+                <div className="space-y-4">
+                    {/* Stats Overview */}
+                    {stats && (
+                        <div className="grid grid-cols-4 gap-4">
+                            <Card className="p-4 text-center">
+                                <div className="text-2xl font-bold text-indigo-400">{stats.total_examples || 0}</div>
+                                <div className="text-xs text-gray-500">Total Examples</div>
+                            </Card>
+                            <Card className="p-4 text-center">
+                                <div className="text-2xl font-bold text-green-400">{stats.validated_examples || 0}</div>
+                                <div className="text-xs text-gray-500">Validated</div>
+                            </Card>
+                            <Card className="p-4 text-center">
+                                <div className="text-2xl font-bold text-purple-400">
+                                    {Math.round((stats.validation_rate || 0) * 100)}%
+                                </div>
+                                <div className="text-xs text-gray-500">Validation Rate</div>
+                            </Card>
+                            <Card className="p-4 text-center">
+                                <div className="text-2xl font-bold text-yellow-400">{stats.completed_jobs || 0}</div>
+                                <div className="text-xs text-gray-500">Completed Jobs</div>
+                            </Card>
+                        </div>
+                    )}
+                    
+                    {/* Create Job */}
+                    <Card className="p-4">
+                        <h4 className="font-medium mb-3">
+                            <i className="fas fa-plus-circle text-green-400 mr-2"></i>
+                            Create Training Job
+                        </h4>
+                        <div className="flex gap-2">
+                            <input
+                                type="text"
+                                value={newJobName}
+                                onChange={(e) => setNewJobName(e.target.value)}
+                                placeholder="Job name (e.g., finetune-v1)"
+                                className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500"
+                            />
+                            <select
+                                value={newJobFormat}
+                                onChange={(e) => setNewJobFormat(e.target.value)}
+                                className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-sm"
+                            >
+                                <option value="jsonl_openai">JSONL (OpenAI/Ollama)</option>
+                                <option value="jsonl_anthropic">JSONL (Anthropic)</option>
+                                <option value="csv">CSV</option>
+                                <option value="json">JSON</option>
+                            </select>
+                            <button
+                                onClick={createJob}
+                                disabled={!newJobName || creating}
+                                className="px-4 py-2 bg-green-500 hover:bg-green-600 disabled:bg-gray-600 rounded-lg text-sm font-medium transition-colors"
+                            >
+                                {creating ? <i className="fas fa-spinner fa-spin"></i> : 'Create'}
+                            </button>
+                        </div>
+                    </Card>
+                    
+                    {/* Jobs List */}
+                    <Card className="p-4">
+                        <h4 className="font-medium mb-3">
+                            <i className="fas fa-tasks text-indigo-400 mr-2"></i>
+                            Training Jobs
+                        </h4>
+                        
+                        {jobs.length === 0 ? (
+                            <div className="text-center py-8 text-gray-500">
+                                <i className="fas fa-file-export text-4xl mb-3"></i>
+                                <p>No training jobs yet.</p>
+                                <p className="text-sm mt-2">Create a job above to start preparing training data.</p>
+                            </div>
+                        ) : (
+                            <div className="space-y-3">
+                                {jobs.map(job => (
+                                    <div key={job.id} className="p-3 rounded-lg bg-gray-700/50">
+                                        <div className="flex items-center justify-between mb-2">
+                                            <div className="flex items-center gap-3">
+                                                <span className="font-medium">{job.name}</span>
+                                                <span className={getStatusBadge(job.status)}>{job.status}</span>
+                                            </div>
+                                            <span className="text-xs text-gray-500">{job.format}</span>
+                                        </div>
+                                        
+                                        <div className="flex items-center justify-between text-sm">
+                                            <div className="text-gray-400">
+                                                {job.valid_examples > 0 && (
+                                                    <span>{job.valid_examples} / {job.total_examples} examples</span>
+                                                )}
+                                            </div>
+                                            
+                                            <div className="flex gap-2">
+                                                {job.status === 'pending' && (
+                                                    <button
+                                                        onClick={() => runJobAction(job.id, 'prepare')}
+                                                        disabled={actionLoading === `${job.id}-prepare`}
+                                                        className="px-3 py-1 bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 rounded text-xs"
+                                                    >
+                                                        {actionLoading === `${job.id}-prepare` ? (
+                                                            <i className="fas fa-spinner fa-spin"></i>
+                                                        ) : (
+                                                            <><i className="fas fa-cog mr-1"></i>Prepare</>
+                                                        )}
+                                                    </button>
+                                                )}
+                                                
+                                                {job.status === 'ready' && (
+                                                    <button
+                                                        onClick={() => runJobAction(job.id, 'export')}
+                                                        disabled={actionLoading === `${job.id}-export`}
+                                                        className="px-3 py-1 bg-purple-500/20 text-purple-400 hover:bg-purple-500/30 rounded text-xs"
+                                                    >
+                                                        {actionLoading === `${job.id}-export` ? (
+                                                            <i className="fas fa-spinner fa-spin"></i>
+                                                        ) : (
+                                                            <><i className="fas fa-file-export mr-1"></i>Export</>
+                                                        )}
+                                                    </button>
+                                                )}
+                                                
+                                                {job.status === 'completed' && job.exported_path && (
+                                                    <button
+                                                        onClick={() => downloadJob(job.id)}
+                                                        className="px-3 py-1 bg-green-500/20 text-green-400 hover:bg-green-500/30 rounded text-xs"
+                                                    >
+                                                        <i className="fas fa-download mr-1"></i>Download
+                                                    </button>
+                                                )}
+                                                
+                                                {job.status === 'failed' && job.error_message && (
+                                                    <span className="text-xs text-red-400" title={job.error_message}>
+                                                        <i className="fas fa-exclamation-triangle mr-1"></i>
+                                                        {job.error_message.substring(0, 30)}...
+                                                    </span>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </Card>
+                    
+                    {/* Data Sources */}
+                    {stats && (stats.by_source || stats.by_category) && (
+                        <Card className="p-4">
+                            <h4 className="font-medium mb-3">
+                                <i className="fas fa-chart-pie text-purple-400 mr-2"></i>
+                                Data Distribution
+                            </h4>
+                            <div className="grid grid-cols-2 gap-4">
+                                {stats.by_source && Object.keys(stats.by_source).length > 0 && (
+                                    <div>
+                                        <p className="text-xs text-gray-500 mb-2">By Source</p>
+                                        {Object.entries(stats.by_source).map(([source, count]) => (
+                                            <div key={source} className="flex justify-between text-sm mb-1">
+                                                <span className="text-gray-400">{source}</span>
+                                                <span className="text-white">{count}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                                {stats.by_category && Object.keys(stats.by_category).length > 0 && (
+                                    <div>
+                                        <p className="text-xs text-gray-500 mb-2">By Category</p>
+                                        {Object.entries(stats.by_category).slice(0, 5).map(([cat, count]) => (
+                                            <div key={cat} className="flex justify-between text-sm mb-1">
+                                                <span className="text-gray-400">{cat}</span>
+                                                <span className="text-white">{count}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        </Card>
+                    )}
+                </div>
+            );
+        }
+
+        // =====================================================================
         // Main App
         // =====================================================================
         
@@ -1448,6 +2013,7 @@
             const [loading, setLoading] = useState(false);
             const [error, setError] = useState(null);
             const [result, setResult] = useState(null);
+            const [activeView, setActiveView] = useState('analysis');
             const [history, setHistory] = useState(() => {
                 try { return JSON.parse(localStorage.getItem('analysisHistory') || '[]'); }
                 catch { return []; }
@@ -1526,7 +2092,40 @@
                                         <p className="text-xs text-gray-500">AI-Powered Build Debugging • Hybrid Architecture v1.4</p>
                                     </div>
                                 </div>
-                                <div className="flex items-center gap-3">
+                                <div className="flex items-center gap-4">
+                                    {/* Navigation Tabs */}
+                                    <nav className="flex gap-1 bg-gray-700/50 rounded-lg p-1">
+                                        <button
+                                            onClick={() => setActiveView('analysis')}
+                                            className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                                                activeView === 'analysis' 
+                                                    ? 'bg-indigo-500 text-white' 
+                                                    : 'text-gray-400 hover:text-white hover:bg-gray-600'
+                                            }`}
+                                        >
+                                            <i className="fas fa-search mr-2"></i>Analysis
+                                        </button>
+                                        <button
+                                            onClick={() => setActiveView('knowledge')}
+                                            className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                                                activeView === 'knowledge' 
+                                                    ? 'bg-indigo-500 text-white' 
+                                                    : 'text-gray-400 hover:text-white hover:bg-gray-600'
+                                            }`}
+                                        >
+                                            <i className="fas fa-brain mr-2"></i>Knowledge
+                                        </button>
+                                        <button
+                                            onClick={() => setActiveView('training')}
+                                            className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                                                activeView === 'training' 
+                                                    ? 'bg-indigo-500 text-white' 
+                                                    : 'text-gray-400 hover:text-white hover:bg-gray-600'
+                                            }`}
+                                        >
+                                            <i className="fas fa-graduation-cap mr-2"></i>Training
+                                        </button>
+                                    </nav>
                                     <a href={`${API_BASE}/docs`} target="_blank" className="text-gray-400 hover:text-white transition-colors" title="API Docs">
                                         <i className="fas fa-book"></i>
                                     </a>
@@ -1540,75 +2139,110 @@
                     
                     {/* Main Content */}
                     <main className="max-w-7xl mx-auto px-4 py-6">
-                        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                            {/* Left Sidebar */}
-                            <div className="space-y-6">
-                                <HealthPanel health={health} />
-                                <JenkinsSettings />
-                                <AnalysisForm onSubmit={handleAnalyze} loading={loading} />
-                                <HistoryPanel history={history} onSelect={setResult} onClear={() => setHistory([])} />
-                            </div>
-                            
-                            {/* Main Content Area */}
-                            <div className="lg:col-span-2 space-y-6">
-                                {/* Error */}
-                                {error && (
-                                    <Card className="p-4 border-red-500/50 bg-red-500/10 fade-in">
-                                        <div className="flex items-start gap-3">
-                                            <i className="fas fa-exclamation-circle text-red-400 mt-1"></i>
-                                            <div className="flex-1">
-                                                <h4 className="font-medium text-red-300">Analysis Failed</h4>
-                                                <p className="text-sm text-gray-300 mt-1">{error}</p>
-                                            </div>
-                                            <button onClick={() => setError(null)} className="text-gray-500 hover:text-gray-300">
-                                                <i className="fas fa-times"></i>
-                                            </button>
-                                        </div>
-                                    </Card>
-                                )}
+                        {/* Analysis View */}
+                        {activeView === 'analysis' && (
+                            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                                {/* Left Sidebar */}
+                                <div className="space-y-6">
+                                    <HealthPanel health={health} />
+                                    <JenkinsSettings />
+                                    <AnalysisForm onSubmit={handleAnalyze} loading={loading} />
+                                    <HistoryPanel history={history} onSelect={setResult} onClear={() => setHistory([])} />
+                                </div>
                                 
-                                {/* Loading */}
-                                {loading && (
-                                    <Card className="p-8 fade-in">
-                                        <div className="text-center">
-                                            <div className="w-16 h-16 mx-auto mb-4 relative">
-                                                <i className="fas fa-cog text-4xl text-indigo-500 spin-slow"></i>
-                                            </div>
-                                            <h3 className="text-xl font-semibold mb-2">Analyzing Build...</h3>
-                                            <p className="text-gray-400 text-sm">
-                                                Processing logs and running AI analysis...
-                                            </p>
-                                        </div>
-                                    </Card>
-                                )}
-                                
-                                {/* Results */}
-                                {!loading && result && <AnalysisResult result={result} />}
-                                
-                                {/* Empty State */}
-                                {!loading && !result && !error && (
-                                    <Card className="p-12">
-                                        <div className="text-center">
-                                            <i className="fas fa-search text-6xl text-gray-600 mb-4"></i>
-                                            <h3 className="text-xl font-semibold text-gray-400 mb-2">Ready to Analyze</h3>
-                                            <p className="text-gray-500 max-w-md mx-auto mb-6">
-                                                Enter a Jenkins job name and build number to start analyzing failures.
-                                            </p>
-                                            <div className="flex justify-center gap-4 text-sm">
-                                                <div className="flex items-center gap-2 text-gray-500">
-                                                    <span className="w-2 h-2 bg-gray-500 rounded-full"></span>
-                                                    <span>⚡ Fast: Simple errors</span>
+                                {/* Main Content Area */}
+                                <div className="lg:col-span-2 space-y-6">
+                                    {/* Error */}
+                                    {error && (
+                                        <Card className="p-4 border-red-500/50 bg-red-500/10 fade-in">
+                                            <div className="flex items-start gap-3">
+                                                <i className="fas fa-exclamation-circle text-red-400 mt-1"></i>
+                                                <div className="flex-1">
+                                                    <h4 className="font-medium text-red-300">Analysis Failed</h4>
+                                                    <p className="text-sm text-gray-300 mt-1">{error}</p>
                                                 </div>
-                                                <div className="flex items-center gap-2 text-purple-400">
-                                                    <span className="w-2 h-2 bg-purple-500 rounded-full"></span>
-                                                    <span>🔍 Deep: Library issues</span>
+                                                <button onClick={() => setError(null)} className="text-gray-500 hover:text-gray-300">
+                                                    <i className="fas fa-times"></i>
+                                                </button>
+                                            </div>
+                                        </Card>
+                                    )}
+                                    
+                                    {/* Loading */}
+                                    {loading && (
+                                        <Card className="p-8 fade-in">
+                                            <div className="text-center">
+                                                <div className="w-16 h-16 mx-auto mb-4 relative">
+                                                    <i className="fas fa-cog text-4xl text-indigo-500 spin-slow"></i>
+                                                </div>
+                                                <h3 className="text-xl font-semibold mb-2">Analyzing Build...</h3>
+                                                <p className="text-gray-400 text-sm">
+                                                    Processing logs and running AI analysis...
+                                                </p>
+                                            </div>
+                                        </Card>
+                                    )}
+                                    
+                                    {/* Results */}
+                                    {!loading && result && <AnalysisResult result={result} />}
+                                    
+                                    {/* Empty State */}
+                                    {!loading && !result && !error && (
+                                        <Card className="p-12">
+                                            <div className="text-center">
+                                                <i className="fas fa-search text-6xl text-gray-600 mb-4"></i>
+                                                <h3 className="text-xl font-semibold text-gray-400 mb-2">Ready to Analyze</h3>
+                                                <p className="text-gray-500 max-w-md mx-auto mb-6">
+                                                    Enter a Jenkins job name and build number to start analyzing failures.
+                                                </p>
+                                                <div className="flex justify-center gap-4 text-sm">
+                                                    <div className="flex items-center gap-2 text-gray-500">
+                                                        <span className="w-2 h-2 bg-gray-500 rounded-full"></span>
+                                                        <span>⚡ Fast: Simple errors</span>
+                                                    </div>
+                                                    <div className="flex items-center gap-2 text-purple-400">
+                                                        <span className="w-2 h-2 bg-purple-500 rounded-full"></span>
+                                                        <span>🔍 Deep: Library issues</span>
+                                                    </div>
                                                 </div>
                                             </div>
-                                        </div>
-                                    </Card>
-                                )}
+                                        </Card>
+                                    )}
+                                </div>
                             </div>
-                        </div>
+                        )}
+                        
+                        {/* Knowledge View */}
+                        {activeView === 'knowledge' && (
+                            <div className="max-w-4xl mx-auto">
+                                <div className="mb-6">
+                                    <h2 className="text-2xl font-bold mb-2">
+                                        <i className="fas fa-brain text-indigo-400 mr-3"></i>
+                                        Knowledge Base
+                                    </h2>
+                                    <p className="text-gray-400">
+                                        Manage internal tools, error patterns, and documentation for improved AI analysis.
+                                    </p>
+                                </div>
+                                <KnowledgePanel />
+                            </div>
+                        )}
+                        
+                        {/* Training View */}
+                        {activeView === 'training' && (
+                            <div className="max-w-4xl mx-auto">
+                                <div className="mb-6">
+                                    <h2 className="text-2xl font-bold mb-2">
+                                        <i className="fas fa-graduation-cap text-green-400 mr-3"></i>
+                                        Training Pipeline
+                                    </h2>
+                                    <p className="text-gray-400">
+                                        Prepare and export training data for fine-tuning AI models.
+                                    </p>
+                                </div>
+                                <TrainingPanel />
+                            </div>
+                        )}
                     </main>
                     
                     {/* Footer */}
