@@ -52,6 +52,8 @@ help:
 	@echo "  make test-unit                - Run unit tests only (fast)"
 	@echo "  make test-integration         - Run integration tests"
 	@echo "  make test-verbose             - Run tests with full output"
+	@echo "  make test-image-rebuild       - Rebuild test image (after dep changes)"
+	@echo "  make test-clean               - Remove test image"
 	@echo ""
 	@echo "AI Models (for local Ollama):"
 	@echo "  make pull-model MODEL=llama3:70b  - Pull a different model"
@@ -345,39 +347,59 @@ build:
 # =============================================================================
 # Testing (runs in Docker - no local Python needed)
 # Works on Windows, Mac, and Linux
+# 
+# First run builds a local test image with dependencies pre-installed.
+# Subsequent runs are instant (no pip install).
 # =============================================================================
 
-# Run all tests
-test:
-	@echo "Running all tests in Docker..."
-	docker run --rm -v "$(CURDIR):/app" -w /app python:3.12-slim sh -c \
-		"pip install -q pytest pyyaml beautifulsoup4 && pytest tests/ -v"
+# Test image name (local only, not pushed to registry)
+TEST_IMAGE := jenkins-agent-test:local
 
-# Run unit tests only (fast)
-test-unit:
-	@echo "Running unit tests in Docker..."
-	docker run --rm -v "$(CURDIR):/app" -w /app python:3.12-slim sh -c \
-		"pip install -q pytest pyyaml beautifulsoup4 && pytest tests/ -v -m 'unit'"
+# Build test image if it doesn't exist
+.PHONY: test-image
+test-image:
+	@docker inspect $(TEST_IMAGE) > /dev/null 2>&1 || \
+		(echo "Building test image (first time only)..." && \
+		docker build -t $(TEST_IMAGE) -f Dockerfile.test .)
 
-# Run integration tests
-test-integration:
-	@echo "Running integration tests in Docker..."
-	docker run --rm -v "$(CURDIR):/app" -w /app python:3.12-slim sh -c \
-		"pip install -q pytest pyyaml beautifulsoup4 && pytest tests/ -v -m 'integration'"
+# Force rebuild test image (use when test dependencies change)
+test-image-rebuild:
+	@echo "Rebuilding test image..."
+	docker build --no-cache -t $(TEST_IMAGE) -f Dockerfile.test .
+	@echo "Test image rebuilt successfully"
+
+# Run all tests (70 tests)
+test: test-image
+	@echo "Running all tests..."
+	docker run --rm -v "$(CURDIR):/app" $(TEST_IMAGE) pytest tests/ -v
+
+# Run unit tests only (fast, ~60 tests)
+test-unit: test-image
+	@echo "Running unit tests..."
+	docker run --rm -v "$(CURDIR):/app" $(TEST_IMAGE) pytest tests/ -v -m "unit"
+
+# Run integration tests (~10 tests)
+test-integration: test-image
+	@echo "Running integration tests..."
+	docker run --rm -v "$(CURDIR):/app" $(TEST_IMAGE) pytest tests/ -v -m "integration"
 
 # Run tests with full output
-test-verbose:
+test-verbose: test-image
 	@echo "Running tests with full output..."
-	docker run --rm -v "$(CURDIR):/app" -w /app python:3.12-slim sh -c \
-		"pip install -q pytest pyyaml beautifulsoup4 && pytest tests/ -v --tb=long"
+	docker run --rm -v "$(CURDIR):/app" $(TEST_IMAGE) pytest tests/ -v --tb=long
 
 # Run specific test file
-test-file:
+test-file: test-image
 ifndef FILE
 	$(error FILE is required. Usage: make test-file FILE=test_knowledge_store.py)
 endif
-	docker run --rm -v "$(CURDIR):/app" -w /app python:3.12-slim sh -c \
-		"pip install -q pytest pyyaml beautifulsoup4 && pytest tests/$(FILE) -v"
+	docker run --rm -v "$(CURDIR):/app" $(TEST_IMAGE) pytest tests/$(FILE) -v
+
+# Clean test image (to force rebuild)
+test-clean:
+	@echo "Removing test image..."
+	-docker rmi $(TEST_IMAGE) 2>/dev/null
+	@echo "Done. Run 'make test' to rebuild."
 
 # =============================================================================
 # Analysis Commands
