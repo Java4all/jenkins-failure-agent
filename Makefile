@@ -344,30 +344,31 @@ build:
 
 # =============================================================================
 # Testing (runs in Docker - no local Python needed)
+# Works on Windows, Mac, and Linux
 # =============================================================================
 
 # Run all tests
 test:
 	@echo "Running all tests in Docker..."
-	docker run --rm -v $(PWD):/app -w /app python:3.12-slim sh -c \
+	docker run --rm -v "$(CURDIR):/app" -w /app python:3.12-slim sh -c \
 		"pip install -q pytest pyyaml beautifulsoup4 && pytest tests/ -v"
 
 # Run unit tests only (fast)
 test-unit:
 	@echo "Running unit tests in Docker..."
-	docker run --rm -v $(PWD):/app -w /app python:3.12-slim sh -c \
+	docker run --rm -v "$(CURDIR):/app" -w /app python:3.12-slim sh -c \
 		"pip install -q pytest pyyaml beautifulsoup4 && pytest tests/ -v -m 'unit'"
 
 # Run integration tests
 test-integration:
 	@echo "Running integration tests in Docker..."
-	docker run --rm -v $(PWD):/app -w /app python:3.12-slim sh -c \
+	docker run --rm -v "$(CURDIR):/app" -w /app python:3.12-slim sh -c \
 		"pip install -q pytest pyyaml beautifulsoup4 && pytest tests/ -v -m 'integration'"
 
 # Run tests with full output
 test-verbose:
 	@echo "Running tests with full output..."
-	docker run --rm -v $(PWD):/app -w /app python:3.12-slim sh -c \
+	docker run --rm -v "$(CURDIR):/app" -w /app python:3.12-slim sh -c \
 		"pip install -q pytest pyyaml beautifulsoup4 && pytest tests/ -v --tb=long"
 
 # Run specific test file
@@ -375,7 +376,7 @@ test-file:
 ifndef FILE
 	$(error FILE is required. Usage: make test-file FILE=test_knowledge_store.py)
 endif
-	docker run --rm -v $(PWD):/app -w /app python:3.12-slim sh -c \
+	docker run --rm -v "$(CURDIR):/app" -w /app python:3.12-slim sh -c \
 		"pip install -q pytest pyyaml beautifulsoup4 && pytest tests/$(FILE) -v"
 
 # =============================================================================
