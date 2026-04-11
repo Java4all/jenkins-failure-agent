@@ -4,7 +4,7 @@
 
 ### 🎉 MAJOR RELEASE CHECKPOINT
 
-This is a major release milestone that completes the AI Learning System with full test coverage and documentation.
+This is a major release milestone that completes the AI Learning System with full test coverage, documentation, and backup/restore capabilities.
 
 ### What's New
 
@@ -16,6 +16,40 @@ This is a major release milestone that completes the AI Learning System with ful
 | **Training Pipeline** | Export training data for AI fine-tuning |
 | **UI Tabs** | Three-tab interface (Analysis, Knowledge, Training) |
 | **Test Suite** | 70 automated tests with pytest |
+| **Backup/Restore** | Full migration support between environments |
+
+### Backup & Restore
+
+Easily migrate between environments (dev → prod, laptop → server):
+
+```bash
+# Create backup (databases, config, exports)
+make backup
+# Creates: backups/backup-20240411-143052.tar.gz (~1-10 MB)
+
+# Full backup including AI models
+make backup-full
+# Creates: backups/backup-full-20240411-143052.tar.gz (~4+ GB)
+
+# List available backups
+make backup-list
+
+# Restore on new machine
+make restore FILE=backups/backup-20240411-143052.tar.gz
+```
+
+**What's included in backup:**
+
+| Item | `make backup` | `make backup-full` |
+|------|:-------------:|:------------------:|
+| feedback.db | ✅ | ✅ |
+| knowledge.db | ✅ | ✅ |
+| training.db | ✅ | ✅ |
+| exports/ | ✅ | ✅ |
+| reports/ | ✅ | ✅ |
+| config.yaml | ✅ | ✅ |
+| .env | ✅ | ✅ |
+| AI models (Ollama) | ❌ | ✅ |
 
 ### Test Coverage
 

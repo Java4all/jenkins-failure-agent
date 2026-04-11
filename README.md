@@ -268,6 +268,32 @@ pip install pytest pyyaml beautifulsoup4
 pytest tests/ -v
 ```
 
+## Backup & Restore
+
+Migrate data between environments (dev → prod, laptop → server):
+
+```bash
+# Backup all data (databases, config, exports) - ~1-10 MB
+make backup
+
+# Full backup including AI models - ~4+ GB
+make backup-full
+
+# List available backups
+make backup-list
+
+# Restore on new machine
+make restore FILE=backups/backup-20240411-143052.tar.gz
+```
+
+| Included in Backup | `make backup` | `make backup-full` |
+|--------------------|:-------------:|:------------------:|
+| Databases (feedback, knowledge, training) | ✅ | ✅ |
+| Exports & Reports | ✅ | ✅ |
+| Config files | ✅ | ✅ |
+| AI models (Ollama) | ❌ | ✅ |
+
+
 ## Documentation
 
 - **[QUICKSTART.md](QUICKSTART.md)** — Detailed deployment & configuration

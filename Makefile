@@ -5,14 +5,18 @@
 #   make start       - Start all services
 #   make analyze     - Run CLI analysis
 
-.PHONY: help start stop logs build clean analyze test shell pull-model
+.PHONY: help start stop logs build clean analyze test shell pull-model backup restore
 
 # Deployment mode (can be overridden)
 COMPOSE_FILE ?= docker-compose.yml
 
+# Backup settings
+BACKUP_DIR ?= ./backups
+TIMESTAMP := $(shell date +%Y%m%d-%H%M%S)
+
 # Default target
 help:
-	@echo "Jenkins Failure Analysis Agent v1.9"
+	@echo "Jenkins Failure Analysis Agent v2.0"
 	@echo ""
 	@echo "Deployment Modes (Build from Source):"
 	@echo "  make start                    - Start with Ollama in Docker (default)"
@@ -29,6 +33,12 @@ help:
 	@echo "  make setup-external-ollama    - Setup for external Ollama"
 	@echo "  make setup-deep               - Setup for deep investigation (larger model)"
 	@echo "  make setup-bedrock            - Setup for AWS Bedrock"
+	@echo ""
+	@echo "Backup/Restore (migrate between environments):"
+	@echo "  make backup                   - Backup all data (DBs, config, exports)"
+	@echo "  make backup-full              - Full backup including AI models (~4GB)"
+	@echo "  make restore FILE=<backup>    - Restore from backup file"
+	@echo "  make backup-list              - List available backups"
 	@echo ""
 	@echo "Stop/Clean:"
 	@echo "  make stop                     - Stop all services (DATA PRESERVED)"
@@ -308,6 +318,196 @@ clean:
 	@echo ""
 	@echo "[OK] All services stopped and ALL DATA REMOVED"
 	@echo "     Run 'make setup' to start fresh."
+
+# =============================================================================
+# Backup & Restore (for migration between environments)
+# =============================================================================
+
+# Backup all application data (databases, config, exports) - excludes AI models
+backup:
+	@echo ""
+	@echo "┌────────────────────────────────────────────────────────────────┐"
+	@echo "│  📦 Creating backup...                                         │"
+	@echo "│                                                                │"
+	@echo "│  Includes:                                                     │"
+	@echo "│    • feedback.db (user feedback & corrections)                │"
+	@echo "│    • knowledge.db (tool definitions & error patterns)         │"
+	@echo "│    • training.db (training jobs & examples)                   │"
+	@echo "│    • exports/ (generated training files)                      │"
+	@echo "│    • reports/ (analysis reports)                              │"
+	@echo "│    • config.yaml, .env (configuration)                        │"
+	@echo "│                                                                │"
+	@echo "│  Excludes: AI models (use backup-full to include)             │"
+	@echo "└────────────────────────────────────────────────────────────────┘"
+	@echo ""
+	@mkdir -p "$(BACKUP_DIR)"
+	@mkdir -p "$(BACKUP_DIR)/tmp-$(TIMESTAMP)"
+	@echo "Extracting data from Docker volumes..."
+	@# Extract agent_data volume (databases)
+	@docker run --rm -v jenkins-agent-data:/data -v "$(CURDIR)/$(BACKUP_DIR)/tmp-$(TIMESTAMP)":/backup alpine \
+		sh -c "cp -r /data/* /backup/ 2>/dev/null || echo 'No data volume yet'" || true
+	@# Extract agent_reports volume
+	@docker run --rm -v jenkins-agent-reports:/data -v "$(CURDIR)/$(BACKUP_DIR)/tmp-$(TIMESTAMP)":/backup alpine \
+		sh -c "mkdir -p /backup/reports && cp -r /data/* /backup/reports/ 2>/dev/null || echo 'No reports yet'" || true
+	@# Copy local config files
+	@cp config.yaml "$(BACKUP_DIR)/tmp-$(TIMESTAMP)/" 2>/dev/null || true
+	@cp .env "$(BACKUP_DIR)/tmp-$(TIMESTAMP)/" 2>/dev/null || true
+	@cp config.example.yaml "$(BACKUP_DIR)/tmp-$(TIMESTAMP)/" 2>/dev/null || true
+	@cp .env.example "$(BACKUP_DIR)/tmp-$(TIMESTAMP)/" 2>/dev/null || true
+	@# Create manifest
+	@echo "backup_version: 2.0.0" > "$(BACKUP_DIR)/tmp-$(TIMESTAMP)/MANIFEST.txt"
+	@echo "backup_date: $(TIMESTAMP)" >> "$(BACKUP_DIR)/tmp-$(TIMESTAMP)/MANIFEST.txt"
+	@echo "backup_type: standard" >> "$(BACKUP_DIR)/tmp-$(TIMESTAMP)/MANIFEST.txt"
+	@echo "includes: databases,config,reports,exports" >> "$(BACKUP_DIR)/tmp-$(TIMESTAMP)/MANIFEST.txt"
+	@# Create archive
+	@cd "$(BACKUP_DIR)" && tar -czf "backup-$(TIMESTAMP).tar.gz" -C "tmp-$(TIMESTAMP)" .
+	@rm -rf "$(BACKUP_DIR)/tmp-$(TIMESTAMP)"
+	@echo ""
+	@echo "┌────────────────────────────────────────────────────────────────┐"
+	@echo "│  ✅ Backup created successfully!                               │"
+	@echo "│                                                                │"
+	@echo "│  File: $(BACKUP_DIR)/backup-$(TIMESTAMP).tar.gz"
+	@echo "│                                                                │"
+	@echo "│  To restore on another machine:                               │"
+	@echo "│    1. Copy this file to the new machine                       │"
+	@echo "│    2. Run: make restore FILE=backup-$(TIMESTAMP).tar.gz"
+	@echo "└────────────────────────────────────────────────────────────────┘"
+	@echo ""
+
+# Full backup including AI models (large, ~4GB+)
+backup-full:
+	@echo ""
+	@echo "┌────────────────────────────────────────────────────────────────┐"
+	@echo "│  📦 Creating FULL backup (including AI models)...              │"
+	@echo "│                                                                │"
+	@echo "│  ⚠️  This will be large (~4GB+ depending on models)            │"
+	@echo "│                                                                │"
+	@echo "│  Press Ctrl+C within 5 seconds to cancel...                   │"
+	@echo "└────────────────────────────────────────────────────────────────┘"
+	@echo ""
+	@sleep 5
+	@mkdir -p "$(BACKUP_DIR)"
+	@mkdir -p "$(BACKUP_DIR)/tmp-full-$(TIMESTAMP)"
+	@echo "Extracting data from Docker volumes..."
+	@# Extract agent_data volume
+	@docker run --rm -v jenkins-agent-data:/data -v "$(CURDIR)/$(BACKUP_DIR)/tmp-full-$(TIMESTAMP)":/backup alpine \
+		sh -c "cp -r /data/* /backup/ 2>/dev/null || echo 'No data volume yet'" || true
+	@# Extract agent_reports volume
+	@docker run --rm -v jenkins-agent-reports:/data -v "$(CURDIR)/$(BACKUP_DIR)/tmp-full-$(TIMESTAMP)":/backup alpine \
+		sh -c "mkdir -p /backup/reports && cp -r /data/* /backup/reports/ 2>/dev/null || echo 'No reports yet'" || true
+	@# Extract ollama models (this is the big one)
+	@echo "Extracting AI models (this may take a while)..."
+	@docker run --rm -v jenkins-agent-ollama:/data -v "$(CURDIR)/$(BACKUP_DIR)/tmp-full-$(TIMESTAMP)":/backup alpine \
+		sh -c "mkdir -p /backup/ollama && cp -r /data/* /backup/ollama/ 2>/dev/null || echo 'No ollama data yet'" || true
+	@# Copy local config files
+	@cp config.yaml "$(BACKUP_DIR)/tmp-full-$(TIMESTAMP)/" 2>/dev/null || true
+	@cp .env "$(BACKUP_DIR)/tmp-full-$(TIMESTAMP)/" 2>/dev/null || true
+	@cp config.example.yaml "$(BACKUP_DIR)/tmp-full-$(TIMESTAMP)/" 2>/dev/null || true
+	@cp .env.example "$(BACKUP_DIR)/tmp-full-$(TIMESTAMP)/" 2>/dev/null || true
+	@# Create manifest
+	@echo "backup_version: 2.0.0" > "$(BACKUP_DIR)/tmp-full-$(TIMESTAMP)/MANIFEST.txt"
+	@echo "backup_date: $(TIMESTAMP)" >> "$(BACKUP_DIR)/tmp-full-$(TIMESTAMP)/MANIFEST.txt"
+	@echo "backup_type: full" >> "$(BACKUP_DIR)/tmp-full-$(TIMESTAMP)/MANIFEST.txt"
+	@echo "includes: databases,config,reports,exports,ollama_models" >> "$(BACKUP_DIR)/tmp-full-$(TIMESTAMP)/MANIFEST.txt"
+	@# Create archive
+	@echo "Creating archive (this may take several minutes)..."
+	@cd "$(BACKUP_DIR)" && tar -czf "backup-full-$(TIMESTAMP).tar.gz" -C "tmp-full-$(TIMESTAMP)" .
+	@rm -rf "$(BACKUP_DIR)/tmp-full-$(TIMESTAMP)"
+	@echo ""
+	@echo "┌────────────────────────────────────────────────────────────────┐"
+	@echo "│  ✅ Full backup created successfully!                          │"
+	@echo "│                                                                │"
+	@echo "│  File: $(BACKUP_DIR)/backup-full-$(TIMESTAMP).tar.gz"
+	@echo "│  Size: $$(du -h $(BACKUP_DIR)/backup-full-$(TIMESTAMP).tar.gz | cut -f1)"
+	@echo "│                                                                │"
+	@echo "│  To restore: make restore FILE=backup-full-$(TIMESTAMP).tar.gz"
+	@echo "└────────────────────────────────────────────────────────────────┘"
+	@echo ""
+
+# Restore from backup
+restore:
+ifndef FILE
+	$(error FILE is required. Usage: make restore FILE=backups/backup-20240411.tar.gz)
+endif
+	@echo ""
+	@echo "┌────────────────────────────────────────────────────────────────┐"
+	@echo "│  📥 Restoring from backup...                                   │"
+	@echo "│                                                                │"
+	@echo "│  File: $(FILE)"
+	@echo "│                                                                │"
+	@echo "│  ⚠️  This will OVERWRITE existing data!                        │"
+	@echo "│                                                                │"
+	@echo "│  Press Ctrl+C within 5 seconds to cancel...                   │"
+	@echo "└────────────────────────────────────────────────────────────────┘"
+	@echo ""
+	@sleep 5
+	@# Check file exists
+	@test -f "$(FILE)" || (echo "ERROR: Backup file not found: $(FILE)" && exit 1)
+	@# Create temp extraction directory
+	@mkdir -p "$(BACKUP_DIR)/restore-tmp"
+	@echo "Extracting backup..."
+	@tar -xzf "$(FILE)" -C "$(BACKUP_DIR)/restore-tmp"
+	@# Show manifest
+	@echo ""
+	@echo "Backup manifest:"
+	@cat "$(BACKUP_DIR)/restore-tmp/MANIFEST.txt" 2>/dev/null || echo "No manifest found (older backup format)"
+	@echo ""
+	@# Ensure volumes exist
+	@docker volume create jenkins-agent-data 2>/dev/null || true
+	@docker volume create jenkins-agent-reports 2>/dev/null || true
+	@# Restore agent_data volume (databases)
+	@echo "Restoring databases..."
+	@docker run --rm -v jenkins-agent-data:/data -v "$(CURDIR)/$(BACKUP_DIR)/restore-tmp":/backup alpine \
+		sh -c "rm -rf /data/* && cp /backup/*.db /data/ 2>/dev/null; cp -r /backup/exports /data/ 2>/dev/null || true"
+	@# Restore reports
+	@echo "Restoring reports..."
+	@docker run --rm -v jenkins-agent-reports:/data -v "$(CURDIR)/$(BACKUP_DIR)/restore-tmp":/backup alpine \
+		sh -c "rm -rf /data/* && cp -r /backup/reports/* /data/ 2>/dev/null || true"
+	@# Restore ollama models if present (full backup)
+	@if [ -d "$(BACKUP_DIR)/restore-tmp/ollama" ]; then \
+		echo "Restoring AI models (this may take a while)..."; \
+		docker volume create jenkins-agent-ollama 2>/dev/null || true; \
+		docker run --rm -v jenkins-agent-ollama:/data -v "$(CURDIR)/$(BACKUP_DIR)/restore-tmp":/backup alpine \
+			sh -c "rm -rf /data/* && cp -r /backup/ollama/* /data/"; \
+	fi
+	@# Restore config files (don't overwrite if exist, user might have customized)
+	@if [ ! -f .env ] && [ -f "$(BACKUP_DIR)/restore-tmp/.env" ]; then \
+		cp "$(BACKUP_DIR)/restore-tmp/.env" .env; \
+		echo "Restored .env"; \
+	else \
+		echo ".env exists, skipping (backup copy in $(BACKUP_DIR)/restore-tmp/.env)"; \
+	fi
+	@if [ ! -f config.yaml ] && [ -f "$(BACKUP_DIR)/restore-tmp/config.yaml" ]; then \
+		cp "$(BACKUP_DIR)/restore-tmp/config.yaml" config.yaml; \
+		echo "Restored config.yaml"; \
+	else \
+		echo "config.yaml exists, skipping (backup copy in $(BACKUP_DIR)/restore-tmp/config.yaml)"; \
+	fi
+	@echo ""
+	@echo "┌────────────────────────────────────────────────────────────────┐"
+	@echo "│  ✅ Restore completed successfully!                            │"
+	@echo "│                                                                │"
+	@echo "│  Restored:                                                     │"
+	@echo "│    • Databases (feedback.db, knowledge.db, training.db)       │"
+	@echo "│    • Reports and exports                                       │"
+	@test -d "$(BACKUP_DIR)/restore-tmp/ollama" && echo "│    • AI models (Ollama)                                        │" || true
+	@echo "│                                                                │"
+	@echo "│  Next steps:                                                   │"
+	@echo "│    1. Review .env and config.yaml settings                    │"
+	@echo "│    2. Run: make start                                          │"
+	@echo "│    3. Open: http://localhost:3000                              │"
+	@echo "└────────────────────────────────────────────────────────────────┘"
+	@echo ""
+	@# Cleanup
+	@rm -rf "$(BACKUP_DIR)/restore-tmp"
+
+# List available backups
+backup-list:
+	@echo ""
+	@echo "Available backups in $(BACKUP_DIR)/:"
+	@echo ""
+	@ls -lh $(BACKUP_DIR)/*.tar.gz 2>/dev/null || echo "  No backups found. Run 'make backup' to create one."
+	@echo ""
 
 # Open UI in browser
 ui:
