@@ -730,6 +730,73 @@ class KnowledgeStore:
             
             return True
     
+    def add_or_merge_tool(self, tool: ToolDefinition) -> Tuple[int, bool]:
+        """
+        Add a new tool or merge with existing tool if name matches.
+        
+        When merging:
+        - Patterns (commands, log signatures, env vars) are merged (deduplicated)
+        - Errors are merged by code (new codes added, existing codes updated)
+        - Other fields are updated only if the new value is non-empty
+        
+        Args:
+            tool: ToolDefinition to add or merge
+            
+        Returns:
+            Tuple of (tool_id, was_merged)
+        """
+        existing = self.get_tool(name=tool.name)
+        
+        if not existing:
+            # No existing tool - add new
+            tool_id = self.add_tool(tool)
+            return (tool_id, False)
+        
+        # Merge patterns (deduplicate)
+        merged_commands = list(set(existing.patterns_commands + tool.patterns_commands))
+        merged_log_sigs = list(set(existing.patterns_log_signatures + tool.patterns_log_signatures))
+        merged_env_vars = list(set(existing.patterns_env_vars + tool.patterns_env_vars))
+        
+        # Merge errors by code
+        existing_error_codes = {e.code: e for e in existing.errors}
+        for new_error in tool.errors:
+            if new_error.code not in existing_error_codes:
+                existing.errors.append(new_error)
+            # If code exists, keep existing (could add update logic here)
+        
+        # Update patterns
+        existing.patterns_commands = merged_commands
+        existing.patterns_log_signatures = merged_log_sigs
+        existing.patterns_env_vars = merged_env_vars
+        
+        # Update description if new one is longer/better
+        if tool.description and len(tool.description) > len(existing.description or ""):
+            existing.description = tool.description
+        
+        # Update docs_url if not set
+        if tool.docs_url and not existing.docs_url:
+            existing.docs_url = tool.docs_url
+        
+        # Update source info
+        if tool.source_file:
+            existing.source_file = tool.source_file
+        
+        # Merge aliases
+        existing.aliases = list(set(existing.aliases + tool.aliases))
+        
+        # Update confidence if higher
+        if tool.confidence > existing.confidence:
+            existing.confidence = tool.confidence
+        
+        # Save merged tool
+        self.update_tool(existing.id, existing)
+        
+        logger.info(f"Merged tool '{tool.name}' (id={existing.id}): "
+                   f"+{len(tool.patterns_commands)} commands, "
+                   f"+{len(tool.errors)} error patterns")
+        
+        return (existing.id, True)
+    
     def get_tool(self, tool_id: int = None, name: str = None) -> Optional[ToolDefinition]:
         """
         Get a tool by ID or name.

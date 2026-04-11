@@ -535,13 +535,13 @@ class DocImporter:
             confidence=info.confidence,
         )
         
-        # Add commands as patterns
+        # Add commands as patterns (normalized to base command + subcommand)
         for cmd in info.commands:
-            if cmd["example"] and cmd["example"] not in tool.patterns_commands:
-                # Extract command pattern (first 2-3 words)
-                parts = cmd["example"].split()[:3]
-                pattern = " ".join(parts)
-                if pattern not in tool.patterns_commands:
+            if cmd["example"]:
+                # Normalize command pattern: extract base command + first subcommand
+                # e.g., "a2l deploy --cluster prod --env staging" -> "a2l deploy"
+                pattern = self._normalize_command_pattern(cmd["example"], tool.name)
+                if pattern and pattern not in tool.patterns_commands:
                     tool.patterns_commands.append(pattern)
         
         # Add arguments
@@ -568,6 +568,61 @@ class DocImporter:
                 tool.patterns_env_vars.append(env["name"])
         
         return tool
+    
+    def _normalize_command_pattern(self, command: str, tool_name: str) -> Optional[str]:
+        """
+        Normalize command to base pattern for matching.
+        
+        Examples:
+            "a2l deploy --cluster prod" -> "a2l deploy"
+            "kubectl get pods -n kube-system" -> "kubectl get"
+            "git commit -m 'message'" -> "git commit"
+            "npm install --save-dev" -> "npm install"
+            
+        Args:
+            command: Full command string
+            tool_name: Expected tool name for validation
+            
+        Returns:
+            Normalized pattern or None if invalid
+        """
+        if not command:
+            return None
+        
+        parts = command.split()
+        if not parts:
+            return None
+        
+        # Extract meaningful parts (skip arguments starting with -)
+        meaningful_parts = []
+        for part in parts:
+            # Stop at first argument (starts with -)
+            if part.startswith("-"):
+                break
+            # Stop at values that look like paths, URLs, or variables
+            if "/" in part or "=" in part or part.startswith("$"):
+                break
+            meaningful_parts.append(part)
+        
+        if not meaningful_parts:
+            return None
+        
+        # Limit to tool + subcommand (max 2-3 words)
+        # e.g., "a2l deploy" or "kubectl get pods" -> "kubectl get"
+        if len(meaningful_parts) > 2:
+            # For 3+ words, check if first word is the tool
+            if meaningful_parts[0].lower() == tool_name.lower():
+                meaningful_parts = meaningful_parts[:2]  # tool + subcommand
+            else:
+                meaningful_parts = meaningful_parts[:2]
+        
+        pattern = " ".join(meaningful_parts)
+        
+        # Validate pattern includes tool name (case-insensitive)
+        if tool_name.lower() not in pattern.lower():
+            return None
+        
+        return pattern
     
     def _categorize_error_code(self, code: str) -> str:
         """Categorize error code based on naming patterns."""

@@ -1342,7 +1342,8 @@ def create_app(config: Config) -> FastAPI:
         url = request.get("url", "")
         tool_name = request.get("tool_name")
         extract_errors = request.get("extract_errors", True)
-        save_doc = request.get("save", False)
+        save_doc = request.get("save", True)  # Default to save
+        save_tool = request.get("save_tool", True)  # Default to save tool
         
         if not url:
             raise HTTPException(status_code=400, detail="url is required")
@@ -1353,6 +1354,8 @@ def create_app(config: Config) -> FastAPI:
             
             if not doc:
                 raise HTTPException(status_code=502, detail=f"Failed to fetch URL: {url}")
+            
+            store = get_knowledge_store()
             
             response = {
                 "status": "imported",
@@ -1375,20 +1378,29 @@ def create_app(config: Config) -> FastAPI:
                     "confidence": round(info.confidence, 2),
                 }
                 
-                # Generate tool definition if requested
+                # Generate and optionally save tool definition
                 if tool_name:
                     tool = importer.to_tool_definition(info, tool_name, url)
-                    response["tool"] = tool.to_dict()
+                    
+                    if save_tool:
+                        # Use add_or_merge to handle existing tools
+                        tool_id, was_merged = store.add_or_merge_tool(tool)
+                        saved_tool = store.get_tool(tool_id=tool_id)
+                        response["tool"] = saved_tool.to_dict() if saved_tool else tool.to_dict()
+                        response["tool"]["id"] = tool_id
+                        response["tool_saved"] = True
+                        response["tool_merged"] = was_merged
+                    else:
+                        response["tool"] = tool.to_dict()
+                        response["tool_saved"] = False
             
             # Save doc if requested
             if save_doc:
-                store = get_knowledge_store()
                 doc_id = store.add_doc(doc)
                 response["doc"]["id"] = doc_id
-                response["saved"] = True
+                response["doc_saved"] = True
             else:
-                response["saved"] = False
-                response["save_hint"] = "Set save=true to persist this document"
+                response["doc_saved"] = False
             
             return response
             

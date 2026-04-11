@@ -1450,8 +1450,11 @@
             const [activeTab, setActiveTab] = useState('tools');
             const [selectedTool, setSelectedTool] = useState(null);
             const [importUrl, setImportUrl] = useState('');
+            const [importToolName, setImportToolName] = useState('');
             const [importLoading, setImportLoading] = useState(false);
             const [importResult, setImportResult] = useState(null);
+            const [editingTool, setEditingTool] = useState(null);
+            const [editForm, setEditForm] = useState({});
             
             useEffect(() => {
                 loadData();
@@ -1489,7 +1492,12 @@
                     const res = await fetch(`${API_BASE}/knowledge/import-doc`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ url: importUrl, save: true })
+                        body: JSON.stringify({ 
+                            url: importUrl, 
+                            tool_name: importToolName || undefined,
+                            save: true,
+                            save_tool: true
+                        })
                     });
                     
                     const data = await res.json();
@@ -1497,6 +1505,7 @@
                     if (res.ok) {
                         setImportResult({ success: true, data });
                         setImportUrl('');
+                        setImportToolName('');
                         loadData();
                     } else {
                         setImportResult({ success: false, error: data.detail || 'Import failed' });
@@ -1522,6 +1531,53 @@
                     }
                 } catch (e) {
                     console.error('Delete failed:', e);
+                }
+            };
+            
+            const handleEditTool = (tool) => {
+                setEditingTool(tool);
+                setEditForm({
+                    name: tool.name || '',
+                    category: tool.category || 'internal',
+                    description: tool.description || '',
+                    docs_url: tool.docs_url || '',
+                    patterns_commands: (tool.patterns_commands || []).join('\n'),
+                    patterns_env_vars: (tool.patterns_env_vars || []).join('\n'),
+                    aliases: (tool.aliases || []).join(', '),
+                });
+            };
+            
+            const handleSaveEdit = async () => {
+                if (!editingTool) return;
+                
+                try {
+                    const updatedTool = {
+                        ...editingTool,
+                        name: editForm.name,
+                        category: editForm.category,
+                        description: editForm.description,
+                        docs_url: editForm.docs_url,
+                        patterns_commands: editForm.patterns_commands.split('\n').filter(c => c.trim()),
+                        patterns_env_vars: editForm.patterns_env_vars.split('\n').filter(e => e.trim()),
+                        aliases: editForm.aliases.split(',').map(a => a.trim()).filter(a => a),
+                    };
+                    
+                    const res = await fetch(`${API_BASE}/knowledge/tools/${editingTool.id}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(updatedTool)
+                    });
+                    
+                    if (res.ok) {
+                        setEditingTool(null);
+                        setSelectedTool(null);
+                        loadData();
+                    } else {
+                        alert('Failed to save changes');
+                    }
+                } catch (e) {
+                    console.error('Save failed:', e);
+                    alert('Failed to save: ' + e.message);
                 }
             };
             
@@ -1639,6 +1695,12 @@
                                                     
                                                     <div className="flex gap-2 mt-3">
                                                         <button
+                                                            onClick={(e) => { e.stopPropagation(); handleEditTool(tool); }}
+                                                            className="text-xs px-3 py-1 rounded bg-indigo-500/20 text-indigo-400 hover:bg-indigo-500/30"
+                                                        >
+                                                            <i className="fas fa-edit mr-1"></i> Edit
+                                                        </button>
+                                                        <button
                                                             onClick={(e) => { e.stopPropagation(); handleDeleteTool(tool.id); }}
                                                             className="text-xs px-3 py-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30"
                                                         >
@@ -1658,23 +1720,37 @@
                     {activeTab === 'import' && (
                         <Card className="p-4">
                             <h4 className="font-medium mb-3">Import from Documentation URL</h4>
-                            <div className="flex gap-2">
-                                <input
-                                    type="url"
-                                    value={importUrl}
-                                    onChange={(e) => setImportUrl(e.target.value)}
-                                    placeholder="https://wiki.company.com/tools/my-tool"
-                                    className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-                                />
+                            <div className="space-y-3">
+                                <div>
+                                    <label className="text-xs text-gray-400 block mb-1">Documentation URL *</label>
+                                    <input
+                                        type="url"
+                                        value={importUrl}
+                                        onChange={(e) => setImportUrl(e.target.value)}
+                                        placeholder="https://wiki.company.com/tools/my-tool"
+                                        className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="text-xs text-gray-400 block mb-1">Tool Name (required to save as tool)</label>
+                                    <input
+                                        type="text"
+                                        value={importToolName}
+                                        onChange={(e) => setImportToolName(e.target.value)}
+                                        placeholder="e.g., kubectl, a2l, my-cli"
+                                        className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                                    />
+                                    <p className="text-xs text-gray-500 mt-1">If tool already exists, patterns will be merged</p>
+                                </div>
                                 <button
                                     onClick={handleImportDoc}
                                     disabled={!importUrl || importLoading}
-                                    className="px-4 py-2 bg-indigo-500 hover:bg-indigo-600 disabled:bg-gray-600 rounded-lg text-sm font-medium transition-colors"
+                                    className="w-full px-4 py-2 bg-indigo-500 hover:bg-indigo-600 disabled:bg-gray-600 rounded-lg text-sm font-medium transition-colors"
                                 >
                                     {importLoading ? (
-                                        <i className="fas fa-spinner fa-spin"></i>
+                                        <><i className="fas fa-spinner fa-spin mr-2"></i>Importing...</>
                                     ) : (
-                                        <><i className="fas fa-download mr-2"></i>Import</>
+                                        <><i className="fas fa-download mr-2"></i>Import Documentation</>
                                     )}
                                 </button>
                             </div>
@@ -1684,16 +1760,25 @@
                                     importResult.success ? 'bg-green-500/20 text-green-300' : 'bg-red-500/20 text-red-300'
                                 }`}>
                                     {importResult.success ? (
-                                        <>
-                                            <i className="fas fa-check-circle mr-2"></i>
-                                            Imported: {importResult.data.doc?.title || 'Document'}
-                                            {importResult.data.extracted && (
-                                                <span className="text-sm ml-2">
-                                                    ({importResult.data.extracted.commands?.length || 0} commands, 
-                                                    {importResult.data.extracted.errors?.length || 0} errors)
-                                                </span>
+                                        <div>
+                                            <div className="flex items-center">
+                                                <i className="fas fa-check-circle mr-2"></i>
+                                                <span className="font-medium">Imported: {importResult.data.doc?.title || 'Document'}</span>
+                                            </div>
+                                            {importResult.data.tool_saved && (
+                                                <div className="text-sm mt-1">
+                                                    <i className="fas fa-cube mr-1"></i>
+                                                    Tool "{importResult.data.tool?.name}" 
+                                                    {importResult.data.tool_merged ? ' (merged with existing)' : ' (created new)'}
+                                                </div>
                                             )}
-                                        </>
+                                            {importResult.data.extracted && (
+                                                <div className="text-sm mt-1 text-gray-400">
+                                                    {importResult.data.extracted.commands?.length || 0} commands, 
+                                                    {importResult.data.extracted.errors?.length || 0} errors extracted
+                                                </div>
+                                            )}
+                                        </div>
                                     ) : (
                                         <>
                                             <i className="fas fa-times-circle mr-2"></i>
@@ -1712,6 +1797,118 @@
                                 </ul>
                             </div>
                         </Card>
+                    )}
+                    
+                    {/* Edit Tool Modal */}
+                    {editingTool && (
+                        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setEditingTool(null)}>
+                            <div className="bg-gray-800 rounded-lg p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+                                <div className="flex justify-between items-center mb-4">
+                                    <h3 className="text-lg font-bold">Edit Tool: {editingTool.name}</h3>
+                                    <button onClick={() => setEditingTool(null)} className="text-gray-400 hover:text-white">
+                                        <i className="fas fa-times"></i>
+                                    </button>
+                                </div>
+                                
+                                <div className="space-y-4">
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="text-xs text-gray-400 block mb-1">Tool Name</label>
+                                            <input
+                                                type="text"
+                                                value={editForm.name}
+                                                onChange={(e) => setEditForm({...editForm, name: e.target.value})}
+                                                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-sm"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs text-gray-400 block mb-1">Category</label>
+                                            <select
+                                                value={editForm.category}
+                                                onChange={(e) => setEditForm({...editForm, category: e.target.value})}
+                                                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-sm"
+                                            >
+                                                <option value="internal">Internal</option>
+                                                <option value="build">Build</option>
+                                                <option value="test">Test</option>
+                                                <option value="deploy">Deploy</option>
+                                                <option value="infrastructure">Infrastructure</option>
+                                                <option value="monitoring">Monitoring</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">Description</label>
+                                        <textarea
+                                            value={editForm.description}
+                                            onChange={(e) => setEditForm({...editForm, description: e.target.value})}
+                                            rows={2}
+                                            className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-sm"
+                                        />
+                                    </div>
+                                    
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">Aliases (comma separated)</label>
+                                        <input
+                                            type="text"
+                                            value={editForm.aliases}
+                                            onChange={(e) => setEditForm({...editForm, aliases: e.target.value})}
+                                            placeholder="cli-name, alternate-name"
+                                            className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-sm"
+                                        />
+                                    </div>
+                                    
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">Documentation URL</label>
+                                        <input
+                                            type="url"
+                                            value={editForm.docs_url}
+                                            onChange={(e) => setEditForm({...editForm, docs_url: e.target.value})}
+                                            placeholder="https://docs.example.com/tool"
+                                            className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-sm"
+                                        />
+                                    </div>
+                                    
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">Command Patterns (one per line)</label>
+                                        <textarea
+                                            value={editForm.patterns_commands}
+                                            onChange={(e) => setEditForm({...editForm, patterns_commands: e.target.value})}
+                                            rows={4}
+                                            placeholder="tool-name command&#10;tool-name other-command"
+                                            className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-sm font-mono"
+                                        />
+                                    </div>
+                                    
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">Environment Variables (one per line)</label>
+                                        <textarea
+                                            value={editForm.patterns_env_vars}
+                                            onChange={(e) => setEditForm({...editForm, patterns_env_vars: e.target.value})}
+                                            rows={3}
+                                            placeholder="TOOL_API_KEY&#10;TOOL_CONFIG_PATH"
+                                            className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-sm font-mono"
+                                        />
+                                    </div>
+                                </div>
+                                
+                                <div className="flex gap-3 mt-6">
+                                    <button
+                                        onClick={handleSaveEdit}
+                                        className="flex-1 px-4 py-2 bg-indigo-500 hover:bg-indigo-600 rounded-lg text-sm font-medium"
+                                    >
+                                        <i className="fas fa-save mr-2"></i>Save Changes
+                                    </button>
+                                    <button
+                                        onClick={() => setEditingTool(null)}
+                                        className="px-4 py-2 bg-gray-600 hover:bg-gray-500 rounded-lg text-sm"
+                                    >
+                                        Cancel
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
                     )}
                 </div>
             );
