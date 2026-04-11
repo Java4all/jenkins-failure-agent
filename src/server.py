@@ -4,6 +4,7 @@ Provides HTTP endpoints for integration with Jenkins webhooks.
 """
 
 import logging
+import requests
 from datetime import datetime
 from typing import Optional
 
