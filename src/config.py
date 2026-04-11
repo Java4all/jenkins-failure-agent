@@ -173,6 +173,8 @@ class Config:
     reporting: Dict[str, Any] = field(default_factory=dict)
     history: Dict[str, Any] = field(default_factory=dict)
     logging: Dict[str, Any] = field(default_factory=dict)
+    # Global SSL verification (used as default for all HTTP clients)
+    verify_ssl: bool = False
 
 
 def load_config(config_path: Optional[str] = None, env_file: str = ".env") -> Config:
@@ -223,12 +225,15 @@ def load_config(config_path: Optional[str] = None, env_file: str = ".env") -> Co
     # Apply environment variable overrides
     raw_config = _apply_env_overrides(raw_config)
     
+    # Global SSL verification default (can be overridden per-service)
+    global_verify_ssl = raw_config.get("global", {}).get("verify_ssl", False)
+    
     # Build config objects
     jenkins_cfg = JenkinsConfig(
         url=raw_config.get("jenkins", {}).get("url", ""),
         username=raw_config.get("jenkins", {}).get("username", ""),
         api_token=raw_config.get("jenkins", {}).get("api_token", ""),
-        verify_ssl=raw_config.get("jenkins", {}).get("verify_ssl", True),
+        verify_ssl=raw_config.get("jenkins", {}).get("verify_ssl", global_verify_ssl),
         timeout=raw_config.get("jenkins", {}).get("timeout", 30),
         monitored_jobs=raw_config.get("jenkins", {}).get("monitored_jobs", []),
     )
@@ -263,7 +268,7 @@ def load_config(config_path: Optional[str] = None, env_file: str = ".env") -> Co
         base_url=raw_config.get("github", {}).get("base_url", "https://api.github.com"),
         token=raw_config.get("github", {}).get("token", ""),
         timeout=raw_config.get("github", {}).get("timeout", 30),
-        verify_ssl=raw_config.get("github", {}).get("verify_ssl", True),
+        verify_ssl=raw_config.get("github", {}).get("verify_ssl", global_verify_ssl),
         cache_enabled=raw_config.get("github", {}).get("cache_enabled", True),
         cache_ttl_seconds=raw_config.get("github", {}).get("cache_ttl_seconds", 300),
         library_mappings=raw_config.get("github", {}).get("library_mappings", {}),
@@ -291,7 +296,7 @@ def load_config(config_path: Optional[str] = None, env_file: str = ".env") -> Co
         provider=raw_config.get("scm", {}).get("provider", "github"),
         api_url=raw_config.get("scm", {}).get("api_url", "https://api.github.com"),
         token=raw_config.get("scm", {}).get("token", ""),
-        verify_ssl=raw_config.get("scm", {}).get("verify_ssl", True),
+        verify_ssl=raw_config.get("scm", {}).get("verify_ssl", global_verify_ssl),
         auto_comment=raw_config.get("scm", {}).get("auto_comment", True),
         update_existing=raw_config.get("scm", {}).get("update_existing", True),
         set_commit_status=raw_config.get("scm", {}).get("set_commit_status", True),
@@ -381,6 +386,7 @@ def load_config(config_path: Optional[str] = None, env_file: str = ".env") -> Co
         reporting=raw_config.get("reporting", {}),
         history=raw_config.get("history", {}),
         logging=raw_config.get("logging", {}),
+        verify_ssl=global_verify_ssl,
     )
 
 
@@ -472,6 +478,13 @@ def _apply_env_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
         "POST_TO_PR": ("reporter", "post_to_pr"),
         # Req 12.5: RC Analyzer boolean
         "RC_ANALYZER_ENABLED": ("rc_analyzer", "enabled"),
+        # GitHub enabled flag
+        "GITHUB_ENABLED": ("github", "enabled"),
+        # SSL verification settings (global and per-service)
+        "VERIFY_SSL": ("global", "verify_ssl"),  # Global default
+        "JENKINS_VERIFY_SSL": ("jenkins", "verify_ssl"),
+        "GITHUB_VERIFY_SSL": ("github", "verify_ssl"),
+        "SCM_VERIFY_SSL": ("scm", "verify_ssl"),
     }
     
     # Numeric env vars (Req 12.5)

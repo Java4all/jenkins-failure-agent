@@ -1348,7 +1348,7 @@ def create_app(config: Config) -> FastAPI:
             raise HTTPException(status_code=400, detail="url is required")
         
         try:
-            importer = DocImporter()
+            importer = DocImporter(verify_ssl=config.verify_ssl)
             doc, info = importer.import_url(url, tool_name, extract_info=extract_errors)
             
             if not doc:
