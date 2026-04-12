@@ -6,10 +6,12 @@ Provides HTTP endpoints for integration with Jenkins webhooks.
 import logging
 import requests
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from .config import Config

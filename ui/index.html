@@ -1787,7 +1787,9 @@
                                 </div>
                             ) : (
                                 <div className="space-y-2">
-                                    {docs.map(doc => (
+                                    {docs.map(doc => {
+                                        const linkedTool = doc.tool_id ? tools.find(t => t.id === doc.tool_id) : null;
+                                        return (
                                         <div
                                             key={doc.id}
                                             onClick={() => setSelectedDoc(selectedDoc?.id === doc.id ? null : doc)}
@@ -1808,9 +1810,13 @@
                                                     </div>
                                                 </div>
                                                 <div className="flex items-center gap-2">
-                                                    {doc.tool_id ? (
+                                                    {linkedTool ? (
                                                         <span className="text-xs px-2 py-1 rounded bg-green-500/20 text-green-400">
-                                                            <i className="fas fa-link mr-1"></i>Linked to tool
+                                                            <i className="fas fa-cube mr-1"></i>{linkedTool.name}
+                                                        </span>
+                                                    ) : doc.tool_id ? (
+                                                        <span className="text-xs px-2 py-1 rounded bg-green-500/20 text-green-400">
+                                                            <i className="fas fa-link mr-1"></i>Tool #{doc.tool_id}
                                                         </span>
                                                     ) : (
                                                         <span className="text-xs px-2 py-1 rounded bg-yellow-500/20 text-yellow-400">
@@ -1822,6 +1828,13 @@
                                             
                                             {selectedDoc?.id === doc.id && (
                                                 <div className="mt-3 pt-3 border-t border-gray-600 text-sm">
+                                                    {linkedTool && (
+                                                        <div className="mb-2">
+                                                            <span className="text-gray-500">Tool: </span>
+                                                            <span className="text-green-400 font-medium">{linkedTool.name}</span>
+                                                            <span className="text-gray-500 ml-2">({linkedTool.category})</span>
+                                                        </div>
+                                                    )}
                                                     {doc.source_url && (
                                                         <div className="mb-2">
                                                             <span className="text-gray-500">Source: </span>
@@ -1861,7 +1874,7 @@
                                                 </div>
                                             )}
                                         </div>
-                                    ))}
+                                    );})}
                                 </div>
                             )}
                         </Card>
