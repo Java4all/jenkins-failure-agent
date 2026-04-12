@@ -1513,6 +1513,7 @@
                 
                 try {
                     // Re-import the doc URL with a tool name to create the tool
+                    // Pass link_doc_id to update the existing doc's tool reference
                     const res = await fetch(`${API_BASE}/knowledge/import-doc`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -1520,7 +1521,8 @@
                             url: createToolFromDoc.source_url,
                             tool_name: newToolName.trim(),
                             save: false,  // Don't duplicate the doc
-                            save_tool: true
+                            save_tool: true,
+                            link_doc_id: createToolFromDoc.id  // Link existing doc to new tool
                         })
                     });
                     
@@ -2048,6 +2050,10 @@
                                                 <option value="deploy">Deploy</option>
                                                 <option value="infrastructure">Infrastructure</option>
                                                 <option value="monitoring">Monitoring</option>
+                                                <option value="application">Application</option>
+                                                <option value="runtime">Runtime</option>
+                                                <option value="database">Database</option>
+                                                <option value="security">Security</option>
                                             </select>
                                         </div>
                                     </div>

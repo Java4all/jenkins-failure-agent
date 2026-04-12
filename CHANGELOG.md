@@ -26,6 +26,21 @@ This is a major release milestone that completes the AI Learning System with ful
 | **Docs** | View imported docs, create tool from doc, delete orphan docs |
 | **Import** | Import from URL with tool name, auto-detection, merge support |
 
+### Tool Categories
+
+| Category | Use For |
+|----------|---------|
+| `internal` | Company-specific internal tools |
+| `build` | Build tools (maven, gradle, npm) |
+| `test` | Testing frameworks (pytest, junit) |
+| `deploy` | Deployment tools (helm, kubectl) |
+| `infrastructure` | Infra tools (terraform, ansible) |
+| `monitoring` | Monitoring (prometheus, grafana) |
+| `application` | Application frameworks (spring, django) |
+| `runtime` | Runtime environments (java, node, python) |
+| `database` | Database tools (mysql, postgres, redis) |
+| `security` | Security tools (vault, keycloak) |
+
 ### Import Improvements
 
 - **Auto-save**: Docs and tools saved by default

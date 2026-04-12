@@ -1042,6 +1042,48 @@ class KnowledgeStore:
             
             return deleted
     
+    def update_doc_tool_id(self, doc_id: int, tool_id: int) -> bool:
+        """
+        Link a document to a tool.
+        
+        Args:
+            doc_id: Document ID to update
+            tool_id: Tool ID to link to
+            
+        Returns:
+            True if updated, False if doc not found
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "UPDATE knowledge_docs SET tool_id = ? WHERE id = ?",
+                (tool_id, doc_id)
+            )
+            conn.commit()
+            
+            updated = cursor.rowcount > 0
+            if updated:
+                logger.info(f"Linked doc id={doc_id} to tool id={tool_id}")
+            
+            return updated
+    
+    def get_doc(self, doc_id: int) -> Optional[KnowledgeDoc]:
+        """
+        Get a document by ID.
+        
+        Args:
+            doc_id: Document ID
+            
+        Returns:
+            KnowledgeDoc or None if not found
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "SELECT * FROM knowledge_docs WHERE id = ?", 
+                (doc_id,)
+            )
+            row = cursor.fetchone()
+            return KnowledgeDoc.from_row(row) if row else None
+    
     # =========================================================================
     # Source Analysis Log
     # =========================================================================

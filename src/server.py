@@ -1344,6 +1344,7 @@ def create_app(config: Config) -> FastAPI:
         extract_errors = request.get("extract_errors", True)
         save_doc = request.get("save", True)  # Default to save
         save_tool = request.get("save_tool", True)  # Default to save tool
+        link_doc_id = request.get("link_doc_id")  # Optional: link existing doc to new tool
         
         if not url:
             raise HTTPException(status_code=400, detail="url is required")
@@ -1405,6 +1406,14 @@ def create_app(config: Config) -> FastAPI:
                         response["tool"]["id"] = tool_id
                         response["tool_saved"] = True
                         response["tool_merged"] = was_merged
+                        
+                        # Link doc to tool
+                        doc.tool_id = tool_id
+                        
+                        # Also link existing doc if specified (for "Create Tool from Doc" flow)
+                        if link_doc_id:
+                            store.update_doc_tool_id(link_doc_id, tool_id)
+                            response["linked_doc_id"] = link_doc_id
                     else:
                         response["tool"] = tool.to_dict()
                         response["tool_saved"] = False
