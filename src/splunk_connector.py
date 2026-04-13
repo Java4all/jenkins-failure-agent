@@ -24,8 +24,7 @@ class SplunkConfig:
     """Splunk connection configuration."""
     enabled: bool = False
     url: str = ""
-    username: str = ""           # Splunk username
-    token: str = ""              # Splunk token/password
+    token: str = ""              # Bearer token
     index: str = "jenkins_console"
     search_filter: str = ""
     log_tail_lines: int = 500
@@ -88,15 +87,9 @@ class SplunkConnector:
     def __init__(self, config: SplunkConfig):
         self.config = config
         self.session = requests.Session()
-        
-        # Splunk REST API uses Basic Auth with username:token
-        if config.username and config.token:
-            self.session.auth = (config.username, config.token)
-        elif config.token:
-            # Fallback to Bearer token if only token provided
-            self.session.headers.update({
-                "Authorization": f"Bearer {config.token}",
-            })
+        self.session.headers.update({
+            "Authorization": f"Bearer {config.token}",
+        })
     
     def _search(self, query: str, max_results: int = 1000) -> List[Dict[str, Any]]:
         """
@@ -374,7 +367,6 @@ def get_splunk_connector() -> Optional[SplunkConnector]:
         splunk_config = SplunkConfig(
             enabled=os.environ.get("SPLUNK_ENABLED", "false").lower() == "true",
             url=os.environ.get("SPLUNK_URL", ""),
-            username=os.environ.get("SPLUNK_USERNAME", ""),
             token=os.environ.get("SPLUNK_TOKEN", ""),
             index=os.environ.get("SPLUNK_INDEX", "jenkins_console"),
             search_filter=os.environ.get("SPLUNK_SEARCH_FILTER", ""),
