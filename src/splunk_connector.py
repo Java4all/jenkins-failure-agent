@@ -358,6 +358,12 @@ index={self.config.index} host="{host}" source="*/{job_id}/console"
 _splunk_connector: Optional[SplunkConnector] = None
 
 
+def reset_splunk_connector():
+    """Reset singleton to pick up config changes."""
+    global _splunk_connector
+    _splunk_connector = None
+
+
 def get_splunk_connector() -> Optional[SplunkConnector]:
     """Get or create Splunk connector singleton."""
     global _splunk_connector

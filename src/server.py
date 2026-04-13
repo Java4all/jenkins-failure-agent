@@ -1724,11 +1724,18 @@ def create_app(config: Config) -> FastAPI:
     @app.get("/splunk/status")
     async def get_splunk_status(api_key: str = Depends(verify_api_key)):
         """Get Splunk integration status."""
-        from .splunk_connector import get_splunk_connector
+        from .splunk_connector import get_splunk_connector, reset_splunk_connector
+        
+        # Reset singleton to pick up any env changes
+        reset_splunk_connector()
         
         connector = get_splunk_connector()
         if not connector:
-            return {"enabled": False, "message": "Splunk integration not configured"}
+            return {
+                "success": False,
+                "enabled": False, 
+                "message": "Splunk integration not configured (SPLUNK_ENABLED=false or missing config)"
+            }
         
         return connector.test_connection()
     

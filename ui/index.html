@@ -2570,16 +2570,23 @@
                                 <div className="flex items-center gap-2">
                                     <i className="fas fa-database text-purple-400"></i>
                                     <span className="font-medium">Splunk</span>
-                                    {splunkStatus?.enabled !== false ? (
-                                        <span className={`px-2 py-0.5 text-xs rounded ${splunkStatus?.success ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
-                                            {splunkStatus?.success ? 'Connected' : 'Error'}
-                                        </span>
-                                    ) : (
+                                    {splunkStatus?.enabled === false ? (
                                         <span className="px-2 py-0.5 text-xs rounded bg-gray-500/20 text-gray-400">Disabled</span>
+                                    ) : splunkStatus?.success ? (
+                                        <span className="px-2 py-0.5 text-xs rounded bg-green-500/20 text-green-400">Connected</span>
+                                    ) : (
+                                        <span className="px-2 py-0.5 text-xs rounded bg-red-500/20 text-red-400" title={splunkStatus?.error || ''}>
+                                            Error
+                                        </span>
                                     )}
                                 </div>
                                 {splunkStatus?.index && (
                                     <span className="text-xs text-gray-500">Index: {splunkStatus.index}</span>
+                                )}
+                                {splunkStatus?.error && (
+                                    <span className="text-xs text-red-400 truncate max-w-xs" title={splunkStatus.error}>
+                                        {splunkStatus.error}
+                                    </span>
                                 )}
                             </div>
                             
