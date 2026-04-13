@@ -426,6 +426,31 @@ class TrainingPipeline:
             logger.error(f"Failed to import from knowledge: {e}")
             return 0
     
+    def add_from_review(
+        self,
+        job_name: str,
+        build_number: str,
+        log_snippet: str,
+        root_cause: str,
+        fix: str,
+        category: str = "",
+    ) -> int:
+        """Add training example from review queue approval."""
+        example = TrainingExample(
+            source="review_queue",
+            source_id=f"{job_name}#{build_number}",
+            job_name=job_name,
+            error_snippet=log_snippet,
+            root_cause=root_cause,
+            fix=fix,
+            category=category,
+            confidence=1.0,  # Human reviewed = high confidence
+            is_validated=True,
+            quality_score=1.0,
+        )
+        
+        return self.add_example(example)
+    
     def get_examples(
         self,
         source: str = None,

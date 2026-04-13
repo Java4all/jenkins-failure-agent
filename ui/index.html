@@ -2435,6 +2435,364 @@
         }
 
         // =====================================================================
+        // Review Queue Panel (Splunk Integration)
+        // =====================================================================
+        
+        function ReviewQueuePanel() {
+            const [items, setItems] = useState([]);
+            const [stats, setStats] = useState({});
+            const [splunkStatus, setSplunkStatus] = useState(null);
+            const [loading, setLoading] = useState(true);
+            const [syncing, setSyncing] = useState(false);
+            const [selectedItem, setSelectedItem] = useState(null);
+            const [editMode, setEditMode] = useState(false);
+            const [editData, setEditData] = useState({});
+            const [statusFilter, setStatusFilter] = useState('pending');
+            const [syncMinutes, setSyncMinutes] = useState(15);
+            
+            const loadData = async () => {
+                try {
+                    // Load queue items
+                    const itemsRes = await fetch(`${API_BASE}/review-queue?status=${statusFilter}&limit=100`);
+                    if (itemsRes.ok) {
+                        const data = await itemsRes.json();
+                        setItems(data.items || []);
+                        setStats(data.stats || {});
+                    }
+                    
+                    // Load Splunk status
+                    const statusRes = await fetch(`${API_BASE}/splunk/status`);
+                    if (statusRes.ok) {
+                        const data = await statusRes.json();
+                        setSplunkStatus(data);
+                    }
+                } catch (e) {
+                    console.error('Failed to load review queue:', e);
+                } finally {
+                    setLoading(false);
+                }
+            };
+            
+            useEffect(() => { loadData(); }, [statusFilter]);
+            
+            const syncSplunk = async () => {
+                setSyncing(true);
+                try {
+                    const res = await fetch(`${API_BASE}/splunk/sync?minutes=${syncMinutes}&analyze=true`, {
+                        method: 'POST'
+                    });
+                    if (res.ok) {
+                        const data = await res.json();
+                        alert(`Synced ${data.synced} new items from ${data.total_failures} failures`);
+                        loadData();
+                    } else {
+                        const err = await res.json();
+                        alert(`Sync failed: ${err.detail || 'Unknown error'}`);
+                    }
+                } catch (e) {
+                    alert(`Sync error: ${e.message}`);
+                } finally {
+                    setSyncing(false);
+                }
+            };
+            
+            const approveItem = async (itemId, overrides = {}) => {
+                try {
+                    const res = await fetch(`${API_BASE}/review-queue/${itemId}/approve`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(overrides)
+                    });
+                    if (res.ok) {
+                        loadData();
+                        setSelectedItem(null);
+                        setEditMode(false);
+                    }
+                } catch (e) {
+                    console.error('Approve failed:', e);
+                }
+            };
+            
+            const rejectItem = async (itemId, reason = '') => {
+                try {
+                    const res = await fetch(`${API_BASE}/review-queue/${itemId}/reject`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ reason })
+                    });
+                    if (res.ok) {
+                        loadData();
+                        setSelectedItem(null);
+                    }
+                } catch (e) {
+                    console.error('Reject failed:', e);
+                }
+            };
+            
+            const deleteItem = async (itemId) => {
+                if (!confirm('Delete this item?')) return;
+                try {
+                    const res = await fetch(`${API_BASE}/review-queue/${itemId}`, { method: 'DELETE' });
+                    if (res.ok) {
+                        loadData();
+                        setSelectedItem(null);
+                    }
+                } catch (e) {
+                    console.error('Delete failed:', e);
+                }
+            };
+            
+            const openEdit = (item) => {
+                setSelectedItem(item);
+                setEditMode(true);
+                setEditData({
+                    root_cause: item.ai_root_cause,
+                    fix: item.ai_fix,
+                    category: item.ai_category
+                });
+            };
+            
+            if (loading) {
+                return (
+                    <Card className="p-8 text-center">
+                        <i className="fas fa-spinner fa-spin text-2xl text-indigo-400"></i>
+                        <p className="mt-2 text-gray-400">Loading review queue...</p>
+                    </Card>
+                );
+            }
+            
+            return (
+                <div className="space-y-6">
+                    {/* Splunk Status & Sync */}
+                    <Card className="p-4">
+                        <div className="flex items-center justify-between flex-wrap gap-4">
+                            <div className="flex items-center gap-4">
+                                <div className="flex items-center gap-2">
+                                    <i className="fas fa-database text-purple-400"></i>
+                                    <span className="font-medium">Splunk</span>
+                                    {splunkStatus?.enabled !== false ? (
+                                        <span className={`px-2 py-0.5 text-xs rounded ${splunkStatus?.success ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
+                                            {splunkStatus?.success ? 'Connected' : 'Error'}
+                                        </span>
+                                    ) : (
+                                        <span className="px-2 py-0.5 text-xs rounded bg-gray-500/20 text-gray-400">Disabled</span>
+                                    )}
+                                </div>
+                                {splunkStatus?.index && (
+                                    <span className="text-xs text-gray-500">Index: {splunkStatus.index}</span>
+                                )}
+                            </div>
+                            
+                            <div className="flex items-center gap-3">
+                                <div className="flex items-center gap-2">
+                                    <label className="text-xs text-gray-400">Last</label>
+                                    <select 
+                                        value={syncMinutes} 
+                                        onChange={(e) => setSyncMinutes(parseInt(e.target.value))}
+                                        className="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm"
+                                    >
+                                        <option value="15">15 min</option>
+                                        <option value="30">30 min</option>
+                                        <option value="60">1 hour</option>
+                                        <option value="120">2 hours</option>
+                                        <option value="1440">24 hours</option>
+                                    </select>
+                                </div>
+                                <Button 
+                                    onClick={syncSplunk} 
+                                    loading={syncing} 
+                                    disabled={!splunkStatus?.success}
+                                    variant="primary"
+                                    size="sm"
+                                >
+                                    <i className="fas fa-sync-alt mr-1"></i>
+                                    Sync Now
+                                </Button>
+                            </div>
+                        </div>
+                    </Card>
+                    
+                    {/* Stats */}
+                    <div className="grid grid-cols-4 gap-4">
+                        <Card className="p-4 text-center">
+                            <div className="text-2xl font-bold text-yellow-400">{stats.pending || 0}</div>
+                            <div className="text-xs text-gray-400">Pending</div>
+                        </Card>
+                        <Card className="p-4 text-center">
+                            <div className="text-2xl font-bold text-green-400">{stats.approved || 0}</div>
+                            <div className="text-xs text-gray-400">Approved</div>
+                        </Card>
+                        <Card className="p-4 text-center">
+                            <div className="text-2xl font-bold text-red-400">{stats.rejected || 0}</div>
+                            <div className="text-xs text-gray-400">Rejected</div>
+                        </Card>
+                        <Card className="p-4 text-center">
+                            <div className="text-2xl font-bold text-blue-400">{stats.total || 0}</div>
+                            <div className="text-xs text-gray-400">Total</div>
+                        </Card>
+                    </div>
+                    
+                    {/* Filter Tabs */}
+                    <div className="flex gap-2">
+                        {['pending', 'approved', 'rejected', ''].map((status) => (
+                            <button
+                                key={status || 'all'}
+                                onClick={() => setStatusFilter(status)}
+                                className={`px-3 py-1.5 rounded text-sm ${
+                                    statusFilter === status
+                                        ? 'bg-indigo-500 text-white'
+                                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                                }`}
+                            >
+                                {status || 'All'}
+                            </button>
+                        ))}
+                    </div>
+                    
+                    {/* Items List */}
+                    <Card className="overflow-hidden">
+                        {items.length === 0 ? (
+                            <div className="p-8 text-center text-gray-400">
+                                <i className="fas fa-inbox text-4xl mb-3"></i>
+                                <p>No items in queue</p>
+                                <p className="text-sm mt-1">Click "Sync Now" to pull failures from Splunk</p>
+                            </div>
+                        ) : (
+                            <div className="divide-y divide-gray-700">
+                                {items.map((item) => (
+                                    <div 
+                                        key={item.id} 
+                                        className={`p-4 hover:bg-gray-750 cursor-pointer ${selectedItem?.id === item.id ? 'bg-gray-750' : ''}`}
+                                        onClick={() => setSelectedItem(selectedItem?.id === item.id ? null : item)}
+                                    >
+                                        <div className="flex items-start justify-between">
+                                            <div className="flex-1 min-w-0">
+                                                <div className="flex items-center gap-2 mb-1">
+                                                    <span className="font-medium truncate">{item.job_name}</span>
+                                                    <span className="text-gray-500">#{item.job_id}</span>
+                                                    <span className={`px-2 py-0.5 text-xs rounded ${
+                                                        item.status === 'pending' ? 'bg-yellow-500/20 text-yellow-400' :
+                                                        item.status === 'approved' ? 'bg-green-500/20 text-green-400' :
+                                                        'bg-red-500/20 text-red-400'
+                                                    }`}>
+                                                        {item.status}
+                                                    </span>
+                                                </div>
+                                                <div className="text-sm text-gray-400 truncate">{item.ai_root_cause || 'No analysis'}</div>
+                                                <div className="flex items-center gap-3 mt-1 text-xs text-gray-500">
+                                                    <span><i className="fas fa-server mr-1"></i>{item.host}</span>
+                                                    <span><i className="fas fa-percentage mr-1"></i>{Math.round(item.ai_confidence * 100)}%</span>
+                                                    {item.ai_category && <span className="px-1.5 py-0.5 bg-gray-700 rounded">{item.ai_category}</span>}
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center gap-2 ml-4">
+                                                {item.status === 'pending' && (
+                                                    <>
+                                                        <button 
+                                                            onClick={(e) => { e.stopPropagation(); approveItem(item.id); }}
+                                                            className="p-2 text-green-400 hover:bg-green-500/20 rounded"
+                                                            title="Approve"
+                                                        >
+                                                            <i className="fas fa-check"></i>
+                                                        </button>
+                                                        <button 
+                                                            onClick={(e) => { e.stopPropagation(); openEdit(item); }}
+                                                            className="p-2 text-blue-400 hover:bg-blue-500/20 rounded"
+                                                            title="Edit & Approve"
+                                                        >
+                                                            <i className="fas fa-edit"></i>
+                                                        </button>
+                                                        <button 
+                                                            onClick={(e) => { e.stopPropagation(); rejectItem(item.id); }}
+                                                            className="p-2 text-red-400 hover:bg-red-500/20 rounded"
+                                                            title="Reject"
+                                                        >
+                                                            <i className="fas fa-times"></i>
+                                                        </button>
+                                                    </>
+                                                )}
+                                                <button 
+                                                    onClick={(e) => { e.stopPropagation(); deleteItem(item.id); }}
+                                                    className="p-2 text-gray-400 hover:bg-gray-600 rounded"
+                                                    title="Delete"
+                                                >
+                                                    <i className="fas fa-trash"></i>
+                                                </button>
+                                            </div>
+                                        </div>
+                                        
+                                        {/* Expanded Details */}
+                                        {selectedItem?.id === item.id && !editMode && (
+                                            <div className="mt-4 pt-4 border-t border-gray-700 space-y-3">
+                                                <div>
+                                                    <label className="text-xs text-gray-500">Log Snippet</label>
+                                                    <pre className="mt-1 p-3 bg-gray-900 rounded text-xs text-gray-300 overflow-x-auto max-h-40 scrollbar-thin">
+                                                        {item.log_snippet || 'No log available'}
+                                                    </pre>
+                                                </div>
+                                                <div className="grid grid-cols-2 gap-4">
+                                                    <div>
+                                                        <label className="text-xs text-gray-500">AI Root Cause</label>
+                                                        <p className="mt-1 text-sm">{item.ai_root_cause || '-'}</p>
+                                                    </div>
+                                                    <div>
+                                                        <label className="text-xs text-gray-500">AI Fix</label>
+                                                        <p className="mt-1 text-sm">{item.ai_fix || '-'}</p>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </Card>
+                    
+                    {/* Edit Modal */}
+                    <Modal isOpen={editMode} onClose={() => { setEditMode(false); setSelectedItem(null); }} title="Edit & Approve">
+                        {selectedItem && (
+                            <div className="space-y-4">
+                                <div>
+                                    <label className="block text-sm text-gray-400 mb-1">Job</label>
+                                    <p className="text-white">{selectedItem.job_name} #{selectedItem.job_id}</p>
+                                </div>
+                                <div>
+                                    <label className="block text-sm text-gray-400 mb-1">Log Snippet</label>
+                                    <pre className="p-3 bg-gray-900 rounded text-xs text-gray-300 overflow-x-auto max-h-32 scrollbar-thin">
+                                        {selectedItem.log_snippet}
+                                    </pre>
+                                </div>
+                                <Input
+                                    label="Root Cause"
+                                    value={editData.root_cause}
+                                    onChange={(e) => setEditData({...editData, root_cause: e.target.value})}
+                                />
+                                <Input
+                                    label="Fix"
+                                    value={editData.fix}
+                                    onChange={(e) => setEditData({...editData, fix: e.target.value})}
+                                />
+                                <Input
+                                    label="Category"
+                                    value={editData.category}
+                                    onChange={(e) => setEditData({...editData, category: e.target.value})}
+                                />
+                                <div className="flex justify-end gap-3 pt-4">
+                                    <Button variant="secondary" onClick={() => { setEditMode(false); setSelectedItem(null); }}>
+                                        Cancel
+                                    </Button>
+                                    <Button variant="success" onClick={() => approveItem(selectedItem.id, editData)}>
+                                        <i className="fas fa-check mr-1"></i>Approve
+                                    </Button>
+                                </div>
+                            </div>
+                        )}
+                    </Modal>
+                </div>
+            );
+        }
+
+        // =====================================================================
         // Main App
         // =====================================================================
         
@@ -2519,7 +2877,7 @@
                                     </div>
                                     <div>
                                         <h1 className="text-xl font-bold gradient-text">Jenkins Failure Analysis</h1>
-                                        <p className="text-xs text-gray-500">AI-Powered Build Debugging • Hybrid Architecture v1.4</p>
+                                        <p className="text-xs text-gray-500">AI-Powered Build Debugging • Hybrid Architecture v2.1</p>
                                     </div>
                                 </div>
                                 <div className="flex items-center gap-4">
@@ -2554,6 +2912,16 @@
                                             }`}
                                         >
                                             <i className="fas fa-graduation-cap mr-2"></i>Training
+                                        </button>
+                                        <button
+                                            onClick={() => setActiveView('review')}
+                                            className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                                                activeView === 'review' 
+                                                    ? 'bg-indigo-500 text-white' 
+                                                    : 'text-gray-400 hover:text-white hover:bg-gray-600'
+                                            }`}
+                                        >
+                                            <i className="fas fa-clipboard-check mr-2"></i>Review
                                         </button>
                                     </nav>
                                     <a href={`${API_BASE}/docs`} target="_blank" className="text-gray-400 hover:text-white transition-colors" title="API Docs">
@@ -2673,12 +3041,28 @@
                                 <TrainingPanel />
                             </div>
                         )}
+                        
+                        {/* Review Queue View */}
+                        {activeView === 'review' && (
+                            <div className="max-w-5xl mx-auto">
+                                <div className="mb-6">
+                                    <h2 className="text-2xl font-bold mb-2">
+                                        <i className="fas fa-clipboard-check text-yellow-400 mr-3"></i>
+                                        Review Queue
+                                    </h2>
+                                    <p className="text-gray-400">
+                                        Review AI-analyzed failures from Splunk before adding to training data.
+                                    </p>
+                                </div>
+                                <ReviewQueuePanel />
+                            </div>
+                        )}
                     </main>
                     
                     {/* Footer */}
                     <footer className="border-t border-gray-800 mt-12 py-6">
                         <div className="max-w-7xl mx-auto px-4 text-center text-sm text-gray-500">
-                            <p>Jenkins Failure Analysis Agent v1.4.0 • Hybrid Architecture (Scripted + Agentic MCP)</p>
+                            <p>Jenkins Failure Analysis Agent v2.1.0 • Hybrid Architecture (Scripted + Agentic MCP)</p>
                             <p className="mt-1 text-xs">31 MCP Tools • 17 Failure Categories • 3-Tier Classification</p>
                         </div>
                     </footer>

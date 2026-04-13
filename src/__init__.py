@@ -59,6 +59,12 @@ from .training_pipeline import (
     TrainingPipeline, TrainingExample, TrainingJob,
     TrainingFormat, TrainingJobStatus, get_training_pipeline
 )
+from .splunk_connector import (
+    SplunkConnector, SplunkConfig, FailedBuild, get_splunk_connector
+)
+from .review_queue import (
+    ReviewQueue, ReviewItem, ReviewStatus, get_review_queue
+)
 
 __all__ = [
     # Config
@@ -104,6 +110,10 @@ __all__ = [
     # Training Pipeline (Phase 4)
     "TrainingPipeline", "TrainingExample", "TrainingJob",
     "TrainingFormat", "TrainingJobStatus", "get_training_pipeline",
+    # Splunk Integration
+    "SplunkConnector", "SplunkConfig", "FailedBuild", "get_splunk_connector",
+    # Review Queue
+    "ReviewQueue", "ReviewItem", "ReviewStatus", "get_review_queue",
     # Reports
     "ReportGenerator", "format_slack_message",
     # SCM (GitHub/GitLab)

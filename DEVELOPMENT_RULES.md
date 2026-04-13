@@ -4,6 +4,19 @@ These rules MUST be followed for all development work on this project.
 
 ---
 
+## Communication Style (PERMANENT)
+
+**Default: Concise mode**
+- Code only, minimal comments
+- Brief confirmations: "Done. Fixed X in Y."
+- No summaries, tables, diagrams unless asked
+- No design discussions unless asked
+- Skip explanations unless asked
+
+**User can request details anytime:** "Explain", "Details", "Summary"
+
+---
+
 ## Pre-Release Checklist
 
 Before ANY release package is created, the following MUST be done:

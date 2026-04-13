@@ -5,7 +5,7 @@ Phase 2C of AI Learning System.
 
 Fetches documentation from URLs and extracts:
 - Tool descriptions
-- Command examples
+- Command examples (with subcommand detection)
 - Error codes and messages
 - Configuration options
 - Environment variables
@@ -15,6 +15,12 @@ Supports:
 - HTML pages (Confluence, wikis, etc.)
 - Plain text
 
+Features:
+- URL validation and auth page detection
+- Subcommand hierarchy detection
+- Alias-aware search
+- Confidence scoring
+
 Can optionally use AI to extract structured information.
 """
 
@@ -23,6 +29,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple
 from urllib.parse import urlparse, urljoin
+from enum import Enum
 import requests
 from bs4 import BeautifulSoup
 
@@ -34,18 +41,70 @@ from .knowledge_store import (
 logger = logging.getLogger("jenkins-agent.doc-importer")
 
 
+class PageValidationResult(str, Enum):
+    """Result of page validation."""
+    VALID = "valid"
+    AUTH_REQUIRED = "auth_required"
+    NOT_FOUND = "not_found"
+    ACCESS_DENIED = "access_denied"
+    EMPTY_CONTENT = "empty_content"
+    NOT_DOCUMENTATION = "not_documentation"
+    ERROR = "error"
+
+
+class DocType(str, Enum):
+    """Type of documentation page."""
+    MAIN_TOOL = "main_tool"          # Main tool page with multiple commands
+    SUBCOMMAND = "subcommand"        # Single subcommand documentation
+    REFERENCE = "reference"          # API/CLI reference
+    TUTORIAL = "tutorial"            # How-to/tutorial
+    UNKNOWN = "unknown"
+
+
+@dataclass
+class PageValidation:
+    """Result of validating a documentation URL."""
+    status: PageValidationResult
+    message: str = ""
+    doc_type: DocType = DocType.UNKNOWN
+    detected_tool: str = ""
+    detected_subcommand: str = ""
+    confidence: float = 0.0
+    
+    @property
+    def is_valid(self) -> bool:
+        return self.status == PageValidationResult.VALID
+
+
+@dataclass
+class SubcommandInfo:
+    """Information about a subcommand."""
+    name: str
+    description: str = ""
+    usage: str = ""
+    arguments: List[Dict[str, str]] = field(default_factory=list)
+    examples: List[str] = field(default_factory=list)
+    parent_command: str = ""
+
+
 @dataclass
 class ExtractedDocInfo:
     """Information extracted from documentation."""
     title: str = ""
     description: str = ""
     commands: List[Dict[str, str]] = field(default_factory=list)  # [{name, description, example}]
+    subcommands: List[SubcommandInfo] = field(default_factory=list)  # Structured subcommands
     errors: List[Dict[str, str]] = field(default_factory=list)    # [{code, description, fix}]
     env_vars: List[Dict[str, str]] = field(default_factory=list)  # [{name, description, default}]
     arguments: List[Dict[str, str]] = field(default_factory=list) # [{name, description, required}]
     examples: List[str] = field(default_factory=list)
     related_tools: List[str] = field(default_factory=list)
     confidence: float = 0.0
+    
+    # Page classification
+    doc_type: DocType = DocType.UNKNOWN
+    parent_tool: str = ""           # If this is a subcommand page
+    detected_subcommand: str = ""   # Detected subcommand name
 
 
 class DocImporter:
@@ -116,17 +175,400 @@ class DocImporter:
             "Accept": "text/html,text/markdown,text/plain,application/json,*/*",
         })
     
-    def fetch_url(self, url: str) -> Optional[KnowledgeDoc]:
+    # Auth/login page detection patterns
+    AUTH_PAGE_INDICATORS = [
+        # Title patterns
+        re.compile(r'sign\s*in|log\s*in|login|authenticate|authorization', re.IGNORECASE),
+        # Form patterns
+        re.compile(r'<input[^>]*type=["\']password["\']', re.IGNORECASE),
+        re.compile(r'<form[^>]*(?:login|signin|auth)', re.IGNORECASE),
+        # Content patterns
+        re.compile(r'(?:enter|provide)\s+(?:your\s+)?(?:username|password|credentials)', re.IGNORECASE),
+        re.compile(r'(?:forgot|reset)\s+(?:your\s+)?password', re.IGNORECASE),
+        # OAuth/SSO patterns
+        re.compile(r'continue\s+with\s+(?:google|github|sso|saml)', re.IGNORECASE),
+        re.compile(r'single\s+sign[- ]on', re.IGNORECASE),
+    ]
+    
+    # Error page indicators
+    ERROR_PAGE_INDICATORS = [
+        re.compile(r'404\s*[-:]\s*(?:not\s+found|page\s+not\s+found)', re.IGNORECASE),
+        re.compile(r'403\s*[-:]\s*(?:forbidden|access\s+denied)', re.IGNORECASE),
+        re.compile(r'401\s*[-:]\s*unauthorized', re.IGNORECASE),
+        re.compile(r'page\s+(?:not\s+found|does\s+not\s+exist)', re.IGNORECASE),
+        re.compile(r'you\s+don\'?t\s+have\s+(?:access|permission)', re.IGNORECASE),
+    ]
+    
+    # Subcommand page indicators
+    SUBCOMMAND_PAGE_INDICATORS = [
+        re.compile(r'(?:^|\s)subcommand(?:\s|$)', re.IGNORECASE),
+        re.compile(r'(?:^|\s)plugin(?:\s|$)', re.IGNORECASE),
+        re.compile(r'(?:^|\s)command\s+reference(?:\s|$)', re.IGNORECASE),
+        # URL patterns like /tool/commands/subcommand
+        re.compile(r'/(?:commands?|subcommands?|plugins?)/[\w-]+/?$', re.IGNORECASE),
+    ]
+    
+    def validate_url(self, url: str) -> PageValidation:
+        """
+        Validate a URL before importing.
+        
+        Checks:
+        - URL is accessible
+        - Page is not an auth/login page
+        - Page has actual documentation content
+        - Detects if page is main tool or subcommand
+        
+        Returns:
+            PageValidation with status and detected info
+        """
+        logger.info(f"Validating URL: {url}")
+        
+        try:
+            response = self.session.get(
+                url,
+                timeout=self.timeout,
+                verify=self.verify_ssl
+            )
+            
+            # Check HTTP status
+            if response.status_code == 404:
+                return PageValidation(
+                    status=PageValidationResult.NOT_FOUND,
+                    message="Page not found (404)"
+                )
+            elif response.status_code == 403:
+                return PageValidation(
+                    status=PageValidationResult.ACCESS_DENIED,
+                    message="Access denied (403)"
+                )
+            elif response.status_code == 401:
+                return PageValidation(
+                    status=PageValidationResult.AUTH_REQUIRED,
+                    message="Authentication required (401)"
+                )
+            elif response.status_code >= 400:
+                return PageValidation(
+                    status=PageValidationResult.ERROR,
+                    message=f"HTTP error: {response.status_code}"
+                )
+            
+            html = response.text
+            
+            # Check for auth/login page
+            auth_check = self._detect_auth_page(html)
+            if auth_check:
+                return PageValidation(
+                    status=PageValidationResult.AUTH_REQUIRED,
+                    message=auth_check
+                )
+            
+            # Check for error pages
+            error_check = self._detect_error_page(html)
+            if error_check:
+                return PageValidation(
+                    status=PageValidationResult.NOT_FOUND,
+                    message=error_check
+                )
+            
+            # Check if page has actual content
+            content_check = self._check_has_content(html)
+            if not content_check:
+                return PageValidation(
+                    status=PageValidationResult.EMPTY_CONTENT,
+                    message="Page has no meaningful documentation content"
+                )
+            
+            # Detect page type (main tool vs subcommand)
+            doc_type, tool_name, subcommand, confidence = self._detect_page_type(url, html)
+            
+            return PageValidation(
+                status=PageValidationResult.VALID,
+                message="Page validated successfully",
+                doc_type=doc_type,
+                detected_tool=tool_name,
+                detected_subcommand=subcommand,
+                confidence=confidence
+            )
+            
+        except requests.Timeout:
+            return PageValidation(
+                status=PageValidationResult.ERROR,
+                message="Request timed out"
+            )
+        except requests.ConnectionError as e:
+            return PageValidation(
+                status=PageValidationResult.ERROR,
+                message=f"Connection error: {str(e)}"
+            )
+        except requests.RequestException as e:
+            return PageValidation(
+                status=PageValidationResult.ERROR,
+                message=f"Request failed: {str(e)}"
+            )
+    
+    def _detect_auth_page(self, html: str) -> Optional[str]:
+        """
+        Detect if page is an authentication/login page.
+        
+        Returns:
+            Error message if auth page detected, None otherwise
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        
+        # Check title
+        title = ""
+        if soup.title:
+            title = soup.title.string or ""
+        
+        for pattern in self.AUTH_PAGE_INDICATORS[:1]:  # Title patterns
+            if pattern.search(title):
+                return f"Page appears to be a login page (title: {title})"
+        
+        # Check for password input
+        password_inputs = soup.find_all("input", {"type": "password"})
+        if password_inputs:
+            return "Page contains password input field - likely a login page"
+        
+        # Check for login forms
+        forms = soup.find_all("form")
+        for form in forms:
+            form_action = form.get("action", "").lower()
+            form_id = form.get("id", "").lower()
+            form_class = " ".join(form.get("class", [])).lower()
+            
+            login_keywords = ["login", "signin", "sign-in", "auth", "authenticate", "sso"]
+            if any(kw in form_action or kw in form_id or kw in form_class for kw in login_keywords):
+                return "Page contains login form"
+        
+        # Check body content for auth indicators
+        body_text = soup.get_text()[:2000].lower()  # Check first 2000 chars
+        auth_phrases = [
+            "enter your password",
+            "enter your username",
+            "sign in to continue",
+            "log in to continue",
+            "authenticate to access",
+            "please sign in",
+            "please log in",
+        ]
+        for phrase in auth_phrases:
+            if phrase in body_text:
+                return f"Page contains authentication prompt: '{phrase}'"
+        
+        return None
+    
+    def _detect_error_page(self, html: str) -> Optional[str]:
+        """
+        Detect if page is an error page (404, 403, etc).
+        
+        Returns:
+            Error message if error page detected, None otherwise
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        
+        # Check title
+        title = ""
+        if soup.title:
+            title = soup.title.string or ""
+        
+        # Check page content
+        text = soup.get_text()[:3000]
+        full_text = f"{title} {text}"
+        
+        for pattern in self.ERROR_PAGE_INDICATORS:
+            match = pattern.search(full_text)
+            if match:
+                return f"Page appears to be an error page: {match.group(0)}"
+        
+        return None
+    
+    def _check_has_content(self, html: str) -> bool:
+        """
+        Check if page has meaningful documentation content.
+        
+        Returns:
+            True if page has content, False otherwise
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        
+        # Remove nav, header, footer
+        for tag in soup(["nav", "header", "footer", "script", "style"]):
+            tag.decompose()
+        
+        text = soup.get_text(strip=True)
+        
+        # Check minimum content length
+        if len(text) < 100:
+            return False
+        
+        # Check for code blocks or command examples
+        code_blocks = soup.find_all(["code", "pre"])
+        if code_blocks:
+            return True
+        
+        # Check for documentation-like patterns
+        doc_indicators = [
+            r'```',                           # Code blocks
+            r'^\s*[$>]',                       # Command prompts
+            r'--[\w-]+',                       # CLI arguments
+            r'[A-Z][A-Z0-9_]{2,}',             # Constants/env vars
+            r'(?:usage|example|command|install|configure)',  # Doc keywords
+        ]
+        
+        for pattern in doc_indicators:
+            if re.search(pattern, text, re.IGNORECASE | re.MULTILINE):
+                return True
+        
+        # Fallback: if we have enough text, consider it valid
+        return len(text) > 500
+    
+    def _detect_page_type(self, url: str, html: str) -> Tuple[DocType, str, str, float]:
+        """
+        Detect if page is main tool documentation or subcommand documentation.
+        
+        Returns:
+            (doc_type, tool_name, subcommand_name, confidence)
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        parsed_url = urlparse(url)
+        path_parts = [p for p in parsed_url.path.split("/") if p]
+        
+        # Default values
+        doc_type = DocType.UNKNOWN
+        tool_name = ""
+        subcommand = ""
+        confidence = 0.5
+        
+        # Analyze URL structure
+        # Pattern: /docs/tool/command or /tool/commands/subcommand
+        url_signals = {
+            "is_subcommand": False,
+            "tool_from_url": "",
+            "subcommand_from_url": "",
+        }
+        
+        # Check for subcommand URL patterns
+        for pattern in self.SUBCOMMAND_PAGE_INDICATORS:
+            if pattern.search(url):
+                url_signals["is_subcommand"] = True
+                break
+        
+        # Try to extract tool and subcommand from URL
+        if len(path_parts) >= 2:
+            # Check common patterns
+            commands_idx = None
+            for i, part in enumerate(path_parts):
+                if part.lower() in ["commands", "subcommands", "cli", "reference"]:
+                    commands_idx = i
+                    break
+            
+            if commands_idx is not None and commands_idx > 0:
+                # Pattern: /tool/commands/subcommand
+                url_signals["tool_from_url"] = path_parts[commands_idx - 1]
+                if commands_idx + 1 < len(path_parts):
+                    url_signals["subcommand_from_url"] = path_parts[commands_idx + 1]
+                    url_signals["is_subcommand"] = True
+            elif len(path_parts) >= 2:
+                # Pattern: /tool/subcommand or /docs/tool
+                potential_tool = path_parts[-2] if path_parts[-1] in ["index", "readme", "overview"] else path_parts[-2]
+                potential_sub = path_parts[-1] if path_parts[-1] not in ["index", "readme", "overview", "docs"] else ""
+                
+                # Check if potential_tool looks like a tool name
+                if re.match(r'^[a-z][a-z0-9_-]*$', potential_tool, re.IGNORECASE):
+                    url_signals["tool_from_url"] = potential_tool
+                if potential_sub and re.match(r'^[a-z][a-z0-9_-]*$', potential_sub, re.IGNORECASE):
+                    url_signals["subcommand_from_url"] = potential_sub
+        
+        # Analyze page content
+        title = ""
+        if soup.title:
+            title = soup.title.string or ""
+        h1 = soup.find("h1")
+        h1_text = h1.get_text(strip=True) if h1 else ""
+        
+        # Count distinct commands mentioned
+        text = soup.get_text()
+        command_sections = len(re.findall(r'(?:^|\n)#{1,3}\s+\w+\s+(?:command|subcommand)', text, re.IGNORECASE))
+        code_blocks = soup.find_all(["code", "pre"])
+        
+        # Heuristics for main tool page
+        main_tool_signals = 0
+        if command_sections >= 3:
+            main_tool_signals += 2
+        if len(code_blocks) >= 5:
+            main_tool_signals += 1
+        if re.search(r'(?:commands?|subcommands?)\s+available', text, re.IGNORECASE):
+            main_tool_signals += 2
+        if re.search(r'table\s+of\s+contents', text, re.IGNORECASE):
+            main_tool_signals += 1
+        
+        # Heuristics for subcommand page
+        subcommand_signals = 0
+        if url_signals["is_subcommand"]:
+            subcommand_signals += 2
+        if url_signals["subcommand_from_url"]:
+            subcommand_signals += 1
+        if command_sections <= 1:
+            subcommand_signals += 1
+        if re.search(r'^(?:the\s+)?\w+\s+(?:command|subcommand)', h1_text, re.IGNORECASE):
+            subcommand_signals += 2
+        
+        # Determine doc type
+        if main_tool_signals > subcommand_signals and main_tool_signals >= 2:
+            doc_type = DocType.MAIN_TOOL
+            confidence = min(0.9, 0.5 + main_tool_signals * 0.1)
+            tool_name = url_signals["tool_from_url"]
+        elif subcommand_signals > main_tool_signals and subcommand_signals >= 2:
+            doc_type = DocType.SUBCOMMAND
+            confidence = min(0.9, 0.5 + subcommand_signals * 0.1)
+            tool_name = url_signals["tool_from_url"]
+            subcommand = url_signals["subcommand_from_url"] or self._extract_subcommand_name(h1_text, title)
+        else:
+            # Check if it looks like a reference page
+            if re.search(r'(?:api|cli|command)\s+reference', title + text[:500], re.IGNORECASE):
+                doc_type = DocType.REFERENCE
+            elif re.search(r'(?:tutorial|guide|how\s+to|getting\s+started)', title + text[:500], re.IGNORECASE):
+                doc_type = DocType.TUTORIAL
+            
+            tool_name = url_signals["tool_from_url"]
+        
+        return doc_type, tool_name, subcommand, confidence
+    
+    def _extract_subcommand_name(self, h1_text: str, title: str) -> str:
+        """Extract subcommand name from heading or title."""
+        # Try patterns like "scan command" or "the scan subcommand"
+        for text in [h1_text, title]:
+            match = re.match(r'^(?:the\s+)?(\w+)\s+(?:command|subcommand)', text, re.IGNORECASE)
+            if match:
+                return match.group(1).lower()
+        
+        # Try to get first word if it looks like a command
+        for text in [h1_text, title]:
+            words = text.split()
+            if words and re.match(r'^[a-z][a-z0-9_-]*$', words[0], re.IGNORECASE):
+                return words[0].lower()
+        
+        return ""
+    
+    def fetch_url(self, url: str, validate: bool = True) -> Optional[KnowledgeDoc]:
         """
         Fetch documentation from a URL.
         
         Args:
             url: URL to fetch
+            validate: Whether to validate the URL first (recommended)
             
         Returns:
             KnowledgeDoc with raw content, or None if fetch failed
         """
         logger.info(f"Fetching documentation from {url}")
+        
+        # Validate URL first
+        if validate:
+            validation = self.validate_url(url)
+            if not validation.is_valid:
+                logger.error(f"URL validation failed: {validation.message}")
+                return None
         
         try:
             response = self.session.get(
@@ -471,8 +913,10 @@ class DocImporter:
         self,
         url: str,
         tool_name: str = None,
-        extract_info: bool = True
-    ) -> Tuple[Optional[KnowledgeDoc], Optional[ExtractedDocInfo]]:
+        extract_info: bool = True,
+        is_subcommand: bool = None,
+        parent_tool: str = None
+    ) -> Tuple[Optional[KnowledgeDoc], Optional[ExtractedDocInfo], Optional[PageValidation]]:
         """
         Import documentation from URL and optionally extract info.
         
@@ -480,17 +924,42 @@ class DocImporter:
             url: URL to import
             tool_name: Optional tool name to link to
             extract_info: Whether to extract structured info
+            is_subcommand: If True, treat as subcommand doc. If None, auto-detect.
+            parent_tool: Parent tool name if this is a subcommand
             
         Returns:
-            Tuple of (KnowledgeDoc, ExtractedDocInfo or None)
+            Tuple of (KnowledgeDoc, ExtractedDocInfo or None, PageValidation)
         """
-        doc = self.fetch_url(url)
+        # First, validate the URL
+        validation = self.validate_url(url)
+        
+        if not validation.is_valid:
+            logger.error(f"URL validation failed: {validation.message}")
+            return None, None, validation
+        
+        # Fetch with validation already done
+        doc = self.fetch_url(url, validate=False)
         if not doc:
-            return None, None
+            return None, None, validation
         
         info = None
         if extract_info:
             info = self.extract_info(doc)
+            
+            # Apply validation detection results
+            info.doc_type = validation.doc_type
+            
+            # Determine if subcommand based on user input or auto-detection
+            if is_subcommand is True:
+                info.doc_type = DocType.SUBCOMMAND
+                info.parent_tool = parent_tool or tool_name or validation.detected_tool
+            elif is_subcommand is False:
+                info.doc_type = DocType.MAIN_TOOL
+            elif validation.doc_type == DocType.SUBCOMMAND:
+                # Auto-detected as subcommand
+                info.parent_tool = validation.detected_tool
+                info.detected_subcommand = validation.detected_subcommand
+            
             doc.extracted_info = {
                 "title": info.title,
                 "description": info.description,
@@ -498,6 +967,9 @@ class DocImporter:
                 "errors_count": len(info.errors),
                 "env_vars_count": len(info.env_vars),
                 "confidence": info.confidence,
+                "doc_type": info.doc_type.value if info.doc_type else "unknown",
+                "parent_tool": info.parent_tool,
+                "detected_subcommand": info.detected_subcommand,
             }
         
         # Link to tool if specified
@@ -507,21 +979,25 @@ class DocImporter:
             if tool:
                 doc.tool_id = tool.id
         
-        return doc, info
+        return doc, info, validation
     
     def to_tool_definition(
         self,
         info: ExtractedDocInfo,
         tool_name: str,
-        source_url: str = ""
+        source_url: str = "",
+        is_subcommand: bool = False,
+        subcommand_name: str = ""
     ) -> ToolDefinition:
         """
         Convert extracted info to ToolDefinition.
         
         Args:
             info: ExtractedDocInfo from extraction
-            tool_name: Name for the tool
+            tool_name: Name for the tool (parent tool if subcommand)
             source_url: Source URL for reference
+            is_subcommand: Whether this doc describes a subcommand
+            subcommand_name: Name of the subcommand (if is_subcommand)
             
         Returns:
             ToolDefinition ready for storage
@@ -534,6 +1010,17 @@ class DocImporter:
             added_by="doc_import",
             confidence=info.confidence,
         )
+        
+        # Handle subcommand case
+        if is_subcommand and subcommand_name:
+            # For subcommand docs, add the full command pattern
+            full_command = f"{tool_name} {subcommand_name}"
+            if full_command not in tool.patterns_commands:
+                tool.patterns_commands.append(full_command)
+            
+            # Update description to note this is from subcommand docs
+            if info.description:
+                tool.description = f"{subcommand_name}: {info.description}"
         
         # Add commands as patterns (normalized to base command + subcommand)
         for cmd in info.commands:

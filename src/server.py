@@ -1717,6 +1717,226 @@ def create_app(config: Config) -> FastAPI:
             **results,
         }
     
+    # =========================================================================
+    # SPLUNK INTEGRATION ENDPOINTS
+    # =========================================================================
+    
+    @app.get("/splunk/status")
+    async def get_splunk_status(api_key: str = Depends(verify_api_key)):
+        """Get Splunk integration status."""
+        from .splunk_connector import get_splunk_connector
+        
+        connector = get_splunk_connector()
+        if not connector:
+            return {"enabled": False, "message": "Splunk integration not configured"}
+        
+        return connector.test_connection()
+    
+    @app.post("/splunk/sync")
+    async def sync_splunk_failures(
+        minutes: int = None,
+        analyze: bool = True,
+        api_key: str = Depends(verify_api_key)
+    ):
+        """
+        Sync failed builds from Splunk.
+        
+        Args:
+            minutes: Look back N minutes (default: SPLUNK_SYNC_INTERVAL_MINS)
+            analyze: Run AI analysis on each failure
+        """
+        from .splunk_connector import get_splunk_connector
+        from .review_queue import get_review_queue
+        
+        connector = get_splunk_connector()
+        if not connector:
+            raise HTTPException(status_code=400, detail="Splunk integration not enabled")
+        
+        # Get failed builds with logs
+        failures = connector.get_failed_builds_with_logs(minutes)
+        
+        if not failures:
+            return {"synced": 0, "message": "No failed builds found"}
+        
+        queue = get_review_queue()
+        results = []
+        
+        for failure in failures:
+            # Skip if already in queue
+            if queue.exists(failure.host, failure.job_id):
+                continue
+            
+            analysis_result = None
+            if analyze and failure.log_snippet:
+                # Run AI analysis
+                try:
+                    analysis_result = ai.analyze_snippet(failure.log_snippet)
+                except Exception as e:
+                    logger.error(f"Analysis failed for {failure.job_name}#{failure.job_id}: {e}")
+            
+            # Add to review queue
+            item = queue.add(
+                host=failure.host,
+                job_name=failure.job_name,
+                job_id=failure.job_id,
+                log_snippet=failure.log_snippet,
+                ai_root_cause=analysis_result.root_cause if analysis_result else "",
+                ai_fix=analysis_result.fix if analysis_result else "",
+                ai_confidence=analysis_result.confidence if analysis_result else 0.0,
+                ai_category=analysis_result.category if analysis_result else "",
+            )
+            results.append(item.to_dict())
+        
+        return {
+            "synced": len(results),
+            "total_failures": len(failures),
+            "items": results,
+        }
+    
+    @app.get("/splunk/failures")
+    async def get_splunk_failures(
+        minutes: int = None,
+        api_key: str = Depends(verify_api_key)
+    ):
+        """Get failed builds from Splunk (without syncing to queue)."""
+        from .splunk_connector import get_splunk_connector
+        
+        connector = get_splunk_connector()
+        if not connector:
+            raise HTTPException(status_code=400, detail="Splunk integration not enabled")
+        
+        failures = connector.get_failed_builds(minutes)
+        
+        return {
+            "failures": [f.to_dict() for f in failures],
+            "total": len(failures),
+        }
+    
+    # =========================================================================
+    # REVIEW QUEUE ENDPOINTS
+    # =========================================================================
+    
+    @app.get("/review-queue")
+    async def get_review_queue_items(
+        status: str = None,
+        limit: int = 50,
+        api_key: str = Depends(verify_api_key)
+    ):
+        """Get items in review queue."""
+        from .review_queue import get_review_queue
+        
+        queue = get_review_queue()
+        items = queue.list(status=status, limit=limit)
+        stats = queue.get_stats()
+        
+        return {
+            "items": [item.to_dict() for item in items],
+            "total": len(items),
+            "stats": stats,
+        }
+    
+    @app.get("/review-queue/{item_id}")
+    async def get_review_queue_item(
+        item_id: int,
+        api_key: str = Depends(verify_api_key)
+    ):
+        """Get single review queue item."""
+        from .review_queue import get_review_queue
+        
+        queue = get_review_queue()
+        item = queue.get(item_id)
+        
+        if not item:
+            raise HTTPException(status_code=404, detail="Item not found")
+        
+        return {"item": item.to_dict()}
+    
+    @app.post("/review-queue/{item_id}/approve")
+    async def approve_review_item(
+        item_id: int,
+        request: dict = {},
+        api_key: str = Depends(verify_api_key)
+    ):
+        """
+        Approve a review queue item.
+        
+        Optional request body:
+        - root_cause: Override AI root cause
+        - fix: Override AI fix
+        - category: Override AI category
+        """
+        from .review_queue import get_review_queue, ReviewStatus
+        
+        queue = get_review_queue()
+        item = queue.get(item_id)
+        
+        if not item:
+            raise HTTPException(status_code=404, detail="Item not found")
+        
+        # Update with overrides if provided
+        root_cause = request.get("root_cause", item.ai_root_cause)
+        fix = request.get("fix", item.ai_fix)
+        category = request.get("category", item.ai_category)
+        
+        # Mark as approved
+        queue.update_status(
+            item_id,
+            ReviewStatus.APPROVED,
+            confirmed_root_cause=root_cause,
+            confirmed_fix=fix,
+            confirmed_category=category,
+        )
+        
+        # Add to training examples
+        from .training_pipeline import get_training_pipeline
+        pipeline = get_training_pipeline()
+        pipeline.add_from_review(
+            job_name=item.job_name,
+            build_number=item.job_id,
+            log_snippet=item.log_snippet,
+            root_cause=root_cause,
+            fix=fix,
+            category=category,
+        )
+        
+        return {"status": "approved", "item_id": item_id}
+    
+    @app.post("/review-queue/{item_id}/reject")
+    async def reject_review_item(
+        item_id: int,
+        request: dict = {},
+        api_key: str = Depends(verify_api_key)
+    ):
+        """Reject a review queue item (not useful for training)."""
+        from .review_queue import get_review_queue, ReviewStatus
+        
+        queue = get_review_queue()
+        item = queue.get(item_id)
+        
+        if not item:
+            raise HTTPException(status_code=404, detail="Item not found")
+        
+        reason = request.get("reason", "")
+        queue.update_status(item_id, ReviewStatus.REJECTED, notes=reason)
+        
+        return {"status": "rejected", "item_id": item_id}
+    
+    @app.delete("/review-queue/{item_id}")
+    async def delete_review_item(
+        item_id: int,
+        api_key: str = Depends(verify_api_key)
+    ):
+        """Delete a review queue item."""
+        from .review_queue import get_review_queue
+        
+        queue = get_review_queue()
+        success = queue.delete(item_id)
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="Item not found")
+        
+        return {"status": "deleted", "item_id": item_id}
+    
     return app
 
 
