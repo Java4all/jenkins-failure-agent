@@ -266,18 +266,17 @@ def get_splunk_connector() -> Optional[SplunkConnector]:
     global _splunk_connector
     
     if _splunk_connector is None:
-        from .config import Config
-        config = Config()
+        import os
         
         splunk_config = SplunkConfig(
-            enabled=config.get("SPLUNK_ENABLED", "false").lower() == "true",
-            url=config.get("SPLUNK_URL", ""),
-            token=config.get("SPLUNK_TOKEN", ""),
-            index=config.get("SPLUNK_INDEX", "jenkins_console"),
-            search_filter=config.get("SPLUNK_SEARCH_FILTER", ""),
-            log_tail_lines=int(config.get("SPLUNK_LOG_TAIL_LINES", "500")),
-            sync_interval_mins=int(config.get("SPLUNK_SYNC_INTERVAL_MINS", "15")),
-            verify_ssl=config.get("SPLUNK_VERIFY_SSL", "false").lower() == "true",
+            enabled=os.environ.get("SPLUNK_ENABLED", "false").lower() == "true",
+            url=os.environ.get("SPLUNK_URL", ""),
+            token=os.environ.get("SPLUNK_TOKEN", ""),
+            index=os.environ.get("SPLUNK_INDEX", "jenkins_console"),
+            search_filter=os.environ.get("SPLUNK_SEARCH_FILTER", ""),
+            log_tail_lines=int(os.environ.get("SPLUNK_LOG_TAIL_LINES", "500")),
+            sync_interval_mins=int(os.environ.get("SPLUNK_SYNC_INTERVAL_MINS", "15")),
+            verify_ssl=os.environ.get("SPLUNK_VERIFY_SSL", "false").lower() == "true",
         )
         
         if splunk_config.enabled:
