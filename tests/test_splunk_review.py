@@ -97,7 +97,35 @@ class TestSplunkConnector:
         
         result = connector.test_connection()
         assert result["success"] == False
-        assert "not enabled" in result["error"]
+        assert result["enabled"] == False
+    
+    def test_test_connection_no_url(self):
+        config = SplunkConfig(enabled=True, url="", token="test")
+        connector = SplunkConnector(config)
+        
+        result = connector.test_connection()
+        assert result["success"] == False
+        assert "SPLUNK_URL" in result["error"]
+    
+    def test_test_connection_no_token(self):
+        config = SplunkConfig(enabled=True, url="https://splunk.test.com", token="")
+        connector = SplunkConnector(config)
+        
+        result = connector.test_connection()
+        assert result["success"] == False
+        assert "SPLUNK_TOKEN" in result["error"]
+    
+    @patch('requests.Session.get')
+    def test_test_connection_timeout(self, mock_get):
+        import requests
+        config = SplunkConfig(enabled=True, url="https://splunk.test.com", token="test")
+        connector = SplunkConnector(config)
+        
+        mock_get.side_effect = requests.Timeout()
+        
+        result = connector.test_connection()
+        assert result["success"] == False
+        assert "timeout" in result["error"].lower()
     
     @patch('requests.Session.post')
     @patch('requests.Session.get')
@@ -110,18 +138,20 @@ class TestSplunkConnector:
         connector = SplunkConnector(config)
         
         # Mock job creation
-        mock_post.return_value = Mock(
-            status_code=200,
-            json=lambda: {"sid": "12345"}
-        )
-        mock_post.return_value.raise_for_status = Mock()
+        post_response = Mock()
+        post_response.status_code = 200
+        post_response.text = '{"sid": "12345"}'
+        post_response.json.return_value = {"sid": "12345"}
+        post_response.raise_for_status = Mock()
+        mock_post.return_value = post_response
         
         # Mock results
-        mock_get.return_value = Mock(
-            status_code=200,
-            json=lambda: {"results": [{"host": "jenkins", "job_id": "1"}]}
-        )
-        mock_get.return_value.raise_for_status = Mock()
+        get_response = Mock()
+        get_response.status_code = 200
+        get_response.text = '{"results": [{"host": "jenkins", "job_id": "1"}]}'
+        get_response.json.return_value = {"results": [{"host": "jenkins", "job_id": "1"}]}
+        get_response.raise_for_status = Mock()
+        mock_get.return_value = get_response
         
         results = connector._search("test query")
         assert len(results) == 1

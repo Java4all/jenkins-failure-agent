@@ -24,7 +24,8 @@ class SplunkConfig:
     """Splunk connection configuration."""
     enabled: bool = False
     url: str = ""
-    token: str = ""
+    username: str = ""           # Splunk username
+    token: str = ""              # Splunk token/password
     index: str = "jenkins_console"
     search_filter: str = ""
     log_tail_lines: int = 500
@@ -87,10 +88,15 @@ class SplunkConnector:
     def __init__(self, config: SplunkConfig):
         self.config = config
         self.session = requests.Session()
-        self.session.headers.update({
-            "Authorization": f"Bearer {config.token}",
-            "Content-Type": "application/json",
-        })
+        
+        # Splunk REST API uses Basic Auth with username:token
+        if config.username and config.token:
+            self.session.auth = (config.username, config.token)
+        elif config.token:
+            # Fallback to Bearer token if only token provided
+            self.session.headers.update({
+                "Authorization": f"Bearer {config.token}",
+            })
     
     def _search(self, query: str, max_results: int = 1000) -> List[Dict[str, Any]]:
         """
@@ -105,6 +111,9 @@ class SplunkConnector:
         # Create search job
         search_url = urljoin(self.config.url, "/services/search/jobs")
         
+        logger.info(f"Splunk search URL: {search_url}")
+        logger.debug(f"Splunk query: {query}")
+        
         try:
             # Create job
             response = self.session.post(
@@ -118,14 +127,20 @@ class SplunkConnector:
                 verify=self.config.verify_ssl,
                 timeout=self.config.timeout,
             )
+            
+            logger.info(f"Splunk job response status: {response.status_code}")
+            logger.debug(f"Splunk job response: {response.text[:500]}")
+            
             response.raise_for_status()
             
             job_data = response.json()
             job_sid = job_data.get("sid")
             
             if not job_sid:
-                logger.error("No job SID returned from Splunk")
+                logger.error(f"No job SID returned from Splunk. Response: {job_data}")
                 return []
+            
+            logger.info(f"Splunk job SID: {job_sid}")
             
             # Get results
             results_url = urljoin(self.config.url, f"/services/search/jobs/{job_sid}/results")
@@ -136,10 +151,21 @@ class SplunkConnector:
                 verify=self.config.verify_ssl,
                 timeout=self.config.timeout,
             )
+            
+            logger.info(f"Splunk results status: {results_response.status_code}")
+            logger.debug(f"Splunk results response: {results_response.text[:1000]}")
+            
             results_response.raise_for_status()
             
             results_data = results_response.json()
-            return results_data.get("results", [])
+            results = results_data.get("results", [])
+            
+            logger.info(f"Splunk returned {len(results)} results")
+            if results:
+                logger.debug(f"First result keys: {list(results[0].keys())}")
+                logger.debug(f"First result: {results[0]}")
+            
+            return results
             
         except requests.RequestException as e:
             logger.error(f"Splunk search failed: {e}")
@@ -239,22 +265,93 @@ index={self.config.index} host="{host}" source="*/{job_id}/console"
         return failures
     
     def test_connection(self) -> Dict[str, Any]:
-        """Test Splunk connection."""
+        """Test Splunk connection with detailed status."""
         if not self.config.enabled:
-            return {"success": False, "error": "Splunk integration not enabled"}
+            return {
+                "success": False, 
+                "enabled": False,
+                "error": "Splunk integration not enabled"
+            }
+        
+        if not self.config.url:
+            return {
+                "success": False,
+                "enabled": True,
+                "error": "SPLUNK_URL not configured"
+            }
+        
+        if not self.config.token:
+            return {
+                "success": False,
+                "enabled": True,
+                "error": "SPLUNK_TOKEN not configured"
+            }
         
         try:
-            # Simple search to test connection
-            query = f"index={self.config.index} | head 1 | stats count"
-            results = self._search(query)
+            # Test basic connectivity to Splunk server info endpoint
+            info_url = urljoin(self.config.url, "/services/server/info")
+            
+            response = self.session.get(
+                info_url,
+                params={"output_mode": "json"},
+                verify=self.config.verify_ssl,
+                timeout=10,  # Short timeout for connection test
+            )
+            
+            if response.status_code == 401:
+                return {
+                    "success": False,
+                    "enabled": True,
+                    "error": "Authentication failed - check SPLUNK_TOKEN",
+                    "status_code": 401
+                }
+            
+            if response.status_code == 403:
+                return {
+                    "success": False,
+                    "enabled": True,
+                    "error": "Access forbidden - token may lack permissions",
+                    "status_code": 403
+                }
+            
+            response.raise_for_status()
+            
+            # Parse server info
+            data = response.json()
+            server_info = data.get("entry", [{}])[0].get("content", {})
             
             return {
                 "success": True,
-                "message": "Connected to Splunk successfully",
+                "enabled": True,
+                "message": "Connected to Splunk",
+                "url": self.config.url,
                 "index": self.config.index,
+                "search_filter": self.config.search_filter or "(none)",
+                "server_name": server_info.get("serverName", "unknown"),
+                "version": server_info.get("version", "unknown"),
+            }
+            
+        except requests.Timeout:
+            return {
+                "success": False,
+                "enabled": True,
+                "error": f"Connection timeout - check SPLUNK_URL ({self.config.url})",
+                "url": self.config.url
+            }
+        except requests.ConnectionError as e:
+            return {
+                "success": False,
+                "enabled": True,
+                "error": f"Connection failed - {str(e)[:100]}",
+                "url": self.config.url
             }
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {
+                "success": False,
+                "enabled": True, 
+                "error": str(e)[:200],
+                "url": self.config.url
+            }
 
 
 # Singleton instance
@@ -271,6 +368,7 @@ def get_splunk_connector() -> Optional[SplunkConnector]:
         splunk_config = SplunkConfig(
             enabled=os.environ.get("SPLUNK_ENABLED", "false").lower() == "true",
             url=os.environ.get("SPLUNK_URL", ""),
+            username=os.environ.get("SPLUNK_USERNAME", ""),
             token=os.environ.get("SPLUNK_TOKEN", ""),
             index=os.environ.get("SPLUNK_INDEX", "jenkins_console"),
             search_filter=os.environ.get("SPLUNK_SEARCH_FILTER", ""),
