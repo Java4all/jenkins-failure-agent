@@ -95,35 +95,33 @@ class SplunkConnector:
         """
         Execute Splunk search and return results.
         
-        Handles job creation, polling, and pagination.
+        Uses async mode: create job, poll until done, fetch results.
         """
         if not self.config.enabled:
             logger.warning("Splunk integration not enabled")
             return []
         
-        # Create search job
+        # Create search job (async mode)
         search_url = urljoin(self.config.url, "/services/search/jobs")
         
         logger.info(f"Splunk search URL: {search_url}")
         logger.debug(f"Splunk query: {query}")
         
         try:
-            # Create job
+            # Create job in normal (async) mode
             response = self.session.post(
                 search_url,
                 data={
                     "search": f"search {query}",
                     "output_mode": "json",
-                    "exec_mode": "blocking",  # Wait for completion
+                    "exec_mode": "normal",  # Async - don't wait
                     "max_count": max_results,
                 },
                 verify=self.config.verify_ssl,
-                timeout=self.config.timeout,
+                timeout=30,  # Short timeout for job creation
             )
             
-            logger.info(f"Splunk job response status: {response.status_code}")
-            logger.debug(f"Splunk job response: {response.text[:500]}")
-            
+            logger.info(f"Splunk job creation status: {response.status_code}")
             response.raise_for_status()
             
             job_data = response.json()
@@ -135,6 +133,50 @@ class SplunkConnector:
             
             logger.info(f"Splunk job SID: {job_sid}")
             
+            # Poll for job completion
+            status_url = urljoin(self.config.url, f"/services/search/jobs/{job_sid}")
+            max_wait = self.config.timeout
+            poll_interval = 2
+            elapsed = 0
+            is_done = False
+            
+            while elapsed < max_wait:
+                status_response = self.session.get(
+                    status_url,
+                    params={"output_mode": "json"},
+                    verify=self.config.verify_ssl,
+                    timeout=10,
+                )
+                status_response.raise_for_status()
+                
+                status_data = status_response.json()
+                entry = status_data.get("entry", [{}])[0]
+                content = entry.get("content", {})
+                
+                dispatch_state = content.get("dispatchState", "")
+                is_done = content.get("isDone", False)
+                
+                logger.debug(f"Job status: {dispatch_state}, isDone: {is_done}")
+                
+                if is_done:
+                    break
+                
+                if dispatch_state == "FAILED":
+                    logger.error(f"Splunk job failed: {content.get('messages', [])}")
+                    return []
+                
+                time.sleep(poll_interval)
+                elapsed += poll_interval
+            
+            if not is_done:
+                logger.error(f"Splunk job timed out after {max_wait}s")
+                # Cancel the job
+                try:
+                    self.session.delete(status_url, verify=self.config.verify_ssl, timeout=5)
+                except:
+                    pass
+                return []
+            
             # Get results
             results_url = urljoin(self.config.url, f"/services/search/jobs/{job_sid}/results")
             
@@ -142,12 +184,10 @@ class SplunkConnector:
                 results_url,
                 params={"output_mode": "json", "count": max_results},
                 verify=self.config.verify_ssl,
-                timeout=self.config.timeout,
+                timeout=30,
             )
             
             logger.info(f"Splunk results status: {results_response.status_code}")
-            logger.debug(f"Splunk results response: {results_response.text[:1000]}")
-            
             results_response.raise_for_status()
             
             results_data = results_response.json()
