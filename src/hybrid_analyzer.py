@@ -106,7 +106,6 @@ def convert_rc_result_to_analysis_result(
         "failed_stage": parsed_log.failed_stage if parsed_log else None,
         "confidence": rc_result.confidence,
         "tier": tier,
-        # Explicit Jenkins result: FAILURE vs UNSTABLE (tests/quality) — avoids conflating the two
         "jenkins_build_result": build_info.status,
     }
 
@@ -374,24 +373,35 @@ class HybridAnalyzer:
                 skip_reason="Build was manually aborted",
             )
         
-        # UNSTABLE: always run RC analysis (tests/quality gates); do not skip as "non-critical".
-        # Automatic "latest build" selection uses FAILURE-only (see JenkinsClient.get_latest_failed_build).
+        # UNSTABLE: pipeline completed but tests/quality gates failed — treated as "healthy" for
+        # this analyzer; we only diagnose hard pipeline FAILURE builds.
         if status == "UNSTABLE":
             logger.info(
-                "UNSTABLE build — running RC analysis (Jenkins UNSTABLE: e.g. failing tests, not hard FAILURE)"
+                "Build %s#%s is UNSTABLE — skipping analysis (not a pipeline FAILURE)",
+                build_info.job_name,
+                build_info.build_number,
             )
-        
-        # Req 14.1: Only proceed for FAILURE or UNSTABLE
-        if status not in ("FAILURE", "UNSTABLE", None):
-            logger.warning(f"Unexpected build status: {status}")
             return HybridAnalysisResult(
                 mode=AnalysisMode.ITERATIVE,
                 result=None,
                 skipped=True,
-                skip_reason=f"Unexpected build status: {status}",
+                skip_reason=(
+                    "Jenkins result UNSTABLE (e.g. failing tests or quality gates). "
+                    "This analyzer only runs for FAILURE builds."
+                ),
             )
-        
-        return None  # Proceed with analysis
+
+        # Only FAILURE (or unknown None from API) proceeds
+        if status == "FAILURE" or status is None:
+            return None
+
+        logger.warning(f"Unexpected build status: {status}")
+        return HybridAnalysisResult(
+            mode=AnalysisMode.ITERATIVE,
+            result=None,
+            skipped=True,
+            skip_reason=f"Unexpected build status: {status}",
+        )
     
     def _check_parsed_log(self, parsed_log: ParsedLog) -> Optional[HybridAnalysisResult]:
         """
@@ -575,14 +585,13 @@ class HybridAnalyzer:
         if user_hint:
             logger.info(f"User hint provided: {user_hint[:100]}...")
         
-        # Requirement 14.1-14.6: Pre-check build status (with UNSTABLE handling)
+        # Requirement 14.1: Pre-check build status (UNSTABLE skipped — not analyzed)
         skip_result = self._check_build_status(build_info, parsed_log, user_hint)
         if skip_result:
             return skip_result
         
-        # Requirement 14.8: Check for actual errors (skip if user_hint provided).
-        # UNSTABLE often has few console "errors" but failing tests — still run RC analysis.
-        if not user_hint and build_info.status != "UNSTABLE":
+        # Requirement 14.8: Check for actual errors (skip if user_hint provided)
+        if not user_hint:
             skip_result = self._check_parsed_log(parsed_log)
             if skip_result:
                 return skip_result

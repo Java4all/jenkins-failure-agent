@@ -349,9 +349,28 @@ def create_app(config: Config) -> FastAPI:
                     correlation_id=correlation_id,
                 )
             
+            # UNSTABLE: tests/quality gates — not analyzed (only FAILURE is)
+            if build_info.status == "UNSTABLE":
+                logger.info(
+                    "Build %s#%s is UNSTABLE — skipping analysis (analyzer targets FAILURE only)",
+                    analyze_request.job,
+                    build_number,
+                )
+                return AnalyzeResponse(
+                    success=True,
+                    job=analyze_request.job,
+                    build=build_number,
+                    status="no_analysis_needed",
+                    skip_reason=(
+                        "Jenkins UNSTABLE (e.g. failing tests). Not analyzed; this service only analyzes FAILURE builds."
+                    ),
+                    analysis_mode="none",
+                    correlation_id=correlation_id,
+                )
+            
             # =========================================================
-            # Fetch logs for non-success builds (FAILURE, UNSTABLE, etc.).
-            # "Latest failed" without a build number uses FAILURE only (not UNSTABLE); see JenkinsClient.
+            # Fetch logs for FAILURE builds only (UNSTABLE handled above).
+            # "Latest failed" without a build number uses FAILURE only; see JenkinsClient.
             # =========================================================
             
             # Fetch console log
@@ -642,14 +661,16 @@ def create_app(config: Config) -> FastAPI:
         # Extract build info from webhook payload
         build = payload.get("build", {})
         
-        # Only process failures
+        # Only queue analysis for hard failures (not UNSTABLE)
         status = build.get("status") or build.get("phase")
-        if status not in ["FAILURE", "UNSTABLE", "FINALIZED"]:
+        if status == "UNSTABLE":
+            return {"status": "ignored", "reason": "UNSTABLE builds are not analyzed (FAILURE only)"}
+        if status not in ["FAILURE", "FINALIZED"]:
             return {"status": "ignored", "reason": f"Build status: {status}"}
         
         # Check if this is a completed build
-        if build.get("phase") == "FINALIZED" and build.get("status") not in ["FAILURE", "UNSTABLE"]:
-            return {"status": "ignored", "reason": "Build succeeded"}
+        if build.get("phase") == "FINALIZED" and build.get("status") not in ["FAILURE"]:
+            return {"status": "ignored", "reason": "Build succeeded or UNSTABLE"}
         
         job_name = payload.get("name") or build.get("full_url", "").split("/job/")[-1].split("/")[0]
         build_number = build.get("number")
@@ -659,6 +680,14 @@ def create_app(config: Config) -> FastAPI:
                 status_code=400,
                 detail="Missing job name or build number"
             )
+        
+        # Confirm Jenkins result: only FAILURE (UNSTABLE is not analyzed)
+        try:
+            bi = jenkins_client.get_build_info(job_name, int(build_number))
+            if bi.status == "UNSTABLE":
+                return {"status": "ignored", "reason": "UNSTABLE builds are not analyzed"}
+        except Exception as e:
+            logger.warning("Webhook: could not verify build status for %s#%s: %s", job_name, build_number, e)
         
         # Queue analysis as background task
         background_tasks.add_task(
@@ -2023,6 +2052,9 @@ async def run_background_analysis(
         
         # Perform analysis
         build_info = jenkins.get_build_info(job, build)
+        if build_info.status == "UNSTABLE":
+            logger.info("Background analysis skipped: build %s#%s is UNSTABLE", job, build)
+            return
         console_log = jenkins.get_console_log(job, build)
         parsed_log = parser.parse(console_log)
         test_results = jenkins.get_test_results(job, build)
