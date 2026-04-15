@@ -1516,58 +1516,15 @@ class LogParser:
     
     def _find_last_stage(self, lines: List[str]) -> Tuple[Optional[str], int]:
         """Find the last pipeline stage in the log.
-        
-        Jenkins stage patterns:
-        - [Pipeline] stage
-        - [Pipeline] { (Stage Name)
-        - [Pipeline] { (stage_name)
-        
-        Returns: (stage_name, line_index, stage_sequence) or (None, -1, []) if not found
+
+        Delegates to :mod:`pipeline_stages` for Declarative patterns:
+        ``[Pipeline] stage`` then a following ``[Pipeline] …`` name line (flexible spacing),
+        legacy ``[Pipeline] { (name)``, and ``[Pipeline] // stage`` boundaries where useful.
         """
-        stage_sequence = []  # All stages in order (Req 13.4)
-        last_stage_name = None
-        last_stage_line = -1
-        
-        # Pattern for [Pipeline] stage marker (first line of two-line pattern)
-        stage_marker_pattern = re.compile(r'\[Pipeline\]\s+stage')
-        
-        # Pattern for [Pipeline] { (stage_name) - match LAST ) on line (Req 13.3)
-        # This handles stage names containing (, ), {, } characters
-        stage_name_pattern = re.compile(r'\[Pipeline\]\s*\{\s*\((.+)\)\s*$')
-        
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-            
-            # Check for [Pipeline] stage marker (Req 13.1)
-            if stage_marker_pattern.search(line):
-                # Look ahead up to 2 lines for stage name (Req 13.8)
-                for lookahead in range(1, 3):
-                    if i + lookahead < len(lines):
-                        name_match = stage_name_pattern.search(lines[i + lookahead])
-                        if name_match:
-                            # Extract stage name, strip whitespace but preserve internal chars (Req 13.9)
-                            stage_name = name_match.group(1).strip()
-                            stage_sequence.append(stage_name)
-                            last_stage_name = stage_name
-                            last_stage_line = i
-                            break
-                i += 1
-                continue
-            
-            # Also check single-line pattern (Req 13.2)
-            name_match = stage_name_pattern.search(line)
-            if name_match:
-                stage_name = name_match.group(1).strip()
-                # Avoid duplicates from two-line detection
-                if not stage_sequence or stage_sequence[-1] != stage_name:
-                    stage_sequence.append(stage_name)
-                    last_stage_name = stage_name
-                    last_stage_line = i
-            
-            i += 1
-        
-        return last_stage_name, last_stage_line, stage_sequence
+        from .pipeline_stages import find_declarative_stages
+
+        last_name, last_idx, sequence = find_declarative_stages(lines)
+        return last_name, last_idx, sequence
     
     def _extract_errors_from_end(self, lines: List[str], line_offset: int = 0) -> List[ErrorMatch]:
         """Extract errors, prioritizing those at the END of the log section.

@@ -238,13 +238,6 @@ class RootCauseFinder:
         ],
     }
     
-    # Patterns for stage detection
-    STAGE_PATTERN = re.compile(r'\[Pipeline\]\s*\{\s*\(([^)]+)\)')
-    STAGE_END_PATTERNS = [
-        re.compile(r'\[Pipeline\]\s*//\s*stage'),
-        re.compile(r'\[Pipeline\]\s*\}'),
-    ]
-    
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or {}
         self.context_before = self.config.get('context_before', self.CONTEXT_BEFORE)
@@ -515,17 +508,11 @@ class RootCauseFinder:
         return result
     
     def _find_last_stage(self, lines: List[str]) -> Tuple[Optional[str], int]:
-        """Find the last pipeline stage."""
-        last_stage_name = None
-        last_stage_idx = -1
-        
-        for i, line in enumerate(lines):
-            match = self.STAGE_PATTERN.search(line)
-            if match:
-                last_stage_name = match.group(1).strip()
-                last_stage_idx = i
-        
-        return last_stage_name, last_stage_idx
+        """Find the last pipeline stage (same rules as LogParser / pipeline_stages)."""
+        from .pipeline_stages import find_declarative_stages
+
+        last_name, last_idx, _ = find_declarative_stages(lines)
+        return last_name, last_idx
     
     def _find_failed_method(self, lines: List[str]) -> Optional[str]:
         """Find the method that was running when failure occurred.
