@@ -66,7 +66,7 @@ Supports all AWS authentication methods: profiles, SSO, IAM roles, environment v
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                      JENKINS FAILURE AGENT v2.0                             │
+│                      JENKINS FAILURE AGENT v3.0                             │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐         │
 │  │   ANALYSIS UI   │    │  KNOWLEDGE UI   │    │  TRAINING UI    │         │
@@ -197,6 +197,18 @@ curl -X POST http://localhost:8080/training/jobs/1/export
 curl http://localhost:8080/training/jobs/1/download -o training.jsonl
 ```
 
+**Restore on a new machine (backup):** keep your downloaded `training.jsonl` or JSON bundle (`format=json`). Re-import into a fresh agent data directory:
+
+```bash
+curl -X POST http://localhost:8080/training/restore \
+  -F "file=@training.jsonl" \
+  -F "source=restore"
+```
+
+Or use **Training → Restore from export** in the web UI. Rows that match an existing example (same content hash) are skipped.
+
+**Browse / edit / delete examples:** `GET /training/examples?page=1&page_size=20`, `PATCH /training/examples/{id}`, `DELETE /training/examples/{id}` — also available from the **Training examples** table in the UI.
+
 **Supported Formats:**
 - `jsonl_openai` — OpenAI fine-tuning format
 - `jsonl_anthropic` — Anthropic fine-tuning format  
@@ -322,16 +334,23 @@ make restore FILE=backups/backup-20240411-143052.tar.gz
 
 ## Version
 
-**Current: v2.0.0** | [View changelog](CHANGELOG.md)
+**Current: v3.0.0** | [View changelog](CHANGELOG.md)
 
-### What's New in v2.0
+### What's New in v3.0 (major)
+
+- **Training restore** — Re-import exported JSONL/JSON bundles (`POST /training/restore`, UI)
+- **Training examples** — Paginated list, edit, delete (API + Training tab table)
+- **Declarative Pipeline stages** — Reliable failed-stage detection from Jenkins logs (timestamps, two-line stage blocks)
+- **Docs** — README / API testing updates for training operations
+
+### Earlier: v2.0 — AI Learning System
 
 - **Knowledge Store** — SQLite database for tool definitions and error patterns
 - **Doc Importer** — Import tool knowledge from documentation URLs
 - **Java Analyzer** — Extract CLI patterns from Java source (Spring Shell, Picocli)
 - **Training Pipeline** — Export training data for AI fine-tuning
 - **UI Tabs** — Analysis, Knowledge, and Training tabs
-- **Test Suite** — 70 automated tests
+- **Test Suite** — Broad pytest coverage (see changelog)
 
 ## License
 

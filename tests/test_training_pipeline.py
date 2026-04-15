@@ -14,7 +14,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from src.training_pipeline import (
     TrainingPipeline, TrainingExample, TrainingJob,
-    TrainingFormat, TrainingJobStatus
+    TrainingFormat, TrainingJobStatus,
+    training_example_from_openai_record,
 )
 
 
@@ -411,6 +412,156 @@ class TestTrainingPipeline:
         assert "knowledge" in stats["by_source"]
         assert "CREDENTIAL" in stats["by_category"]
         assert "NETWORK" in stats["by_category"]
+
+
+class TestTrainingExamplesCRUD:
+    """Paginated list, get by id, delete, update."""
+
+    @pytest.mark.unit
+    def test_get_examples_page_and_count(self, temp_dir):
+        pipeline = TrainingPipeline(
+            db_path=os.path.join(temp_dir, "training.db"),
+            export_path=os.path.join(temp_dir, "exports"),
+        )
+        for i in range(5):
+            pipeline.add_example(
+                TrainingExample(
+                    source="unit",
+                    error_snippet=f"error message {i} here long",
+                    root_cause=f"root cause text {i} here long enough",
+                    category="TEST",
+                )
+            )
+        assert pipeline.count_examples(source="unit") == 5
+        page1, total = pipeline.get_examples_page(page=1, page_size=2, source="unit")
+        assert total == 5
+        assert len(page1) == 2
+        page3, _ = pipeline.get_examples_page(page=3, page_size=2, source="unit")
+        assert len(page3) == 1
+
+    @pytest.mark.unit
+    def test_delete_example(self, temp_dir):
+        pipeline = TrainingPipeline(
+            db_path=os.path.join(temp_dir, "training.db"),
+            export_path=os.path.join(temp_dir, "exports"),
+        )
+        eid = pipeline.add_example(
+            TrainingExample(
+                source="x",
+                error_snippet="delete me error text here",
+                root_cause="delete me root cause here",
+                category="TEST",
+            )
+        )
+        assert eid > 0
+        assert pipeline.delete_example(eid)
+        assert pipeline.get_example_by_id(eid) is None
+        assert not pipeline.delete_example(eid)
+
+    @pytest.mark.unit
+    def test_update_example(self, temp_dir):
+        pipeline = TrainingPipeline(
+            db_path=os.path.join(temp_dir, "training.db"),
+            export_path=os.path.join(temp_dir, "exports"),
+        )
+        eid = pipeline.add_example(
+            TrainingExample(
+                source="x",
+                error_snippet="original error snippet here",
+                root_cause="original root cause text here",
+                category="TEST",
+            )
+        )
+        updated = pipeline.update_example(
+            eid, {"root_cause": "updated root cause explanation here", "fix": "run fix command"}
+        )
+        assert updated is not None
+        assert "updated root cause" in updated.root_cause
+        assert updated.fix == "run fix command"
+
+
+class TestTrainingRestore:
+    """Restore / import from exported JSON or JSONL."""
+
+    @pytest.mark.unit
+    def test_import_json_bundle(self, temp_dir):
+        pipeline = TrainingPipeline(
+            db_path=os.path.join(temp_dir, "training.db"),
+            export_path=os.path.join(temp_dir, "exports"),
+        )
+        ex = TrainingExample(
+            source="test",
+            error_snippet="bundle error text here ok",
+            root_cause="bundle root cause text here ok",
+            category="TEST",
+            fix="do the thing",
+        )
+        d = ex.to_dict()
+        raw = json.dumps({"examples": [d], "count": 1}).encode("utf-8")
+        r = pipeline.import_from_export_bytes(raw, filename="backup.json")
+        assert r["format_detected"] == "json_bundle"
+        assert r["added"] == 1
+        assert r["skipped"] == 0
+        loaded = pipeline.get_examples()
+        assert len(loaded) == 1
+        assert loaded[0].root_cause.startswith("bundle root")
+
+    @pytest.mark.unit
+    def test_import_jsonl_openai_roundtrip(self, temp_dir):
+        pipeline = TrainingPipeline(
+            db_path=os.path.join(temp_dir, "training.db"),
+            export_path=os.path.join(temp_dir, "exports"),
+        )
+        ex = TrainingExample(
+            source="test",
+            job_name="job-a",
+            failed_stage="Build",
+            error_snippet="jsonl error snippet here",
+            root_cause="jsonl root cause here ok",
+            category="BUILD",
+            confidence=0.88,
+            fix="fix it",
+        )
+        line = json.dumps(ex.to_openai_format()).encode("utf-8")
+        r = pipeline.import_from_export_bytes(line + b"\n")
+        assert r["format_detected"] == "jsonl_openai"
+        assert r["added"] == 1
+        got = pipeline.get_examples()[0]
+        assert "jsonl error snippet" in got.error_snippet
+        assert got.failed_stage == "Build"
+        assert abs(got.confidence - 0.88) < 0.01
+
+    @pytest.mark.unit
+    def test_import_skips_duplicates(self, temp_dir):
+        pipeline = TrainingPipeline(
+            db_path=os.path.join(temp_dir, "training.db"),
+            export_path=os.path.join(temp_dir, "exports"),
+        )
+        line = json.dumps(
+            TrainingExample(
+                error_snippet="dup error text here",
+                root_cause="dup cause text here",
+                category="TEST",
+            ).to_openai_format()
+        ).encode("utf-8")
+        r1 = pipeline.import_from_export_bytes(line)
+        r2 = pipeline.import_from_export_bytes(line)
+        assert r1["added"] == 1 and r1["skipped"] == 0
+        assert r2["added"] == 0 and r2["skipped"] == 1
+
+    @pytest.mark.unit
+    def test_training_example_from_openai_record_parses_feedback_style(self):
+        ex = TrainingExample(
+            job_name="J1",
+            error_snippet="failure text here long enough",
+            root_cause="because reasons here long",
+            category="NETWORK",
+        )
+        rec = ex.to_openai_format()
+        back = training_example_from_openai_record(rec, source="import")
+        assert back is not None
+        assert back.job_name == "J1"
+        assert back.source == "import"
 
 
 class TestTrainingJob:

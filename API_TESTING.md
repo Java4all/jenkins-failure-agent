@@ -296,7 +296,51 @@ cat training-data.jsonl
 
 ---
 
-## 15. Training Pipeline - List Jobs
+## 15. Training Pipeline - Restore from export (disaster recovery)
+
+Upload a file previously produced by **Export** (`jsonl_openai` / `jsonl_ollama` or `json` bundle):
+
+```bash
+curl -X POST http://localhost:8080/training/restore \
+  -F "file=@training-data.jsonl" \
+  -F "source=restore"
+```
+
+**Expected:**
+```json
+{
+  "success": true,
+  "filename": "training-data.jsonl",
+  "added": 12,
+  "skipped": 2,
+  "format_detected": "jsonl_openai",
+  "lines_processed": 14,
+  "parse_errors": []
+}
+```
+
+`skipped` counts duplicates (same content hash as an existing row). `source` is stored on imported examples (default `import`).
+
+---
+
+### Training examples — list, get, patch, delete
+
+```bash
+# Paginated list (optional: &source=feedback)
+curl "http://localhost:8080/training/examples?page=1&page_size=20"
+
+curl http://localhost:8080/training/examples/1
+
+curl -X PATCH http://localhost:8080/training/examples/1 \
+  -H "Content-Type: application/json" \
+  -d '{"root_cause":"Updated explanation","fix":"Updated fix"}'
+
+curl -X DELETE http://localhost:8080/training/examples/1
+```
+
+---
+
+## 16. Training Pipeline - List Jobs
 
 ```bash
 curl http://localhost:8080/training/jobs
@@ -314,7 +358,7 @@ curl http://localhost:8080/training/jobs
 
 ---
 
-## 16. Feedback - Submit
+## 17. Feedback - Submit
 
 ```bash
 curl -X POST http://localhost:8080/feedback \
@@ -340,7 +384,7 @@ curl -X POST http://localhost:8080/feedback \
 
 ---
 
-## 17. Feedback - Stats
+## 18. Feedback - Stats
 
 ```bash
 curl http://localhost:8080/feedback/stats
@@ -358,7 +402,7 @@ curl http://localhost:8080/feedback/stats
 
 ---
 
-## 18. Feedback - Export
+## 19. Feedback - Export
 
 ```bash
 curl "http://localhost:8080/feedback/export?format=jsonl" -o feedback.jsonl

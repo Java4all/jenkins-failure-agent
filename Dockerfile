@@ -1,4 +1,4 @@
-# Jenkins Failure Analysis Agent v1.5
+# Jenkins Failure Analysis Agent v3.0
 # Multi-stage build for optimal image size
 # Supports: Standard (scripted), Iterative (multi-call), and Deep (agentic MCP) analysis modes
 
@@ -66,7 +66,7 @@ ENV PYTHONUNBUFFERED=1 \
 # Labels
 LABEL org.opencontainers.image.title="Jenkins Failure Analysis Agent" \
       org.opencontainers.image.description="AI-powered Jenkins build failure analysis with iterative RC analysis and MCP tools" \
-      org.opencontainers.image.version="2.0.0"
+      org.opencontainers.image.version="3.0.0"
 
 # Default port
 EXPOSE 8080

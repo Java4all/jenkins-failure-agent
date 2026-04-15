@@ -180,6 +180,149 @@ class TrainingExample:
         return is_valid, issues
 
 
+# Max upload size for restore (POST /training/restore)
+MAX_TRAINING_IMPORT_BYTES = 50 * 1024 * 1024
+
+
+def _parse_user_failure_block(text: str) -> Dict[str, str]:
+    """
+    Parse the user message body produced by ``to_openai_format`` / feedback export.
+    Extracts optional Job / Stage / Method / Tool lines and the Error: block.
+    """
+    out: Dict[str, str] = {
+        "job_name": "",
+        "failed_stage": "",
+        "failed_method": "",
+        "tool_name": "",
+        "error_snippet": "",
+    }
+    if not text or not text.strip():
+        return out
+    err_mark = text.find("Error:")
+    if err_mark < 0:
+        return out
+    header = text[:err_mark]
+    err_body = text[err_mark + len("Error:") :].lstrip()
+    for line in header.splitlines():
+        line = line.strip()
+        if line.startswith("Job:"):
+            out["job_name"] = line[4:].strip()
+        elif line.startswith("Stage:"):
+            out["failed_stage"] = line[6:].strip()
+        elif line.startswith("Method:"):
+            out["failed_method"] = line[7:].strip()
+        elif line.startswith("Tool:"):
+            out["tool_name"] = line[5:].strip()
+    out["error_snippet"] = err_body.strip()
+    return out
+
+
+def training_example_from_openai_record(
+    record: Dict[str, Any],
+    source: str = "import",
+) -> Optional[TrainingExample]:
+    """
+    Rebuild a ``TrainingExample`` from one OpenAI-style JSONL line
+    (``messages`` with user + assistant JSON).
+    """
+    messages = record.get("messages")
+    if not messages or not isinstance(messages, list):
+        return None
+    user_text = ""
+    assistant_text = ""
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        role = (m.get("role") or "").lower()
+        if role == "user":
+            user_text = m.get("content") or ""
+        elif role == "assistant":
+            assistant_text = m.get("content") or ""
+    if not user_text.strip() or not assistant_text.strip():
+        return None
+    try:
+        asst = json.loads(assistant_text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(asst, dict):
+        return None
+    fields = _parse_user_failure_block(user_text)
+    err = fields.get("error_snippet") or ""
+    rc = (asst.get("root_cause") or "").strip()
+    if not err or not rc:
+        return None
+    conf = asst.get("confidence", 0.9)
+    try:
+        conf = float(conf)
+    except (TypeError, ValueError):
+        conf = 0.9
+    return TrainingExample(
+        source=source,
+        source_id=None,
+        job_name=fields.get("job_name") or "",
+        error_category=str(asst.get("category") or ""),
+        error_snippet=err,
+        failed_stage=fields.get("failed_stage") or "",
+        failed_method=fields.get("failed_method") or "",
+        tool_name=fields.get("tool_name") or "",
+        root_cause=rc,
+        fix=(asst.get("fix") or "").strip(),
+        category=(asst.get("category") or "").strip(),
+        confidence=conf,
+        is_retriable=bool(asst.get("is_retriable", False)),
+    )
+
+
+def training_example_from_export_dict(
+    d: Dict[str, Any],
+    source: str = "import",
+) -> Optional[TrainingExample]:
+    """Rebuild from ``TrainingExample.to_dict()`` / JSON bundle ``examples[]`` item."""
+    if not d:
+        return None
+    err = (d.get("error_snippet") or "").strip()
+    rc = (d.get("root_cause") or "").strip()
+    if not err or not rc:
+        return None
+    sid = d.get("source_id")
+    if sid is not None and not isinstance(sid, int):
+        try:
+            sid = int(sid)
+        except (TypeError, ValueError):
+            sid = None
+    conf = d.get("confidence", 0.9)
+    try:
+        conf = float(conf)
+    except (TypeError, ValueError):
+        conf = 0.9
+    qs = d.get("quality_score", 1.0)
+    try:
+        qs = float(qs)
+    except (TypeError, ValueError):
+        qs = 1.0
+    return TrainingExample(
+        id=None,
+        source=source or (d.get("source") or "import"),
+        source_id=sid,
+        job_name=str(d.get("job_name") or ""),
+        error_category=str(d.get("error_category") or ""),
+        error_snippet=err,
+        failed_stage=str(d.get("failed_stage") or ""),
+        failed_method=str(d.get("failed_method") or ""),
+        tool_name=str(d.get("tool_name") or ""),
+        root_cause=rc,
+        fix=str(d.get("fix") or ""),
+        category=str(d.get("category") or ""),
+        confidence=conf,
+        is_retriable=bool(d.get("is_retriable", False)),
+        quality_score=qs,
+        is_validated=bool(d.get("is_validated", False)),
+        validation_notes=str(d.get("validation_notes") or ""),
+        created_at=str(d.get("created_at") or ""),
+        content_hash=str(d.get("content_hash") or ""),
+    )
+
+
 @dataclass
 class TrainingJob:
     """A training data preparation job."""
@@ -451,6 +594,131 @@ class TrainingPipeline:
         
         return self.add_example(example)
     
+    def import_from_export_bytes(
+        self,
+        data: bytes,
+        filename: str = "",
+        source: str = "import",
+        max_bytes: int = MAX_TRAINING_IMPORT_BYTES,
+    ) -> Dict[str, Any]:
+        """
+        Restore training examples from a file produced by this pipeline (or compatible JSONL).
+
+        Supports:
+
+        - **JSON bundle** (``format=json`` export): ``{"examples": [...], "count": ...}``
+        - **JSONL** (``jsonl_openai`` / ``jsonl_ollama``): one OpenAI-style ``{"messages": [...]}``
+          object per line
+
+        Anthropic-only JSONL (``prompt`` without ``messages``) is not supported.
+
+        Returns:
+            ``added``, ``skipped`` (duplicates), ``format_detected``, ``lines_processed``,
+            ``parse_errors`` (short messages, capped).
+        """
+        if len(data) > max_bytes:
+            raise ValueError(
+                f"File too large ({len(data)} bytes); max {max_bytes} bytes"
+            )
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as e:
+            raise ValueError("File must be UTF-8 encoded") from e
+
+        source_label = (source or "import").strip() or "import"
+        added = 0
+        skipped = 0
+        parse_errors: List[str] = []
+        max_err = 12
+
+        def note_err(msg: str) -> None:
+            if len(parse_errors) < max_err:
+                parse_errors.append(msg)
+
+        # Prefer full-document JSON bundle when the file is a single JSON object with "examples"
+        bundle: Optional[Dict[str, Any]] = None
+        stripped = text.strip()
+        if stripped.startswith("{") and '"examples"' in stripped:
+            try:
+                candidate = json.loads(stripped)
+                if isinstance(candidate, dict) and isinstance(candidate.get("examples"), list):
+                    bundle = candidate
+            except json.JSONDecodeError:
+                bundle = None
+
+        format_detected = "unknown"
+
+        if bundle is not None:
+            format_detected = "json_bundle"
+            examples_raw = bundle.get("examples")
+            if not isinstance(examples_raw, list):
+                note_err("bundle.examples is not a list")
+            else:
+                for i, item in enumerate(examples_raw):
+                    if not isinstance(item, dict):
+                        note_err(f"examples[{i}]: not an object")
+                        continue
+                    ex = training_example_from_export_dict(item, source=source_label)
+                    if not ex:
+                        note_err(f"examples[{i}]: missing error_snippet or root_cause")
+                        continue
+                    n = self.add_example(ex)
+                    if n > 0:
+                        added += 1
+                    else:
+                        skipped += 1
+            return {
+                "added": added,
+                "skipped": skipped,
+                "format_detected": format_detected,
+                "lines_processed": len(examples_raw) if isinstance(examples_raw, list) else 0,
+                "parse_errors": parse_errors,
+            }
+
+        # JSONL
+        format_detected = "jsonl_openai"
+        lines_processed = 0
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            line = line.strip()
+            if not line:
+                continue
+            lines_processed += 1
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError as e:
+                note_err(f"line {line_no}: invalid JSON ({e})")
+                continue
+            if not isinstance(obj, dict):
+                note_err(f"line {line_no}: not a JSON object")
+                continue
+            if "messages" in obj:
+                ex = training_example_from_openai_record(obj, source=source_label)
+                if not ex:
+                    note_err(f"line {line_no}: could not parse OpenAI messages record")
+                    continue
+            elif "prompt" in obj and "messages" not in obj:
+                note_err(
+                    f"line {line_no}: Anthropic prompt format not supported; use OpenAI JSONL or JSON bundle"
+                )
+                continue
+            else:
+                note_err(f"line {line_no}: expected messages[] (OpenAI JSONL)")
+                continue
+
+            n = self.add_example(ex)
+            if n > 0:
+                added += 1
+            else:
+                skipped += 1
+
+        return {
+            "added": added,
+            "skipped": skipped,
+            "format_detected": format_detected,
+            "lines_processed": lines_processed,
+            "parse_errors": parse_errors,
+        }
+    
     def get_examples(
         self,
         source: str = None,
@@ -500,6 +768,220 @@ class TrainingPipeline:
                 ))
             
             return examples
+    
+    def count_examples(
+        self,
+        source: Optional[str] = None,
+        min_quality: float = 0.0,
+        validated_only: bool = False,
+    ) -> int:
+        """Count rows matching the same filters as ``get_examples``."""
+        with sqlite3.connect(self.db_path) as conn:
+            query = "SELECT COUNT(*) FROM training_examples WHERE quality_score >= ?"
+            params: List[Any] = [min_quality]
+            if source:
+                query += " AND source = ?"
+                params.append(source)
+            if validated_only:
+                query += " AND is_validated = 1"
+            row = conn.execute(query, params).fetchone()
+            return int(row[0]) if row else 0
+    
+    def get_examples_page(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        source: Optional[str] = None,
+        min_quality: float = 0.0,
+        validated_only: bool = False,
+    ) -> Tuple[List[TrainingExample], int]:
+        """
+        Paginated ``get_examples``. Returns ``(examples, total_count)``.
+
+        ``page`` is 1-based. ``page_size`` is clamped to 1..200.
+        """
+        page = max(1, int(page))
+        page_size = min(200, max(1, int(page_size)))
+        offset = (page - 1) * page_size
+        total = self.count_examples(
+            source=source, min_quality=min_quality, validated_only=validated_only
+        )
+        with sqlite3.connect(self.db_path) as conn:
+            query = "SELECT * FROM training_examples WHERE quality_score >= ?"
+            params: List[Any] = [min_quality]
+            if source:
+                query += " AND source = ?"
+                params.append(source)
+            if validated_only:
+                query += " AND is_validated = 1"
+            query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+            params.extend([page_size, offset])
+            cursor = conn.execute(query, params)
+            examples: List[TrainingExample] = []
+            for row in cursor.fetchall():
+                examples.append(
+                    TrainingExample(
+                        id=row[0],
+                        source=row[1],
+                        source_id=row[2],
+                        job_name=row[3],
+                        error_category=row[4],
+                        error_snippet=row[5],
+                        failed_stage=row[6],
+                        failed_method=row[7],
+                        tool_name=row[8],
+                        root_cause=row[9],
+                        fix=row[10],
+                        category=row[11],
+                        confidence=row[12],
+                        is_retriable=bool(row[13]),
+                        quality_score=row[14],
+                        is_validated=bool(row[15]),
+                        validation_notes=row[16],
+                        content_hash=row[17],
+                        created_at=row[18],
+                    )
+                )
+            return examples, total
+    
+    def get_example_by_id(self, example_id: int) -> Optional[TrainingExample]:
+        """Load a single training example by primary key."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "SELECT * FROM training_examples WHERE id = ?", (example_id,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return TrainingExample(
+                id=row[0],
+                source=row[1],
+                source_id=row[2],
+                job_name=row[3],
+                error_category=row[4],
+                error_snippet=row[5],
+                failed_stage=row[6],
+                failed_method=row[7],
+                tool_name=row[8],
+                root_cause=row[9],
+                fix=row[10],
+                category=row[11],
+                confidence=row[12],
+                is_retriable=bool(row[13]),
+                quality_score=row[14],
+                is_validated=bool(row[15]),
+                validation_notes=row[16],
+                content_hash=row[17],
+                created_at=row[18],
+            )
+    
+    def delete_example(self, example_id: int) -> bool:
+        """Delete one row. Returns True if a row was removed."""
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute(
+                "DELETE FROM training_examples WHERE id = ?", (example_id,)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+    
+    def update_example(self, example_id: int, updates: Dict[str, Any]) -> Optional[TrainingExample]:
+        """
+        Patch fields on an existing example. Re-validates and recomputes ``content_hash``.
+
+        Allowed keys: job_name, error_category, error_snippet, failed_stage, failed_method,
+        tool_name, root_cause, fix, category, confidence, is_retriable, is_validated,
+        validation_notes.
+
+        Returns updated ``TrainingExample`` or None if not found / no valid changes /
+        duplicate hash conflict.
+        """
+        allowed = {
+            "job_name",
+            "error_category",
+            "error_snippet",
+            "failed_stage",
+            "failed_method",
+            "tool_name",
+            "root_cause",
+            "fix",
+            "category",
+            "confidence",
+            "is_retriable",
+            "is_validated",
+            "validation_notes",
+        }
+        ex = self.get_example_by_id(example_id)
+        if not ex:
+            return None
+        changed = False
+        for k, v in updates.items():
+            if k not in allowed:
+                continue
+            if k == "confidence":
+                try:
+                    nv = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if ex.confidence != nv:
+                    ex.confidence = nv
+                    changed = True
+            elif k in ("is_retriable", "is_validated"):
+                nv = bool(v)
+                if getattr(ex, k) != nv:
+                    setattr(ex, k, nv)
+                    changed = True
+            else:
+                nv = "" if v is None else str(v)
+                if getattr(ex, k) != nv:
+                    setattr(ex, k, nv)
+                    changed = True
+        if not changed:
+            return ex
+        
+        ex.content_hash = ex.compute_hash()
+        is_valid, issues = ex.validate()
+        ex.is_validated = is_valid
+        ex.validation_notes = "; ".join(issues) if issues else ""
+        ex.quality_score = 1.0 if is_valid else 0.5
+        
+        with sqlite3.connect(self.db_path) as conn:
+            try:
+                conn.execute(
+                    """
+                    UPDATE training_examples SET
+                        job_name = ?, error_category = ?, error_snippet = ?,
+                        failed_stage = ?, failed_method = ?, tool_name = ?,
+                        root_cause = ?, fix = ?, category = ?, confidence = ?,
+                        is_retriable = ?, quality_score = ?, is_validated = ?,
+                        validation_notes = ?, content_hash = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        ex.job_name,
+                        ex.error_category,
+                        ex.error_snippet[:5000],
+                        ex.failed_stage,
+                        ex.failed_method,
+                        ex.tool_name,
+                        ex.root_cause[:2000],
+                        (ex.fix or "")[:1000],
+                        ex.category,
+                        ex.confidence,
+                        1 if ex.is_retriable else 0,
+                        ex.quality_score,
+                        1 if ex.is_validated else 0,
+                        ex.validation_notes,
+                        ex.content_hash,
+                        example_id,
+                    ),
+                )
+                conn.commit()
+            except sqlite3.IntegrityError:
+                logger.warning(
+                    "update_example: duplicate content_hash for id=%s", example_id
+                )
+                return None
+        return self.get_example_by_id(example_id)
     
     # =========================================================================
     # Training Jobs Management

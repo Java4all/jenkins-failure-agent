@@ -14,7 +14,7 @@ Supports multiple AI providers:
 - AWS Bedrock: Claude, Titan, Llama, Mistral
 """
 
-__version__ = "2.0.0"
+__version__ = "3.0.0"
 
 from .config import (
     Config, JenkinsConfig, AIConfig, GitConfig, GitHubConfig,

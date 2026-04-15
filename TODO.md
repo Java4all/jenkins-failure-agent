@@ -112,6 +112,12 @@ Fine-tuned Model (Weekly/Monthly)
 
 ---
 
+## Backlog: Training Pipeline
+
+- [ ] **CSV re-import** — `import_from_csv` / extend `POST /training/restore` to accept `.csv` exports (same columns as CSV export). JSONL + JSON bundle already supported.
+
+---
+
 ## Future Ideas
 
 ### v2.2.0 - Advanced Features

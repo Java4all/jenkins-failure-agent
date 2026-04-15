@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks, File, UploadFile, Form
 from starlette.requests import Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -111,7 +111,7 @@ def create_app(config: Config) -> FastAPI:
     app = FastAPI(
         title="Jenkins Failure Analysis Agent",
         description="AI-powered build failure analysis for Jenkins (Hybrid Mode)",
-        version="1.4.0"
+        version="3.0.0"
     )
     
     # CORS middleware - allow all for UI access
@@ -1740,6 +1740,90 @@ def create_app(config: Config) -> FastAPI:
         pipeline = get_training_pipeline()
         return pipeline.get_stats()
     
+    @app.get("/training/examples")
+    async def list_training_examples(
+        page: int = 1,
+        page_size: int = 20,
+        source: Optional[str] = None,
+        validated_only: bool = False,
+        api_key: str = Depends(verify_api_key),
+    ):
+        """
+        List training examples (paginated).
+
+        Query: ``page`` (1-based), ``page_size`` (max 200), optional ``source``,
+        ``validated_only``.
+        """
+        from .training_pipeline import get_training_pipeline
+
+        pipeline = get_training_pipeline()
+        examples, total = pipeline.get_examples_page(
+            page=page,
+            page_size=page_size,
+            source=source,
+            validated_only=validated_only,
+        )
+        return {
+            "examples": [e.to_dict() for e in examples],
+            "total": total,
+            "page": max(1, page),
+            "page_size": min(200, max(1, page_size)),
+        }
+    
+    @app.get("/training/examples/{example_id}")
+    async def get_training_example(
+        example_id: int,
+        api_key: str = Depends(verify_api_key),
+    ):
+        """Get one training example by id."""
+        from .training_pipeline import get_training_pipeline
+
+        pipeline = get_training_pipeline()
+        ex = pipeline.get_example_by_id(example_id)
+        if not ex:
+            raise HTTPException(status_code=404, detail="Example not found")
+        return {"example": ex.to_dict()}
+    
+    @app.patch("/training/examples/{example_id}")
+    async def patch_training_example(
+        example_id: int,
+        request: dict,
+        api_key: str = Depends(verify_api_key),
+    ):
+        """
+        Update fields on a training example (partial body).
+
+        Allowed keys: job_name, error_category, error_snippet, failed_stage,
+        failed_method, tool_name, root_cause, fix, category, confidence,
+        is_retriable, is_validated, validation_notes.
+        """
+        from .training_pipeline import get_training_pipeline
+
+        pipeline = get_training_pipeline()
+        updated = pipeline.update_example(example_id, request)
+        if updated is None:
+            existing = pipeline.get_example_by_id(example_id)
+            if not existing:
+                raise HTTPException(status_code=404, detail="Example not found")
+            raise HTTPException(
+                status_code=409,
+                detail="Update rejected (e.g. duplicate content hash after edit)",
+            )
+        return {"success": True, "example": updated.to_dict()}
+    
+    @app.delete("/training/examples/{example_id}")
+    async def delete_training_example(
+        example_id: int,
+        api_key: str = Depends(verify_api_key),
+    ):
+        """Delete one training example."""
+        from .training_pipeline import get_training_pipeline
+
+        pipeline = get_training_pipeline()
+        if not pipeline.delete_example(example_id):
+            raise HTTPException(status_code=404, detail="Example not found")
+        return {"success": True, "deleted_id": example_id}
+    
     @app.post("/training/import")
     async def import_training_data(
         request: dict,
@@ -1769,6 +1853,46 @@ def create_app(config: Config) -> FastAPI:
         return {
             "success": True,
             **results,
+        }
+    
+    @app.post("/training/restore")
+    async def restore_training_export(
+        file: UploadFile = File(...),
+        source: str = Form("import"),
+        api_key: str = Depends(verify_api_key),
+    ):
+        """
+        Restore training examples from a previously exported file (disaster recovery).
+
+        Accepts multipart form:
+
+        - ``file``: JSON bundle (``format=json`` export) or JSONL (``jsonl_openai`` / ``jsonl_ollama``)
+        - ``source``: optional label stored on each row (default ``import``)
+
+        Returns counts: ``added``, ``skipped`` (duplicates), ``format_detected``, ``parse_errors``.
+        """
+        from .training_pipeline import get_training_pipeline, MAX_TRAINING_IMPORT_BYTES
+
+        pipeline = get_training_pipeline()
+        data = await file.read()
+        if len(data) > MAX_TRAINING_IMPORT_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large (max {MAX_TRAINING_IMPORT_BYTES} bytes)",
+            )
+        try:
+            result = pipeline.import_from_export_bytes(
+                data,
+                filename=file.filename or "",
+                source=source,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+        return {
+            "success": True,
+            "filename": file.filename,
+            **result,
         }
     
     # =========================================================================

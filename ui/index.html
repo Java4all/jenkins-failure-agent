@@ -2163,10 +2163,47 @@
             const [newJobName, setNewJobName] = useState('');
             const [newJobFormat, setNewJobFormat] = useState('jsonl_openai');
             const [actionLoading, setActionLoading] = useState(null);
+            const [restoreLoading, setRestoreLoading] = useState(false);
+            const [restoreMsg, setRestoreMsg] = useState(null);
+            const [examplesList, setExamplesList] = useState([]);
+            const [examplesTotal, setExamplesTotal] = useState(0);
+            const [examplesPage, setExamplesPage] = useState(1);
+            const [examplesPageSize] = useState(20);
+            const [examplesSourceFilter, setExamplesSourceFilter] = useState('');
+            const [examplesLoading, setExamplesLoading] = useState(false);
+            const [editingExample, setEditingExample] = useState(null);
+            const [editForm, setEditForm] = useState({});
             
             useEffect(() => {
                 loadData();
             }, []);
+            
+            const loadExamples = async (page) => {
+                setExamplesLoading(true);
+                try {
+                    const qs = new URLSearchParams({
+                        page: String(page),
+                        page_size: String(examplesPageSize),
+                    });
+                    if (examplesSourceFilter.trim()) qs.set('source', examplesSourceFilter.trim());
+                    const res = await fetch(`${API_BASE}/training/examples?${qs}`);
+                    if (res.ok) {
+                        const d = await res.json();
+                        setExamplesList(d.examples || []);
+                        setExamplesTotal(d.total || 0);
+                        setExamplesPage(d.page || page);
+                    }
+                } catch (e) {
+                    console.error('Failed to load examples:', e);
+                } finally {
+                    setExamplesLoading(false);
+                }
+            };
+            
+            useEffect(() => {
+                if (loading) return;
+                loadExamples(examplesPage);
+            }, [loading, examplesPage, examplesSourceFilter]);
             
             const loadData = async () => {
                 setLoading(true);
@@ -2185,6 +2222,62 @@
                     console.error('Failed to load training data:', e);
                 } finally {
                     setLoading(false);
+                }
+            };
+            
+            const deleteExample = async (id) => {
+                if (!window.confirm('Delete this training example? This cannot be undone.')) return;
+                try {
+                    const res = await fetch(`${API_BASE}/training/examples/${id}`, { method: 'DELETE' });
+                    if (res.ok) {
+                        loadData();
+                        loadExamples(examplesPage);
+                    }
+                } catch (e) {
+                    console.error('Delete failed:', e);
+                }
+            };
+            
+            const openEdit = (ex) => {
+                setEditingExample(ex);
+                setEditForm({
+                    job_name: ex.job_name || '',
+                    error_snippet: ex.error_snippet || '',
+                    failed_stage: ex.failed_stage || '',
+                    root_cause: ex.root_cause || '',
+                    fix: ex.fix || '',
+                    category: ex.category || '',
+                    confidence: ex.confidence != null ? ex.confidence : 0.9,
+                });
+            };
+            
+            const saveEdit = async () => {
+                if (!editingExample) return;
+                try {
+                    const res = await fetch(`${API_BASE}/training/examples/${editingExample.id}`, {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            job_name: editForm.job_name,
+                            error_snippet: editForm.error_snippet,
+                            failed_stage: editForm.failed_stage,
+                            root_cause: editForm.root_cause,
+                            fix: editForm.fix,
+                            category: editForm.category,
+                            confidence: parseFloat(editForm.confidence),
+                        }),
+                    });
+                    const data = await res.json().catch(() => ({}));
+                    if (res.ok) {
+                        setEditingExample(null);
+                        loadData();
+                        loadExamples(examplesPage);
+                    } else {
+                        alert(data.detail || res.statusText || 'Save failed');
+                    }
+                } catch (e) {
+                    console.error('Save failed:', e);
+                    alert(String(e));
                 }
             };
             
@@ -2236,6 +2329,37 @@
                 window.open(`${API_BASE}/training/jobs/${jobId}/download`, '_blank');
             };
             
+            const onRestoreFile = async (e) => {
+                const f = e.target.files && e.target.files[0];
+                if (!f) return;
+                setRestoreLoading(true);
+                setRestoreMsg(null);
+                const fd = new FormData();
+                fd.append('file', f);
+                fd.append('source', 'restore');
+                try {
+                    const res = await fetch(`${API_BASE}/training/restore`, { method: 'POST', body: fd });
+                    const data = await res.json().catch(() => ({}));
+                    if (res.ok) {
+                        const errs = (data.parse_errors && data.parse_errors.length)
+                            ? ` Warnings: ${data.parse_errors.slice(0, 3).join('; ')}`
+                            : '';
+                        setRestoreMsg(
+                            `Added ${data.added}, skipped ${data.skipped} (${data.format_detected}).${errs}`
+                        );
+                        loadData();
+                    } else {
+                        const d = data.detail;
+                        setRestoreMsg(typeof d === 'string' ? d : (Array.isArray(d) ? d.map(x => x.msg || x).join(', ') : res.statusText));
+                    }
+                } catch (err) {
+                    setRestoreMsg(String(err));
+                } finally {
+                    setRestoreLoading(false);
+                    e.target.value = '';
+                }
+            };
+            
             const getStatusBadge = (status) => {
                 const styles = {
                     pending: 'bg-gray-500',
@@ -2283,6 +2407,151 @@
                         </div>
                     )}
                     
+                    <Card className="p-4">
+                        <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+                            <h4 className="font-medium">
+                                <i className="fas fa-database text-blue-400 mr-2"></i>
+                                Training examples
+                            </h4>
+                            <div className="flex items-center gap-2">
+                                <input
+                                    type="text"
+                                    value={examplesSourceFilter}
+                                    onChange={(e) => {
+                                        setExamplesSourceFilter(e.target.value);
+                                        setExamplesPage(1);
+                                    }}
+                                    placeholder="Filter by source (e.g. feedback)"
+                                    className="px-3 py-1.5 bg-gray-700 border border-gray-600 rounded-lg text-sm w-48"
+                                />
+                                <button
+                                    type="button"
+                                    onClick={() => loadExamples(examplesPage)}
+                                    className="px-3 py-1.5 bg-gray-600 hover:bg-gray-500 rounded-lg text-sm"
+                                >
+                                    <i className="fas fa-sync-alt mr-1"></i>Refresh
+                                </button>
+                            </div>
+                        </div>
+                        {examplesLoading ? (
+                            <p className="text-gray-400 text-sm py-4"><i className="fas fa-spinner fa-spin mr-2"></i>Loading examples…</p>
+                        ) : examplesList.length === 0 ? (
+                            <p className="text-gray-500 text-sm">No training examples yet. Import from feedback/knowledge or restore from export.</p>
+                        ) : (
+                            <>
+                                <div className="overflow-x-auto rounded-lg border border-gray-700">
+                                    <table className="w-full text-sm text-left">
+                                        <thead className="bg-gray-800/80 text-gray-400 text-xs uppercase">
+                                            <tr>
+                                                <th className="px-3 py-2">ID</th>
+                                                <th className="px-3 py-2">Source</th>
+                                                <th className="px-3 py-2">Category</th>
+                                                <th className="px-3 py-2">Error snippet</th>
+                                                <th className="px-3 py-2 text-right">Actions</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-gray-700">
+                                            {examplesList.map((ex) => (
+                                                <tr key={ex.id} className="hover:bg-gray-800/40">
+                                                    <td className="px-3 py-2 font-mono text-xs text-gray-500">{ex.id}</td>
+                                                    <td className="px-3 py-2 text-gray-300">{ex.source || '—'}</td>
+                                                    <td className="px-3 py-2 text-gray-300">{ex.category || '—'}</td>
+                                                    <td className="px-3 py-2 text-gray-400 max-w-md truncate" title={ex.error_snippet}>
+                                                        {(ex.error_snippet || '').slice(0, 120)}{(ex.error_snippet || '').length > 120 ? '…' : ''}
+                                                    </td>
+                                                    <td className="px-3 py-2 text-right whitespace-nowrap">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => openEdit(ex)}
+                                                            className="text-indigo-400 hover:text-indigo-300 mr-3"
+                                                        >
+                                                            Edit
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => deleteExample(ex.id)}
+                                                            className="text-red-400 hover:text-red-300"
+                                                        >
+                                                            Delete
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                                <div className="flex items-center justify-between mt-3 text-sm text-gray-400">
+                                    <span>
+                                        Page {examplesPage} of {Math.max(1, Math.ceil(examplesTotal / examplesPageSize))}
+                                        {' '}({examplesTotal} total)
+                                    </span>
+                                    <div className="flex gap-2">
+                                        <button
+                                            type="button"
+                                            disabled={examplesPage <= 1}
+                                            onClick={() => setExamplesPage((p) => Math.max(1, p - 1))}
+                                            className="px-3 py-1 bg-gray-700 rounded disabled:opacity-40"
+                                        >
+                                            Previous
+                                        </button>
+                                        <button
+                                            type="button"
+                                            disabled={examplesPage >= Math.max(1, Math.ceil(examplesTotal / examplesPageSize))}
+                                            onClick={() => setExamplesPage((p) => p + 1)}
+                                            className="px-3 py-1 bg-gray-700 rounded disabled:opacity-40"
+                                        >
+                                            Next
+                                        </button>
+                                    </div>
+                                </div>
+                            </>
+                        )}
+                    </Card>
+                    
+                    {editingExample && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60" onClick={() => setEditingExample(null)}>
+                            <div className="bg-gray-800 border border-gray-600 rounded-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
+                                <h4 className="text-lg font-medium mb-4">Edit training example #{editingExample.id}</h4>
+                                <div className="space-y-3 text-sm">
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">Job name</label>
+                                        <input value={editForm.job_name} onChange={(e) => setEditForm({ ...editForm, job_name: e.target.value })} className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg" />
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">Failed stage</label>
+                                        <input value={editForm.failed_stage} onChange={(e) => setEditForm({ ...editForm, failed_stage: e.target.value })} className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg" />
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">Error snippet</label>
+                                        <textarea value={editForm.error_snippet} onChange={(e) => setEditForm({ ...editForm, error_snippet: e.target.value })} rows={4} className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg font-mono text-xs" />
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">Root cause</label>
+                                        <textarea value={editForm.root_cause} onChange={(e) => setEditForm({ ...editForm, root_cause: e.target.value })} rows={4} className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg" />
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-400 block mb-1">Fix</label>
+                                        <textarea value={editForm.fix} onChange={(e) => setEditForm({ ...editForm, fix: e.target.value })} rows={3} className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg" />
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <div>
+                                            <label className="text-xs text-gray-400 block mb-1">Category</label>
+                                            <input value={editForm.category} onChange={(e) => setEditForm({ ...editForm, category: e.target.value })} className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg" />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs text-gray-400 block mb-1">Confidence</label>
+                                            <input type="number" step="0.01" min="0" max="1" value={editForm.confidence} onChange={(e) => setEditForm({ ...editForm, confidence: e.target.value })} className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg" />
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className="flex gap-3 mt-6">
+                                    <button onClick={saveEdit} className="flex-1 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg font-medium">Save</button>
+                                    <button onClick={() => setEditingExample(null)} className="px-4 py-2 bg-gray-600 hover:bg-gray-500 rounded-lg">Cancel</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    
                     {/* Create Job */}
                     <Card className="p-4">
                         <h4 className="font-medium mb-3">
@@ -2315,6 +2584,26 @@
                                 {creating ? <i className="fas fa-spinner fa-spin"></i> : 'Create'}
                             </button>
                         </div>
+                    </Card>
+                    
+                    <Card className="p-4">
+                        <h4 className="font-medium mb-3">
+                            <i className="fas fa-cloud-upload-alt text-cyan-400 mr-2"></i>
+                            Restore from export
+                        </h4>
+                        <p className="text-sm text-gray-400 mb-3">
+                            Upload a previously downloaded <code className="text-gray-300">.jsonl</code> (OpenAI format) or <code className="text-gray-300">.json</code> bundle from this agent. Duplicates are skipped (same content hash).
+                        </p>
+                        <div className="flex flex-wrap items-center gap-3">
+                            <label className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm cursor-pointer">
+                                {restoreLoading ? <i className="fas fa-spinner fa-spin mr-2"></i> : <i className="fas fa-folder-open mr-2"></i>}
+                                Choose file
+                                <input type="file" accept=".json,.jsonl,.txt" className="hidden" disabled={restoreLoading} onChange={onRestoreFile} />
+                            </label>
+                        </div>
+                        {restoreMsg && (
+                            <p className="mt-3 text-sm text-gray-300 whitespace-pre-wrap">{restoreMsg}</p>
+                        )}
                     </Card>
                     
                     {/* Jobs List */}
@@ -2888,7 +3177,7 @@
                                     </div>
                                     <div>
                                         <h1 className="text-xl font-bold gradient-text">Jenkins Failure Analysis</h1>
-                                        <p className="text-xs text-gray-500">AI-Powered Build Debugging • Hybrid Architecture v2.1</p>
+                                        <p className="text-xs text-gray-500">AI-Powered Build Debugging • Hybrid Architecture v3.0</p>
                                     </div>
                                 </div>
                                 <div className="flex items-center gap-4">
@@ -3073,7 +3362,7 @@
                     {/* Footer */}
                     <footer className="border-t border-gray-800 mt-12 py-6">
                         <div className="max-w-7xl mx-auto px-4 text-center text-sm text-gray-500">
-                            <p>Jenkins Failure Analysis Agent v2.1.0 • Hybrid Architecture (Scripted + Agentic MCP)</p>
+                            <p>Jenkins Failure Analysis Agent v3.0.0 • Hybrid Architecture (Scripted + Agentic MCP)</p>
                             <p className="mt-1 text-xs">31 MCP Tools • 17 Failure Categories • 3-Tier Classification</p>
                         </div>
                     </footer>

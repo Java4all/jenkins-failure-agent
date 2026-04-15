@@ -1,5 +1,48 @@
 # Changelog
 
+## v3.0.0 - Major Release: Training Pipeline Operations & Declarative Stage Parsing (2026-04-15)
+
+### Major release checkpoint
+
+This release completes **operational workflows** around the Training Pipeline (inspect, edit, delete, disaster recovery) and fixes **failed-stage detection** for Jenkins Declarative Pipeline console output (timestamps, two-line `stage` + label, legacy brace form).
+
+### What’s new
+
+| Area | Details |
+|------|---------|
+| **Training restore** | `POST /training/restore` — re-import prior **JSONL** (OpenAI-style) or **JSON** bundle exports into `training.db` (UTF-8, 50 MB cap). Duplicates skipped via content hash. UI: **Restore from export** on the Training tab. |
+| **Training examples CRUD** | `GET /training/examples` (paginated), `GET/PATCH/DELETE /training/examples/{id}`. UI table: filter by source, pagination, edit modal, delete with confirm. |
+| **Declarative stages** | New `src/pipeline_stages.py` — parses `[Pipeline] stage` + name line, respects `[Pipeline] // stage`, handles leading timestamps; avoids treating the `{ (name)` label line as legacy-only duplicate. `log_parser` / `rc_finder` use shared finder for **failed stage** metadata. |
+| **Tests** | `tests/test_pipeline_stages.py`; expanded `tests/test_training_pipeline.py` (restore round-trip, CRUD, pagination). |
+
+### API summary (Training)
+
+```
+POST   /training/restore              — Multipart: file + optional source=…
+GET    /training/examples           — Query: page, page_size, source, validated_only
+GET    /training/examples/{id}
+PATCH  /training/examples/{id}      — Partial update; recomputes content_hash
+DELETE /training/examples/{id}
+```
+
+Existing endpoints (`/training/jobs`, `/training/stats`, `make backup` / `make restore` for full volume) are unchanged.
+
+### Documentation
+
+- **README.md** — restore curl, examples API pointer  
+- **API_TESTING.md** — restore, examples curl samples  
+
+### Backlog (not in this release)
+
+- **CSV re-import** for training data — tracked in `TODO.md`
+
+### Upgrade notes
+
+- No database migration required; new code paths are additive.  
+- For a **new machine**, prefer `make restore FILE=…` for full `feedback.db` / `knowledge.db` / `training.db`, or use **Training → Restore** when you only have exported JSONL/JSON files.
+
+---
+
 ## v2.0.0 - Major Release: AI Learning System Complete (2026-04-11)
 
 ### 🎉 MAJOR RELEASE CHECKPOINT
