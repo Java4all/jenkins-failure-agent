@@ -36,6 +36,10 @@ Existing endpoints (`/training/jobs`, `/training/stats`, `make backup` / `make r
 
 - **CSV re-import** for training data — tracked in `TODO.md`
 
+### Dependencies
+
+- **`python-multipart`** — added to `requirements.txt`. FastAPI requires it for `File()`, `Form()`, and multipart routes such as `POST /training/restore` (see [FastAPI docs](https://fastapi.tiangolo.com/tutorial/request-forms/)).
+
 ### Upgrade notes
 
 - No database migration required; new code paths are additive.  
