@@ -104,34 +104,51 @@ class SplunkConnector:
         # Create search job (async mode)
         search_url = urljoin(self.config.url, "/services/search/jobs")
         
-        logger.info(f"Splunk search URL: {search_url}")
-        logger.debug(f"Splunk query: {query}")
+        search_query = f"search {query}"
+        
+        # Log curl equivalent for debugging
+        logger.info("=" * 60)
+        logger.info("SPLUNK DEBUG - Equivalent curl command:")
+        logger.info(f'''curl -k -X POST "{search_url}" \\
+  -H "Authorization: Bearer $SPLUNK_TOKEN" \\
+  -d "search={search_query[:200]}..." \\
+  -d "output_mode=json" \\
+  -d "exec_mode=normal"''')
+        logger.info("=" * 60)
+        logger.info(f"Full query:\n{query}")
+        logger.info("=" * 60)
         
         try:
             # Create job in normal (async) mode
+            post_data = {
+                "search": search_query,
+                "output_mode": "json",
+                "exec_mode": "normal",
+            }
+            
+            logger.info(f"POST data: {post_data}")
+            
             response = self.session.post(
                 search_url,
-                data={
-                    "search": f"search {query}",
-                    "output_mode": "json",
-                    "exec_mode": "normal",  # Async - don't wait
-                    "max_count": max_results,
-                },
+                data=post_data,
                 verify=self.config.verify_ssl,
-                timeout=30,  # Short timeout for job creation
+                timeout=30,
             )
             
-            logger.info(f"Splunk job creation status: {response.status_code}")
+            logger.info(f"Job creation response: {response.status_code}")
+            logger.info(f"Job creation body: {response.text[:500]}")
+            
             response.raise_for_status()
             
             job_data = response.json()
             job_sid = job_data.get("sid")
             
             if not job_sid:
-                logger.error(f"No job SID returned from Splunk. Response: {job_data}")
+                logger.error(f"No job SID returned. Full response: {job_data}")
                 return []
             
-            logger.info(f"Splunk job SID: {job_sid}")
+            logger.info(f"Job SID: {job_sid}")
+            logger.info(f"Check job status: curl -k -H 'Authorization: Bearer $SPLUNK_TOKEN' '{self.config.url}/services/search/jobs/{job_sid}?output_mode=json'")
             
             # Poll for job completion
             status_url = urljoin(self.config.url, f"/services/search/jobs/{job_sid}")
@@ -155,30 +172,40 @@ class SplunkConnector:
                 
                 dispatch_state = content.get("dispatchState", "")
                 is_done = content.get("isDone", False)
+                run_duration = content.get("runDuration", 0)
+                scan_count = content.get("scanCount", 0)
+                event_count = content.get("eventCount", 0)
+                result_count = content.get("resultCount", 0)
                 
-                logger.debug(f"Job status: {dispatch_state}, isDone: {is_done}")
+                logger.info(f"[{elapsed}s] State: {dispatch_state}, Done: {is_done}, "
+                           f"Duration: {run_duration:.1f}s, Scanned: {scan_count}, "
+                           f"Events: {event_count}, Results: {result_count}")
                 
                 if is_done:
                     break
                 
                 if dispatch_state == "FAILED":
-                    logger.error(f"Splunk job failed: {content.get('messages', [])}")
+                    messages = content.get("messages", [])
+                    logger.error(f"Splunk job FAILED: {messages}")
                     return []
                 
                 time.sleep(poll_interval)
                 elapsed += poll_interval
             
             if not is_done:
-                logger.error(f"Splunk job timed out after {max_wait}s")
+                logger.error(f"Job timed out after {max_wait}s. Last state: {dispatch_state}")
+                logger.error(f"Try running manually: curl -k -H 'Authorization: Bearer $SPLUNK_TOKEN' '{self.config.url}/services/search/jobs/{job_sid}?output_mode=json'")
                 # Cancel the job
                 try:
                     self.session.delete(status_url, verify=self.config.verify_ssl, timeout=5)
-                except:
-                    pass
+                    logger.info(f"Cancelled job {job_sid}")
+                except Exception as e:
+                    logger.warning(f"Failed to cancel job: {e}")
                 return []
             
             # Get results
             results_url = urljoin(self.config.url, f"/services/search/jobs/{job_sid}/results")
+            logger.info(f"Fetching results: curl -k -H 'Authorization: Bearer $SPLUNK_TOKEN' '{results_url}?output_mode=json&count={max_results}'")
             
             results_response = self.session.get(
                 results_url,
@@ -187,29 +214,31 @@ class SplunkConnector:
                 timeout=30,
             )
             
-            logger.info(f"Splunk results status: {results_response.status_code}")
+            logger.info(f"Results response: {results_response.status_code}")
             results_response.raise_for_status()
             
             results_data = results_response.json()
             results = results_data.get("results", [])
             
-            logger.info(f"Splunk returned {len(results)} results")
+            logger.info(f"Got {len(results)} results")
             if results:
-                logger.debug(f"First result keys: {list(results[0].keys())}")
+                logger.info(f"First result keys: {list(results[0].keys())}")
                 logger.debug(f"First result: {results[0]}")
             
             return results
             
         except requests.RequestException as e:
-            logger.error(f"Splunk search failed: {e}")
+            logger.error(f"Splunk request failed: {e}")
+            logger.error(f"Response: {getattr(e.response, 'text', 'N/A')[:500] if hasattr(e, 'response') else 'N/A'}")
             return []
     
-    def get_failed_builds(self, minutes: int = None) -> List[FailedBuild]:
+    def get_failed_builds(self, minutes: int = None, simple_query: bool = True) -> List[FailedBuild]:
         """
         Get list of failed builds from Splunk.
         
         Args:
             minutes: Look back N minutes (default: sync_interval_mins)
+            simple_query: Use simpler query without subsearch (default True - faster)
             
         Returns:
             List of FailedBuild objects
@@ -217,22 +246,34 @@ class SplunkConnector:
         if minutes is None:
             minutes = self.config.sync_interval_mins
         
-        # Build query based on your Splunk screenshots
         filter_clause = ""
         if self.config.search_filter:
             filter_clause = f'"{self.config.search_filter}"'
         
-        query = f'''
-index={self.config.index} ("Finished:" AND [ search index={self.config.index} {filter_clause} | fields source | dedup source ]) earliest=-{minutes}m
-| rex field=_raw "Finished:\\s+(?<result>\\w+)"
-| eval result=upper(result)
+        if simple_query:
+            # Simple query - just find "Finished: FAILURE" lines directly
+            query = f'''
+index={self.config.index} "Finished: FAILURE" {filter_clause} earliest=-{minutes}m
+| rex field=source "/(?<job_id>\d+)/console$"
+| stats count as failure_count BY host, source, job_id
+| rename source as src
+| sort -failure_count
+| head 100
+'''
+        else:
+            # Complex query with regex extraction (slower)
+            query = f'''
+index={self.config.index} "Finished:" {filter_clause} earliest=-{minutes}m
+| rex field=_raw "Finished:\s+(?<result>\w+)"
 | where result=="FAILURE"
-| rex field=source "/(?<job_id>\\d+)/console$"
-| stats count as failure_count BY host, src, job_id
-| sort src, job_id
+| rex field=source "/(?<job_id>\d+)/console$"
+| stats count as failure_count BY host, source, job_id
+| rename source as src
+| sort -failure_count
+| head 100
 '''
         
-        logger.info(f"Querying Splunk for failed builds (last {minutes} mins)")
+        logger.info(f"Querying Splunk for failed builds (last {minutes} mins, simple={simple_query})")
         results = self._search(query.strip())
         
         failures = []
@@ -246,6 +287,32 @@ index={self.config.index} ("Finished:" AND [ search index={self.config.index} {f
         
         logger.info(f"Found {len(failures)} failed builds")
         return failures
+    
+    def test_simple_search(self, minutes: int = 15) -> Dict[str, Any]:
+        """
+        Run a minimal test search to verify Splunk query execution.
+        Use this to debug - if this works, issue is with the main query.
+        """
+        import time as time_module
+        
+        query = f'''
+index={self.config.index} earliest=-{minutes}m
+| head 10
+| stats count
+'''
+        
+        logger.info(f"Running test search on index={self.config.index}")
+        start = time_module.time()
+        results = self._search(query.strip())
+        elapsed = time_module.time() - start
+        
+        return {
+            "success": len(results) > 0,
+            "elapsed_seconds": round(elapsed, 2),
+            "event_count": results[0].get("count", 0) if results else 0,
+            "index": self.config.index,
+            "query": query.strip(),
+        }
     
     def get_build_log(self, host: str, job_id: str, tail_lines: int = None) -> str:
         """

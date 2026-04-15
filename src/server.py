@@ -1739,6 +1739,29 @@ def create_app(config: Config) -> FastAPI:
         
         return connector.test_connection()
     
+    @app.get("/splunk/test-search")
+    async def test_splunk_search(
+        minutes: int = 15,
+        api_key: str = Depends(verify_api_key)
+    ):
+        """
+        Run a minimal test search to debug Splunk connectivity.
+        
+        This runs the simplest possible query to verify:
+        1. Job creation works
+        2. Polling works  
+        3. Results retrieval works
+        
+        Check container logs for detailed debug output including curl commands.
+        """
+        from .splunk_connector import get_splunk_connector
+        
+        connector = get_splunk_connector()
+        if not connector:
+            raise HTTPException(status_code=400, detail="Splunk integration not enabled")
+        
+        return connector.test_simple_search(minutes=minutes)
+    
     @app.post("/splunk/sync")
     async def sync_splunk_failures(
         minutes: int = None,
