@@ -122,15 +122,13 @@ def convert_rc_result_to_analysis_result(
             if matched_tool:
                 failure_analysis["failing_tool"] = matched_tool
         elif tool_invocations:
-            for tool in reversed(tool_invocations):
-                has_error = tool.exit_code and tool.exit_code != 0
-                has_error_output = any(
-                    "error" in line.lower() or "fail" in line.lower() or "fatal" in line.lower()
-                    for line in (tool.output_lines or [])
-                )
-                if has_error or has_error_output:
-                    failure_analysis["failing_tool"] = tool.to_dict()
-                    break
+            from .command_association import pick_best_tool_invocation, tool_dict_from_any
+
+            err_line = parsed_log.errors[0].line_number if parsed_log.errors else None
+            if err_line:
+                best = pick_best_tool_invocation(tool_invocations, err_line)
+                if best is not None:
+                    failure_analysis["failing_tool"] = tool_dict_from_any(best)
             if "failing_tool" not in failure_analysis and tool_invocations:
                 failure_analysis["failing_tool"] = tool_invocations[-1].to_dict()
 

@@ -574,7 +574,7 @@ class LogParser:
         r"\[FATAL\]",
     ]
     
-    # How many lines after a tool invocation to look for related errors
+    # Legacy constant (superseded by command_association.span-based scoring for ErrorMatch.related_tool)
     TOOL_ERROR_PROXIMITY = 20
     
     # Req 19.7: Max output lines to collect per command
@@ -1296,23 +1296,20 @@ class LogParser:
         errors: List[ErrorMatch],
         tool_invocations: List[ToolInvocation]
     ) -> None:
-        """Associate errors with preceding tool invocations (Requirement 17.4).
-        
-        If an error occurs within TOOL_ERROR_PROXIMITY lines after a tool invocation,
-        associate that error with the tool.
+        """Associate errors with tool invocations (Requirement 17.4).
+
+        Uses span-based scoring (see command_association) so long tool output (Maven, custom CLIs)
+        still links to the correct command — not only the last tool within N lines.
         """
         if not tool_invocations or not errors:
             return
-        
+
+        from .command_association import pick_best_tool_invocation
+
         for error in errors:
-            # Find the most recent tool invocation before this error
-            # that is within TOOL_ERROR_PROXIMITY lines
-            for tool in reversed(tool_invocations):
-                if tool.line_number < error.line_number:
-                    distance = error.line_number - tool.line_number
-                    if distance <= self.TOOL_ERROR_PROXIMITY:
-                        error.related_tool = tool
-                    break  # Stop at the most recent tool before the error
+            best = pick_best_tool_invocation(tool_invocations, error.line_number)
+            if best is not None:
+                error.related_tool = best
     
     def _associate_exit_code_with_failing_tool(
         self,

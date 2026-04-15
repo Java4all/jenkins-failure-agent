@@ -77,6 +77,8 @@ class GitHubConfig:
 @dataclass
 class ParsingConfig:
     max_log_size: int = 10485760
+    # Lines of shell output stored per ToolInvocation (default 30 in LogParser). Raise for richer command↔error linking.
+    max_output_lines: int = 30
     error_context_lines: int = 10
     error_patterns: List[str] = field(default_factory=list)
     ignore_patterns: List[str] = field(default_factory=list)
@@ -280,6 +282,7 @@ def load_config(config_path: Optional[str] = None, env_file: str = ".env") -> Co
     
     parsing_cfg = ParsingConfig(
         max_log_size=raw_config.get("parsing", {}).get("max_log_size", 10485760),
+        max_output_lines=raw_config.get("parsing", {}).get("max_output_lines", 30),
         error_context_lines=raw_config.get("parsing", {}).get("error_context_lines", 10),
         error_patterns=raw_config.get("parsing", {}).get("error_patterns", [
             r"\[ERROR\]", r"\[FATAL\]", r"Exception:", r"Error:",
@@ -496,6 +499,7 @@ def _apply_env_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
         "RC_ANALYZER_MAX_ITERATIONS": ("rc_analyzer", "max_rc_iterations"),
         "RC_ANALYZER_MAX_SOURCE_CHARS": ("rc_analyzer", "max_source_context_chars"),
         "AI_MAX_PROMPT_CHARS": ("ai", "max_prompt_chars"),
+        "PARSING_MAX_OUTPUT_LINES": ("parsing", "max_output_lines"),
     }
     
     float_mappings = {

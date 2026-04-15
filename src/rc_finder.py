@@ -19,6 +19,7 @@ from typing import List, Optional, Tuple, Dict, Any
 from enum import Enum
 
 from .failure_fingerprint import FailureFingerprint
+from .command_association import pick_best_tool_invocation, tool_dict_from_any
 
 # Import PipelineLineType for line classification (Req 20.6)
 try:
@@ -326,7 +327,8 @@ class RootCauseFinder:
                 )
             else:
                 context.related_tool = self._find_related_tool(
-                    context.error_line_number, tool_invocations
+                    context.error_line_number,
+                    tool_invocations,
                 )
         
         return context
@@ -415,88 +417,22 @@ class RootCauseFinder:
     
     def _find_related_tool(
         self,
-        error_line_number: int,
+        error_line_index: int,
         tool_invocations: List[Any],
-        max_distance: int = 50
     ) -> Optional[Dict[str, Any]]:
         """Find the tool invocation most likely related to the error (Req 17.5).
-        
-        Strategy:
-        1. First, look for tools with error indicators in their output
-        2. Prefer tools with non-zero exit codes
-        3. Fall back to the most recent tool before the error
+
+        ``error_line_index`` is 0-based in the full console log; tool lines are 1-based (LogParser).
+        Uses span-based scoring so long outputs (Maven, internal CLIs) still map to the right command.
         """
-        if not tool_invocations:
+        if not tool_invocations or error_line_index < 0:
             return None
-        
-        error_indicators = [
-            'error:', 'Error:', 'ERROR:', 'FATAL:', 'fatal:',
-            'FAILED', 'failed', 'cannot', 'unable to', 'not found',
-            'denied', 'invalid', 'Exception', 'exception',
-        ]
-        
-        # Collect candidates: tools before the error line
-        candidates = []
-        for tool in tool_invocations:
-            tool_line = (
-                tool.line_number if hasattr(tool, 'line_number')
-                else tool.get('line_number', 0)
-            )
-            
-            if tool_line < error_line_number:
-                distance = error_line_number - tool_line
-                if distance <= max_distance:
-                    candidates.append((tool, distance))
-        
-        if not candidates:
+
+        error_line_1based = error_line_index + 1
+        best = pick_best_tool_invocation(tool_invocations, error_line_1based)
+        if best is None:
             return None
-        
-        # Score each candidate
-        def score_tool(tool_distance_tuple):
-            tool, distance = tool_distance_tuple
-            score = 0
-            
-            # Check for error indicators in output
-            output_lines = (
-                tool.output_lines if hasattr(tool, 'output_lines')
-                else tool.get('output_lines', [])
-            )
-            for line in output_lines:
-                for indicator in error_indicators:
-                    if indicator in line:
-                        score += 100  # High score for error output
-                        break
-            
-            # Check exit code
-            exit_code = (
-                tool.exit_code if hasattr(tool, 'exit_code')
-                else tool.get('exit_code')
-            )
-            if exit_code is not None and exit_code != 0:
-                score += 50  # Medium score for non-zero exit
-            
-            # Closer is better (subtract distance)
-            score -= distance
-            
-            return score
-        
-        # Find best candidate
-        best_tool, _ = max(candidates, key=score_tool)
-        
-        # Convert to dict
-        if hasattr(best_tool, 'to_dict'):
-            return best_tool.to_dict()
-        elif isinstance(best_tool, dict):
-            return best_tool
-        else:
-            output_lines = getattr(best_tool, 'output_lines', [])
-            return {
-                'tool_name': getattr(best_tool, 'tool_name', 'unknown'),
-                'command_line': getattr(best_tool, 'command_line', ''),
-                'line_number': getattr(best_tool, 'line_number', 0),
-                'exit_code': getattr(best_tool, 'exit_code', None),
-                'output_lines': output_lines,
-            }
+        return tool_dict_from_any(best)
     
     def _classify_context_lines(
         self,
