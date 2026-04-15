@@ -6,6 +6,7 @@ Supports any OpenAI-compatible API (Ollama, vLLM, LocalAI, etc.)
 import json
 import re
 import time
+from datetime import datetime
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any, Optional
 from enum import Enum
@@ -220,6 +221,17 @@ The failure appears to involve configuration issues. Pay special attention to:
 """
 
 
+SPLUNK_CONSOLE_ANALYSIS_ADDENDUM = """
+## Splunk console excerpt (not full Jenkins API context)
+
+This log was reconstructed from Splunk (often: PRIMARY CANDIDATES + signal lines + tail). Rules:
+1. Prefer **PRIMARY CANDIDATES** and **ALL SIGNAL LINES** for root cause when they clearly describe a failure (e.g. Git checkout, missing revision, plugin exception).
+2. Do **not** treat **LOW-SIGNAL TAIL LINES** or generic EOF/stream errors as the root cause if an earlier Git/SCM/Jenkins/plugin error exists.
+3. The real failure often appears **before** the final `Finished: FAILURE` line.
+4. Respond with **valid JSON only** as specified in the main instructions. `root_cause` must be grounded in a concrete phrase from the log when possible.
+"""
+
+
 class AIAnalyzer:
     """AI-powered failure analyzer using private AI model."""
     
@@ -254,6 +266,37 @@ class AIAnalyzer:
         self.groovy_analyzer = GroovyAnalyzer()
         self.config_analyzer = ConfigurationAnalyzer()
     
+    def analyze_snippet(
+        self,
+        log_snippet: str,
+        job_name: str = "splunk-import",
+        log_parser_config: Optional[Dict[str, Any]] = None,
+        from_splunk_console: bool = False,
+    ) -> AnalysisResult:
+        """
+        Analyze a raw console log snippet (e.g. from Splunk) using the same pipeline
+        as the main /analyze path: LogParser + RootCauseFinder context + LLM.
+        """
+        from .log_parser import LogParser
+
+        parser = LogParser(log_parser_config or {})
+        parsed_log = parser.parse(log_snippet)
+
+        build_info = BuildInfo(
+            job_name=job_name or "splunk-import",
+            build_number=0,
+            status="FAILURE",
+            url="",
+            timestamp=datetime.utcnow(),
+            duration_ms=0,
+        )
+        return self.analyze(
+            build_info,
+            parsed_log,
+            console_log_snippet=log_snippet,
+            console_snippet_origin="splunk" if from_splunk_console else None,
+        )
+    
     def analyze(
         self,
         build_info: BuildInfo,
@@ -263,6 +306,7 @@ class AIAnalyzer:
         console_log_snippet: Optional[str] = None,
         jenkinsfile_content: Optional[str] = None,
         library_sources: Optional[Dict[str, str]] = None,
+        console_snippet_origin: Optional[str] = None,
     ) -> AnalysisResult:
         """
         Perform AI analysis on a build failure.
@@ -275,6 +319,7 @@ class AIAnalyzer:
             console_log_snippet: Raw log snippet for context
             jenkinsfile_content: Optional Jenkinsfile source for deeper analysis
             library_sources: Optional dict of library file paths to contents
+            console_snippet_origin: e.g. \"splunk\" — enables Splunk-specific prompt + retry/confidence tuning
         """
         start_time = time.time()
         
@@ -309,6 +354,7 @@ class AIAnalyzer:
             console_log_snippet,
             groovy_analysis,
             config_analysis,
+            console_snippet_origin=console_snippet_origin,
         )
         
         # Build system prompt with specializations
@@ -317,15 +363,37 @@ class AIAnalyzer:
             system_prompt += "\n\n" + GROOVY_SPECIALIZED_PROMPT
         if use_config_prompt:
             system_prompt += "\n\n" + CONFIG_SPECIALIZED_PROMPT
+        if console_snippet_origin == "splunk":
+            system_prompt += "\n\n" + SPLUNK_CONSOLE_ANALYSIS_ADDENDUM
         
         # Call the AI model
         response = self._call_ai(prompt, system_prompt)
-        
-        # Parse the response
         result = self._parse_response(response, build_info, parsed_log)
+        raw_accum = response
+
+        if console_snippet_origin == "splunk" and console_log_snippet:
+            result = self._adjust_splunk_confidence(result, console_log_snippet)
+            if self._splunk_should_retry_json(result):
+                retry_user = (
+                    prompt
+                    + "\n\n=== RETRY ===\n"
+                    "Your previous answer was missing, too vague, or not valid JSON. "
+                    "Reply with a single JSON object only (no markdown fences). "
+                    "The root_cause must reflect the strongest line in PRIMARY CANDIDATES or ALL SIGNAL LINES when present."
+                )
+                retry_system = (
+                    system_prompt
+                    + "\n\nSTRICT: Valid JSON object only. Keys: root_cause, category, is_retriable, confidence, "
+                    "failed_stage, failed_method, failed_tool, fix (object with action/file/code)."
+                )
+                response2 = self._call_ai(retry_user, retry_system)
+                raw_accum = response + "\n--- RETRY ---\n" + response2
+                result = self._parse_response(response2, build_info, parsed_log)
+                result = self._adjust_splunk_confidence(result, console_log_snippet)
+
         result.analysis_duration_ms = int((time.time() - start_time) * 1000)
         result.model_used = self.model
-        result.raw_ai_response = response
+        result.raw_ai_response = raw_accum
         
         # Attach specialized analysis data
         if groovy_analysis:
@@ -431,6 +499,7 @@ class AIAnalyzer:
         console_log_snippet: Optional[str],
         groovy_analysis: Optional[GroovyAnalysis] = None,
         config_analysis: Optional[ConfigurationAnalysis] = None,
+        console_snippet_origin: Optional[str] = None,
     ) -> str:
         """Build focused prompt using Root Cause Finder Expert."""
         
@@ -454,6 +523,11 @@ class AIAnalyzer:
             
             # Add the focused context from RC Finder
             parts.append(rc_context.get_ai_prompt_context())
+            if console_snippet_origin == "splunk" and "PRIMARY CANDIDATES" in console_log_snippet:
+                parts.append(
+                    "\n(Splunk excerpt: if PRIMARY CANDIDATES is present, start root-cause reasoning there "
+                    "unless a later section clearly supersedes it.)"
+                )
         else:
             # Fallback if no log
             if parsed_log.failed_stage:
@@ -478,6 +552,44 @@ class AIAnalyzer:
         
         return "\n".join(parts)
     
+    def _splunk_should_retry_json(self, result: AnalysisResult) -> bool:
+        """One retry when JSON/root_cause is unusable for Splunk-imported logs."""
+        if not result or not result.root_cause:
+            return True
+        s = (result.root_cause.summary or "").strip()
+        if len(s) < 22:
+            return True
+        low = s.lower()
+        if "unable to determine" in low or "unable to parse" in low:
+            return True
+        return False
+
+    def _adjust_splunk_confidence(self, result: AnalysisResult, log_text: str) -> AnalysisResult:
+        """Calibrate confidence from log heuristics (strong SCM/Git signal vs generic noise)."""
+        if not log_text or not result or not result.root_cause:
+            return result
+        strong = re.search(
+            r"(?i)(couldn'?t find any revision|could not find any revision|hudson\.plugins\.git|gitexception|"
+            r"unable to checkout|checkout failed|fatal:\s*[^\n]*(git|remote|repository)|permission denied)",
+            log_text,
+        )
+        c = float(result.root_cause.confidence)
+        if strong:
+            c = min(1.0, max(c, 0.78))
+        elif "PRIMARY CANDIDATES" in log_text:
+            c = min(1.0, max(c, 0.55))
+        else:
+            c = c * 0.92
+        if "LOW-SIGNAL TAIL" in log_text and "PRIMARY CANDIDATES" not in log_text:
+            c = min(c, 0.62)
+        c = min(1.0, max(0.0, c))
+        result.root_cause.confidence = c
+        if result.failure_analysis and isinstance(result.failure_analysis, dict):
+            result.failure_analysis["confidence"] = c
+        if result.retry_assessment:
+            result.retry_assessment.confidence = c
+        return result
+
     def _call_ai(self, prompt: str, system_prompt: str = SYSTEM_PROMPT) -> str:
         """Call the AI model with retry logic."""
         
@@ -721,6 +833,14 @@ class AIAnalyzer:
                     rationale="The AI could not parse specific fix from the error",
                 ))
         
+        # Single-line fix for APIs (e.g. Splunk → review queue) — mirrors primary recommendation / JSON fix.action
+        fix_text = ""
+        if isinstance(fix_data, dict):
+            fix_text = str(fix_data.get("action", "") or "").strip()
+        if not fix_text and recommendations:
+            fix_text = (recommendations[0].action or "").strip()
+        root_cause.fix = fix_text
+        
         return AnalysisResult(
             build_info={
                 "job": build_info.job_name,
@@ -803,6 +923,8 @@ class AIAnalyzer:
                 rationale="AI analysis failed to parse - manual review needed",
             ))
         
+        fallback_fix = (recommendations[0].action or "").strip() if recommendations else ""
+        
         return AnalysisResult(
             build_info={
                 "job": build_info.job_name,
@@ -823,6 +945,7 @@ class AIAnalyzer:
                 confidence=0.6,
                 category=category,
                 tier=tier,
+                fix=fallback_fix,
             ),
             recommendations=recommendations,
             retry_assessment=RetryAssessment(

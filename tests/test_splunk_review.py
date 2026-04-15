@@ -226,17 +226,28 @@ class TestSplunkConnector:
             token="test-token"
         )
         connector = SplunkConnector(config)
-        
-        mock_search.return_value = [
-            {"_raw": "Line 1: Starting build"},
-            {"_raw": "Line 2: Running tests"},
-            {"_raw": "Line 3: Error: Test failed"},
+
+        mock_search.side_effect = [
+            [
+                {"_raw": "fatal: Could not read from remote repository"},
+                {"_raw": "ERROR: Couldn't find any revision to build"},
+            ],
+            [
+                {"_raw": "Line 1: Starting build"},
+                {"_raw": "Line 2: Running tests"},
+                {"_raw": "Line 3: Error: Test failed"},
+            ],
         ]
         
         log = connector.get_build_log("jenkins.test.com", "123", tail_lines=100)
         
+        assert "PRIMARY CANDIDATES" in log
+        assert "ALL SIGNAL LINES" in log
+        assert "Couldn't find any revision to build" in log
+        assert "LOG TAIL (noise-reduced)" in log
         assert "Line 1" in log
         assert "Error: Test failed" in log
+        assert mock_search.call_count == 2
 
 
 # =============================================================================

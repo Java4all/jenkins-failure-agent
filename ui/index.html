@@ -792,7 +792,7 @@
             const [submitting, setSubmitting] = useState(false);
             
             // Reset state when result changes (new analysis)
-            const resultKey = result?.build_info?.job_name + '-' + result?.build_info?.build_number;
+            const resultKey = (result?.build_info?.job ?? '') + '-' + (result?.build_info?.build_number ?? '');
             React.useEffect(() => {
                 setFeedbackState('pending');
                 setShowCorrection(false);
@@ -808,7 +808,7 @@
                 setSubmitting(true);
                 try {
                     const payload = {
-                        job: build_info?.job_name || '',
+                        job: build_info?.job || '',
                         build: build_info?.build_number || 0,
                         was_correct: wasCorrect,
                         error_category: failure_analysis?.category || root_cause?.category || '',
@@ -822,7 +822,7 @@
                     
                     console.log('Submitting feedback:', payload);
                     
-                    const response = await fetch('/feedback', {
+                    const response = await fetch(`${API_BASE}/feedback`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(payload),
@@ -1000,7 +1000,8 @@
             const { 
                 build_info, failure_analysis, root_cause, recommendations, 
                 retry_assessment, groovy_analysis, config_analysis, metadata,
-                analysis_mode, agentic_enhanced, tool_calls_made, investigation_tokens,
+                analysis_mode, agentic_enhanced, tool_calls_made, iterations_used,
+                investigation_tokens,
                 jenkinsfile_fetched, libraries_fetched,
                 jenkins_description_updated, pr_comment_posted
             } = result;
@@ -1028,7 +1029,7 @@
                                     {build_info?.job} #{build_info?.build_number}
                                 </h2>
                                 <div className="flex flex-wrap items-center gap-3 mt-2">
-                                    <ModeBadge mode={analysis_mode} toolCalls={tool_calls_made} enhanced={agentic_enhanced} />
+                                    <ModeBadge mode={analysis_mode} toolCalls={tool_calls_made} iterations={iterations_used} enhanced={agentic_enhanced} />
                                     <span className="text-sm text-gray-500">
                                         {metadata?.analysis_duration_ms}ms • {metadata?.model_used}
                                     </span>
@@ -1430,7 +1431,10 @@
                                     <span className="text-xs px-2 py-0.5 rounded bg-gray-600 truncate max-w-[100px]">
                                         {item.failure_analysis?.category?.replace(/_/g, ' ')}
                                     </span>
-                                    <ModeBadge mode={item.analysis_mode || 'scripted'} />
+                                    <ModeBadge
+                                        mode={item.analysis_mode || 'iterative'}
+                                        iterations={item.iterations_used > 1 ? item.iterations_used : undefined}
+                                    />
                                 </div>
                             </div>
                         ))}

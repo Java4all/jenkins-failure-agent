@@ -9,11 +9,12 @@ Features:
 """
 
 import logging
+import os
+import re
 import time
 import requests
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from urllib.parse import urljoin
 
 logger = logging.getLogger("jenkins-agent.splunk")
@@ -32,6 +33,11 @@ class SplunkConfig:
     verify_ssl: bool = False
     timeout: int = 60
     source_subsearch_limit: int = 1000
+    log_signal_lines: int = 120
+    log_snippet_max_chars: int = 12000
+    primary_candidate_limit: int = 5
+    # Extra regex fragments (semicolon-separated in env) merged into signal search
+    signal_extra_patterns: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -91,6 +97,81 @@ class SplunkConnector:
         self.session.headers.update({
             "Authorization": f"Bearer {config.token}",
         })
+
+    # High-signal failure patterns that often contain the true root cause
+    # earlier than the final "script returned exit code N" lines.
+    SIGNAL_PATTERNS = [
+        r"could not find any revision to build",
+        r"couldn't find any revision to build",
+        r"unable to checkout revision",
+        r"checkout failed",
+        r"hudson\.plugins\.git\.GitException",
+        r"fatal:",
+        r"error:",
+        r"exception",
+        r"script returned exit code",
+        r"permission denied",
+        r"not found",
+    ]
+
+    # Higher score = more likely to be the true root cause (for ranking PRIMARY CANDIDATES).
+    _SIGNAL_SCORE_RULES: List[Tuple[re.Pattern, int]] = [
+        (re.compile(r"(?i)couldn'?t find any revision to build|could not find any revision to build"), 100),
+        (re.compile(r"(?i)unable to checkout revision|checkout failed"), 95),
+        (re.compile(r"(?i)hudson\.plugins\.git\.GitException|org\.jenkinsci\.plugins\.git"), 95),
+        (re.compile(r"(?i)permission denied|access denied|unauthorized|forbidden"), 88),
+        (re.compile(r"(?i)fatal:"), 80),
+        (re.compile(r"(?i)(?:^|\s)(?:error|ERROR):\s*\S"), 50),
+        (re.compile(r"(?i)java\.[a-z.]+\.(?:Exception|Error)"), 78),
+        (re.compile(r"(?i)npm ERR!|yarn error|pip.*error|maven.*failure", re.IGNORECASE), 72),
+        (re.compile(r"(?i)script returned exit code\s+[1-9]\d*"), 38),
+        (re.compile(r"(?i)\bexception\b"), 45),
+        (re.compile(r"(?i)not found|no such file"), 55),
+    ]
+
+    _NOISE_ONLY_TAIL_LINE = re.compile(
+        r"(?i)^(?:\[[^\]]+\]\s*)?(?:\d{2}:\d{2}:\d{2}\s+)?(?:\+\s*)?"
+        r"(?:Finished:\s*(?:FAILURE|ABORTED|UNSTABLE|NOT_BUILT)\s*|"
+        r"Build (?:step .* )?marked build as failure\.?\s*|"
+        r"script returned exit code\s+\d+\s*|"
+        r"Sending interrupt signal to process.*\s*)$"
+    )
+
+    @staticmethod
+    def _score_signal_line(line: str) -> int:
+        if not line or not line.strip():
+            return 0
+        best = 0
+        for rx, weight in SplunkConnector._SIGNAL_SCORE_RULES:
+            if rx.search(line):
+                best = max(best, weight)
+        return best if best > 0 else 12
+
+    @classmethod
+    def _rank_primary_candidates(cls, lines: List[str], limit: int) -> List[str]:
+        """Deduplicate by stripped text, sort by score desc then line length (specificity)."""
+        seen = set()
+        scored: List[Tuple[int, int, str]] = []
+        for line in lines:
+            key = line.strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            scored.append((cls._score_signal_line(line), len(line), line))
+        scored.sort(key=lambda t: (-t[0], -t[1]))
+        return [t[2] for t in scored[:limit]]
+
+    @classmethod
+    def _partition_tail_noise(cls, tail_lines: List[str]) -> Tuple[List[str], List[str]]:
+        """Split tail into substantive vs low-signal-only lines (Finished: FAILURE, exit code only, etc.)."""
+        keep: List[str] = []
+        noise: List[str] = []
+        for line in tail_lines:
+            if cls._NOISE_ONLY_TAIL_LINE.match(line.strip()):
+                noise.append(line)
+            else:
+                keep.append(line)
+        return keep, noise
 
     def _build_source_filter_subsearch(self, minutes: int) -> str:
         """
@@ -368,20 +449,68 @@ index={self.config.index} earliest=-{minutes}m
         """
         if tail_lines is None:
             tail_lines = self.config.log_tail_lines
-        
-        query = f'''
+
+        tail_query = f'''
 index={self.config.index} host="{host}" source="*/{job_id}/console"
 | sort _time
 | tail {tail_lines}
 | table _raw
 '''
-        
+
+        pattern_parts = list(self.SIGNAL_PATTERNS)
+        pattern_parts.extend(self.config.signal_extra_patterns or [])
+        signal_regex = "(?i)(" + "|".join(pattern_parts) + ")"
+        signal_query = f'''
+index={self.config.index} host="{host}" source="*/{job_id}/console"
+| sort _time
+| regex _raw="{signal_regex}"
+| head {self.config.log_signal_lines}
+| table _raw
+'''
+
         logger.info(f"Fetching log for {host} build {job_id} (last {tail_lines} lines)")
-        results = self._search(query.strip(), max_results=tail_lines)
-        
-        # Combine _raw fields
-        log_lines = [row.get("_raw", "") for row in results]
-        return "\n".join(log_lines)
+        signal_results = self._search(signal_query.strip(), max_results=self.config.log_signal_lines)
+        tail_results = self._search(tail_query.strip(), max_results=tail_lines)
+
+        signal_lines = [row.get("_raw", "") for row in signal_results if row.get("_raw")]
+        tail_lines_list = [row.get("_raw", "") for row in tail_results if row.get("_raw")]
+
+        primary = self._rank_primary_candidates(
+            signal_lines,
+            limit=max(1, self.config.primary_candidate_limit),
+        )
+        tail_keep, tail_noise = self._partition_tail_noise(tail_lines_list)
+
+        # Dedupe tail vs signals (avoid repeating identical lines in TAIL section)
+        sig_set = {s.strip() for s in signal_lines}
+        tail_deduped = [ln for ln in tail_keep if ln.strip() not in sig_set]
+
+        sections: List[str] = []
+        if primary:
+            sections.append(
+                "=== PRIMARY CANDIDATES (ranked by heuristic — prefer these for root cause) ===\n"
+                + "\n".join(primary)
+            )
+        if signal_lines:
+            sections.append(
+                "=== ALL SIGNAL LINES (chronological, from full log) ===\n"
+                + "\n".join(signal_lines)
+            )
+        if tail_deduped:
+            sections.append("=== LOG TAIL (noise-reduced) ===\n" + "\n".join(tail_deduped))
+        elif tail_lines_list and not signal_lines:
+            sections.append("=== LOG TAIL ===\n" + "\n".join(tail_lines_list))
+        if tail_noise:
+            sections.append(
+                "=== LOW-SIGNAL TAIL LINES (context only — do not treat as primary error alone) ===\n"
+                + "\n".join(tail_noise)
+            )
+
+        if not sections:
+            return ""
+
+        combined = "\n\n".join(sections)
+        return combined[: self.config.log_snippet_max_chars]
     
     def get_failed_builds_with_logs(self, minutes: int = None) -> List[FailedBuild]:
         """
@@ -511,6 +640,9 @@ def get_splunk_connector() -> Optional[SplunkConnector]:
     if _splunk_connector is None:
         import os
         
+        extra_raw = os.environ.get("SPLUNK_SIGNAL_EXTRA_REGEX", "")
+        signal_extra = [p.strip() for p in extra_raw.split(";") if p.strip()]
+
         splunk_config = SplunkConfig(
             enabled=os.environ.get("SPLUNK_ENABLED", "false").lower() == "true",
             url=os.environ.get("SPLUNK_URL", ""),
@@ -522,6 +654,10 @@ def get_splunk_connector() -> Optional[SplunkConnector]:
             verify_ssl=os.environ.get("SPLUNK_VERIFY_SSL", "false").lower() == "true",
             timeout=int(os.environ.get("SPLUNK_TIMEOUT", "60")),
             source_subsearch_limit=int(os.environ.get("SPLUNK_SOURCE_SUBSEARCH_LIMIT", "1000")),
+            log_signal_lines=int(os.environ.get("SPLUNK_LOG_SIGNAL_LINES", "120")),
+            log_snippet_max_chars=int(os.environ.get("SPLUNK_LOG_SNIPPET_MAX_CHARS", "12000")),
+            primary_candidate_limit=int(os.environ.get("SPLUNK_PRIMARY_CANDIDATE_LIMIT", "5")),
+            signal_extra_patterns=signal_extra,
         )
         
         if splunk_config.enabled:

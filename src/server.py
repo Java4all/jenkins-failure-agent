@@ -1798,11 +1798,21 @@ def create_app(config: Config) -> FastAPI:
             
             analysis_result = None
             if analyze and failure.log_snippet:
-                # Run AI analysis
                 try:
-                    analysis_result = ai.analyze_snippet(failure.log_snippet)
+                    analysis_result = ai_analyzer.analyze_snippet(
+                        failure.log_snippet,
+                        job_name=failure.job_name,
+                        log_parser_config=vars(config.parsing),
+                        from_splunk_console=True,
+                    )
                 except Exception as e:
                     logger.error(f"Analysis failed for {failure.job_name}#{failure.job_id}: {e}")
+            
+            ai_fix_text = ""
+            if analysis_result:
+                ai_fix_text = (analysis_result.root_cause.fix or "").strip()
+                if not ai_fix_text and analysis_result.recommendations:
+                    ai_fix_text = (analysis_result.recommendations[0].action or "").strip()
             
             # Add to review queue
             item = queue.add(
@@ -1810,10 +1820,10 @@ def create_app(config: Config) -> FastAPI:
                 job_name=failure.job_name,
                 job_id=failure.job_id,
                 log_snippet=failure.log_snippet,
-                ai_root_cause=analysis_result.root_cause if analysis_result else "",
-                ai_fix=analysis_result.fix if analysis_result else "",
-                ai_confidence=analysis_result.confidence if analysis_result else 0.0,
-                ai_category=analysis_result.category if analysis_result else "",
+                ai_root_cause=analysis_result.root_cause.summary if analysis_result else "",
+                ai_fix=ai_fix_text,
+                ai_confidence=analysis_result.root_cause.confidence if analysis_result else 0.0,
+                ai_category=analysis_result.root_cause.category if analysis_result else "",
             )
             results.append(item.to_dict())
         

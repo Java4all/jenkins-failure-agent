@@ -5,7 +5,11 @@
 #   make start       - Start all services
 #   make analyze     - Run CLI analysis
 
-.PHONY: help start stop logs build clean analyze test shell pull-model backup restore
+.PHONY: help how-it-runs start stop logs build clean analyze test shell pull-model backup restore \
+	api-analyze api-analyze-iterative api-analyze-deep api-analyze-latest-failed api-health
+
+# Base URL for API examples (override: make api-health API_BASE=http://127.0.0.1:8080)
+API_BASE ?= http://localhost:8080
 
 # Deployment mode (can be overridden)
 COMPOSE_FILE ?= docker-compose.yml
@@ -22,6 +26,17 @@ endif
 # Default target
 help:
 	@echo "Jenkins Failure Analysis Agent v2.0"
+	@echo ""
+	@echo "How it runs (at a glance):"
+	@echo "  1. make start (or start-external-ollama / start-remote-ai / …)"
+	@echo "     → docker-compose starts services (see target output for ports)."
+	@echo "  2. UI (port 3000) is static + JS; it talks to the Agent HTTP API (port 8080)."
+	@echo "  3. Ollama or your AI backend (e.g. 11434) answers LLM calls from the agent."
+	@echo "  4. On analyze: Agent → Jenkins API (log + build metadata) → log parse →"
+	@echo "     HybridAnalyzer: default mode is iterative (multi-call RC loop); use mode=deep"
+	@echo "     for full agentic/MCP-style investigation (UI “Deep” or API mode deep)."
+	@echo "  5. CLI: make analyze* runs agent-cli → agent.py analyze (same pipeline, no HTTP)."
+	@echo "  More detail:  make how-it-runs"
 	@echo ""
 	@echo "Deployment Modes (Build from Source):"
 	@echo "  make start                    - Start with Ollama in Docker (default)"
@@ -51,10 +66,17 @@ help:
 	@echo ""
 	@echo "Usage:"
 	@echo "  make ui                       - Open the web dashboard"
-	@echo "  make analyze JOB=x BUILD=123  - Analyze a specific build (fast mode)"
-	@echo "  make analyze-deep JOB=x BUILD=123  - Deep agentic investigation"
-	@echo "  make analyze-latest JOB=x     - Analyze latest failed build"
+	@echo "  make analyze JOB=x BUILD=123  - CLI: analyze build (iterative RC by default)"
+	@echo "  make analyze-deep JOB=x BUILD=123  - CLI: --deep (agentic investigation)"
+	@echo "  make analyze-latest JOB=x     - CLI: latest failed build"
 	@echo "  make test-connection          - Test Jenkins & AI connection"
+	@echo ""
+	@echo "HTTP API (agent must be up: make start):"
+	@echo "  make api-health               - GET  $(API_BASE)/health"
+	@echo "  make api-analyze JOB=x BUILD=y - POST /analyze (default mode iterative)"
+	@echo "  make api-analyze-iterative …   - same, mode explicit + fewer side effects"
+	@echo "  make api-analyze-deep …        - POST /analyze with mode=deep"
+	@echo "  make api-analyze-latest-failed JOB=x - POST latest failed, iterative"
 	@echo ""
 	@echo "Development:"
 	@echo "  make build                    - Rebuild agent container"
@@ -79,6 +101,34 @@ help:
 	@echo "  make docker-setup-buildx            - One-time setup for multi-arch"
 	@echo "  make docker-release DOCKER_REPO=u/r - Build + Push (amd64 + arm64)"
 	@echo "  make docker-build-local DOCKER_REPO=u/r - Build local only (no push)"
+
+# Longer narrative (what runs where, and what each layer does)
+how-it-runs:
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@echo "  Runtime layout (typical: make start)"
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@echo ""
+	@echo "  [Browser]  http://localhost:3000"
+	@echo "       │     Static UI; set API base in the UI if not on same host."
+	@echo "       ▼"
+	@echo "  [Agent]    $(API_BASE)"
+	@echo "       │     FastAPI: /health, POST /analyze, feedback, Splunk hooks, …"
+	@echo "       │     Loads config.yaml + .env (Jenkins, AI, optional Splunk/SCM)."
+	@echo "       ├────► [Jenkins]  JENKINS_URL — console log, build info, test reports"
+	@echo "       ├────► [AI]       AI_BASE_URL / Bedrock / … — root-cause + recommendations"
+	@echo "       └────► [Optional] GitHub/SCM — PR comments; Splunk — log sync"
+	@echo ""
+	@echo "  Analyze request path (POST /analyze):"
+	@echo "    • mode omitted or \"iterative\" → HybridAnalyzer iterative RC loop (default)."
+	@echo "    • mode \"deep\" → deep agentic path (MCP/tools as configured)."
+	@echo "    • Build must be FAILURE/UNSTABLE (SUCCESS/ABORTED return skip reasons)."
+	@echo ""
+	@echo "  CLI (make analyze / analyze-deep):"
+	@echo "    docker-compose --profile cli run agent-cli …"
+	@echo "    → same core code as the API, without going through HTTP."
+	@echo ""
+	@echo "  See also:  make help"
+	@echo ""
 
 # =============================================================================
 # Setup
@@ -179,14 +229,18 @@ setup-bedrock:
 # =============================================================================
 
 start:
+	@echo "Starting stack: docker-compose up -d  (see docker-compose.yml for services)"
 	docker-compose up -d
 	@echo ""
 	@echo "[OK] Services running:"
 	@echo "  * UI Dashboard: http://localhost:3000"
-	@echo "  * Agent API:    http://localhost:8080"
+	@echo "  * Agent API:    http://localhost:8080  (POST /analyze, GET /health)"
 	@echo "  * Ollama:       http://localhost:11434"
 	@echo ""
-	@echo "Use 'make logs' to follow logs"
+	@echo "  Typical flow:  make api-health  →  open UI  →  run analysis from UI or:"
+	@echo "                 make api-analyze-latest-failed JOB=<folder/job>"
+	@echo ""
+	@echo "Use 'make logs' to follow agent logs"
 
 start-external-ollama:
 	@echo "Starting with external Ollama (on host machine)..."
@@ -657,6 +711,8 @@ test-connection:
 # =============================================================================
 # API Calls (using curl)
 # =============================================================================
+# Body fields match AnalyzeRequest in src/server.py (mode: iterative | deep).
+# If SERVER_API_KEY is set in .env, add:  -H "X-API-Key: $$SERVER_API_KEY"
 
 api-analyze:
 ifndef JOB
@@ -665,9 +721,26 @@ endif
 ifndef BUILD
 	$(error BUILD is required. Usage: make api-analyze JOB=my-job BUILD=123)
 endif
-	curl -s -X POST http://localhost:8080/analyze \
+	@echo "→ POST $(API_BASE)/analyze"
+	@echo "  Fetches console log for failed/unstable build, runs default iterative RC analysis."
+	@echo "  Body: job=$(JOB) build=$(BUILD) (mode defaults to iterative)"
+	curl -s -X POST $(API_BASE)/analyze \
 		-H "Content-Type: application/json" \
 		-d '{"job":"$(JOB)","build":$(BUILD)}' | jq .
+
+# Explicit iterative mode; turns off report/Jenkins/PR side effects for a cleaner response
+api-analyze-iterative:
+ifndef JOB
+	$(error JOB is required. Usage: make api-analyze-iterative JOB=my-job BUILD=123)
+endif
+ifndef BUILD
+	$(error BUILD is required. Usage: make api-analyze-iterative JOB=my-job BUILD=123)
+endif
+	@echo "→ POST $(API_BASE)/analyze  (mode=iterative)"
+	@echo "  Same as default analysis path; useful to compare with api-analyze-deep."
+	curl -s -X POST $(API_BASE)/analyze \
+		-H "Content-Type: application/json" \
+		-d '{"job":"$(JOB)","build":$(BUILD),"mode":"iterative","generate_report":false,"update_jenkins_description":false,"post_to_pr":false}' | jq .
 
 api-analyze-deep:
 ifndef JOB
@@ -676,12 +749,24 @@ endif
 ifndef BUILD
 	$(error BUILD is required. Usage: make api-analyze-deep JOB=my-job BUILD=123)
 endif
-	curl -s -X POST http://localhost:8080/analyze \
+	@echo "→ POST $(API_BASE)/analyze  (mode=deep — agentic / MCP-style investigation)"
+	curl -s -X POST $(API_BASE)/analyze \
 		-H "Content-Type: application/json" \
-		-d '{"job":"$(JOB)","build":$(BUILD),"deep":true}' | jq .
+		-d '{"job":"$(JOB)","build":$(BUILD),"mode":"deep"}' | jq .
+
+api-analyze-latest-failed:
+ifndef JOB
+	$(error JOB is required. Usage: make api-analyze-latest-failed JOB=my-folder/job)
+endif
+	@echo "→ POST $(API_BASE)/analyze  (latest_failed=true, mode=iterative)"
+	@echo "  Resolves the most recent failed build for the job, then analyzes it."
+	curl -s -X POST $(API_BASE)/analyze \
+		-H "Content-Type: application/json" \
+		-d '{"job":"$(JOB)","latest_failed":true,"mode":"iterative","generate_report":false,"update_jenkins_description":false,"post_to_pr":false}' | jq .
 
 api-health:
-	curl -s http://localhost:8080/health | jq .
+	@echo "→ GET $(API_BASE)/health"
+	curl -s $(API_BASE)/health | jq .
 
 # =============================================================================
 # Development
