@@ -21,6 +21,8 @@ ai:
   # Model parameters
   temperature: 0.1
   max_tokens: 4096
+  # Combined system+user prompt cap (chars). Lower if Ollama warns about 4096-token context.
+  max_prompt_chars: 9000
   timeout: 120
   max_retries: 3
   retry_delay: 2

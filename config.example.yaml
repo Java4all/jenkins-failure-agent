@@ -173,6 +173,12 @@ ai:
   # Maximum tokens in response
   max_tokens: 4096
   
+  # Soft cap on combined system + user prompt size (characters) before calling the API.
+  # Ollama often loads models with ~4096 *token* context; long prompts are truncated on the
+  # server ("truncating input prompt to limit 4096"). This app trims first and logs a warning.
+  # Raise your model context in Ollama (Modelfile: PARAMETER num_ctx 8192) or increase this.
+  max_prompt_chars: 9000
+  
   # Request timeout in seconds (increase for larger models)
   timeout: 120
   

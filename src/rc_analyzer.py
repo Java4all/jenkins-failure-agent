@@ -1620,12 +1620,18 @@ RULES:
         Implements Requirement 3.8: Reuse existing _call_ai method
         Supports both OpenAI-compatible and AWS Bedrock providers.
         """
+        from .ai_analyzer import clip_messages_for_llm
+
+        cfg = self.ai_analyzer.config
+        max_chars = getattr(cfg, "max_prompt_chars", 9000) or 9000
+        system_prompt, prompt = clip_messages_for_llm(self.SYSTEM_PROMPT, prompt, max_chars)
+
         # Check if we have the new provider-based system
-        if hasattr(self.ai_analyzer, 'provider'):
+        if hasattr(self.ai_analyzer, 'provider') and self.ai_analyzer.provider:
             from .ai_provider import ChatMessage
             response = self.ai_analyzer.provider.chat(
                 messages=[
-                    ChatMessage(role="system", content=self.SYSTEM_PROMPT),
+                    ChatMessage(role="system", content=system_prompt),
                     ChatMessage(role="user", content=prompt),
                 ],
                 temperature=0.3,
@@ -1635,9 +1641,9 @@ RULES:
         else:
             # Backward compatibility: use the old client directly
             response = self.ai_analyzer.client.chat.completions.create(
-                model=self.ai_analyzer.config.model,
+                model=cfg.model,
                 messages=[
-                    {"role": "system", "content": self.SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.3,

@@ -30,6 +30,9 @@ class AIConfig:
     # Common settings
     temperature: float = 0.1
     max_tokens: int = 4096
+    # Combined system + user prompt soft cap (characters). Ollama often uses ~4096 *tokens*
+    # context; long prompts trigger server-side truncation. We clip client-side first and log.
+    max_prompt_chars: int = 9000
     timeout: int = 120
     max_retries: int = 3
     retry_delay: int = 5
@@ -245,6 +248,7 @@ def load_config(config_path: Optional[str] = None, env_file: str = ".env") -> Co
         api_key=raw_config.get("ai", {}).get("api_key", "ollama"),
         temperature=raw_config.get("ai", {}).get("temperature", 0.1),
         max_tokens=raw_config.get("ai", {}).get("max_tokens", 4096),
+        max_prompt_chars=raw_config.get("ai", {}).get("max_prompt_chars", 9000),
         timeout=raw_config.get("ai", {}).get("timeout", 120),
         max_retries=raw_config.get("ai", {}).get("max_retries", 3),
         retry_delay=raw_config.get("ai", {}).get("retry_delay", 5),
@@ -491,6 +495,7 @@ def _apply_env_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
     int_mappings = {
         "RC_ANALYZER_MAX_ITERATIONS": ("rc_analyzer", "max_rc_iterations"),
         "RC_ANALYZER_MAX_SOURCE_CHARS": ("rc_analyzer", "max_source_context_chars"),
+        "AI_MAX_PROMPT_CHARS": ("ai", "max_prompt_chars"),
     }
     
     float_mappings = {

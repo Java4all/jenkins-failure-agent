@@ -4,11 +4,12 @@ Supports any OpenAI-compatible API (Ollama, vLLM, LocalAI, etc.)
 """
 
 import json
+import logging
 import re
 import time
 from datetime import datetime
 from dataclasses import dataclass, field, asdict
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from enum import Enum
 from openai import OpenAI
 
@@ -230,6 +231,77 @@ This log was reconstructed from Splunk (often: PRIMARY CANDIDATES + signal lines
 3. The real failure often appears **before** the final `Finished: FAILURE` line.
 4. Respond with **valid JSON only** as specified in the main instructions. `root_cause` must be grounded in a concrete phrase from the log when possible.
 """
+
+
+_LOG = logging.getLogger("jenkins-agent.ai")
+
+
+def _truncate_user_log_edges(text: str, max_len: int) -> str:
+    """Shrink long log text, keeping head and tail (errors usually near the end)."""
+    if max_len < 120 or len(text) <= max_len:
+        return text
+    marker = (
+        "\n\n... [middle of prompt removed to fit model context limit; "
+        "tail preserved for error lines] ...\n\n"
+    )
+    budget = max_len - len(marker)
+    if budget < 80:
+        return text[:max_len]
+    head = budget * 45 // 100
+    tail = budget - head
+    if tail < 40:
+        tail = budget // 2
+        head = budget - tail
+    return text[:head] + marker + text[-tail:]
+
+
+def clip_messages_for_llm(
+    system_prompt: str,
+    user_prompt: str,
+    max_total_chars: int,
+) -> Tuple[str, str]:
+    """
+    Keep system + user under a character budget so local models (e.g. Ollama with 4096-token
+    context) do not silently truncate the prompt on the server.
+    """
+    if max_total_chars <= 0:
+        return system_prompt[:800], _truncate_user_log_edges(user_prompt, 800)
+
+    combined = len(system_prompt) + len(user_prompt)
+    if combined <= max_total_chars:
+        return system_prompt, user_prompt
+
+    # Prefer shrinking the user blob first (logs dominate size).
+    room_for_user = max_total_chars - len(system_prompt) - 32
+    if room_for_user >= 600:
+        u = _truncate_user_log_edges(user_prompt, room_for_user)
+        _LOG.warning(
+            "LLM user prompt clipped: total_chars=%s max_prompt_chars=%s user %s→%s (system unchanged)",
+            combined,
+            max_total_chars,
+            len(user_prompt),
+            len(u),
+        )
+        return system_prompt, u
+
+    # System prompt alone is large: cap both.
+    sys_cap = max(1800, min(len(system_prompt), max_total_chars // 3))
+    s = system_prompt[:sys_cap]
+    if len(system_prompt) > sys_cap:
+        s += "\n\n...[system instructions truncated for context limit]...\n"
+    room_for_user = max_total_chars - len(s) - 32
+    room_for_user = max(room_for_user, 400)
+    u = _truncate_user_log_edges(user_prompt, room_for_user)
+    _LOG.warning(
+        "LLM prompt clipped: total_chars=%s max_prompt_chars=%s system %s→%s user %s→%s",
+        combined,
+        max_total_chars,
+        len(system_prompt),
+        len(s),
+        len(user_prompt),
+        len(u),
+    )
+    return s, u
 
 
 class AIAnalyzer:
@@ -664,6 +736,8 @@ class AIAnalyzer:
         """Call the AI model with retry logic."""
         
         last_error = None
+        max_chars = getattr(self.config, "max_prompt_chars", 9000) or 9000
+        system_prompt, prompt = clip_messages_for_llm(system_prompt, prompt, max_chars)
         
         for attempt in range(self.config.max_retries):
             try:
