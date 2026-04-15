@@ -2772,17 +2772,17 @@
                                 <Input
                                     label="Root Cause"
                                     value={editData.root_cause}
-                                    onChange={(e) => setEditData({...editData, root_cause: e.target.value})}
+                                    onChange={(value) => setEditData({...editData, root_cause: value})}
                                 />
                                 <Input
                                     label="Fix"
                                     value={editData.fix}
-                                    onChange={(e) => setEditData({...editData, fix: e.target.value})}
+                                    onChange={(value) => setEditData({...editData, fix: value})}
                                 />
                                 <Input
                                     label="Category"
                                     value={editData.category}
-                                    onChange={(e) => setEditData({...editData, category: e.target.value})}
+                                    onChange={(value) => setEditData({...editData, category: value})}
                                 />
                                 <div className="flex justify-end gap-3 pt-4">
                                     <Button variant="secondary" onClick={() => { setEditMode(false); setSelectedItem(null); }}>
