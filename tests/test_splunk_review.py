@@ -210,7 +210,7 @@ class TestSplunkConnector:
         connector.get_failed_builds(minutes=15, simple_query=True)
 
         called_query = mock_search.call_args[0][0]
-        assert '[ search index=jenkins_console "xomecd/my-lib" | fields source | dedup source ]' in called_query
+        assert '[ search index=jenkins_console "xomecd/my-lib" earliest=-15m | fields source | dedup source ]' in called_query
     
     @patch.object(SplunkConnector, '_search')
     def test_get_build_log(self, mock_search):

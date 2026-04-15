@@ -91,7 +91,7 @@ class SplunkConnector:
             "Authorization": f"Bearer {config.token}",
         })
 
-    def _build_source_filter_subsearch(self) -> str:
+    def _build_source_filter_subsearch(self, minutes: int) -> str:
         """
         Build a source-based subsearch filter.
 
@@ -102,7 +102,7 @@ class SplunkConnector:
         if not self.config.search_filter:
             return ""
         return (
-            f'[ search index={self.config.index} "{self.config.search_filter}" '
+            f'[ search index={self.config.index} "{self.config.search_filter}" earliest=-{minutes}m '
             '| fields source | dedup source ]'
         )
     
@@ -261,7 +261,7 @@ class SplunkConnector:
         if minutes is None:
             minutes = self.config.sync_interval_mins
         
-        source_filter_subsearch = self._build_source_filter_subsearch()
+        source_filter_subsearch = self._build_source_filter_subsearch(minutes)
         
         if simple_query:
             # Simple query - fast path with source-based filtering
