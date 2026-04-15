@@ -31,6 +31,7 @@ class SplunkConfig:
     sync_interval_mins: int = 15
     verify_ssl: bool = False
     timeout: int = 60
+    source_subsearch_limit: int = 1000
 
 
 @dataclass
@@ -101,9 +102,12 @@ class SplunkConnector:
         """
         if not self.config.search_filter:
             return ""
+        # Use `return` to emit source filters directly to outer search and cap
+        # candidate sources to keep subsearch bounded.
         return (
-            f'[ search index={self.config.index} "{self.config.search_filter}" earliest=-{minutes}m '
-            '| fields source | dedup source ]'
+            f'[ search index={self.config.index} source="*/console" "{self.config.search_filter}" earliest=-{minutes}m latest=now '
+            f'| fields source | dedup source | head {self.config.source_subsearch_limit} '
+            f'| return {self.config.source_subsearch_limit} source ]'
         )
     
     def _search(self, query: str, max_results: int = 1000) -> List[Dict[str, Any]]:
@@ -261,13 +265,15 @@ class SplunkConnector:
         if minutes is None:
             minutes = self.config.sync_interval_mins
         
+        filter_clause = f'"{self.config.search_filter}"' if self.config.search_filter else ""
         source_filter_subsearch = self._build_source_filter_subsearch(minutes)
-        
+
         if simple_query:
-            # Simple query - fast path with source-based filtering
+            # Fast path: direct text filter (often enough, much cheaper than subsearch).
             query = f'''
-index={self.config.index} "Finished: FAILURE" {source_filter_subsearch} earliest=-{minutes}m
+index={self.config.index} source="*/console" "Finished: FAILURE" {filter_clause} earliest=-{minutes}m latest=now
 | rex field=source "/(?<job_id>\d+)/console$"
+| where isnotnull(job_id) AND job_id!=""
 | eval src=coalesce(source, host)
 | stats count as failure_count BY host, src, job_id
 | sort -failure_count
@@ -276,11 +282,12 @@ index={self.config.index} "Finished: FAILURE" {source_filter_subsearch} earliest
         else:
             # Complex query with result extraction and source normalization
             query = f'''
-index={self.config.index} "Finished:" {source_filter_subsearch} earliest=-{minutes}m
+index={self.config.index} source="*/console" "Finished:" {source_filter_subsearch} earliest=-{minutes}m latest=now
 | rex field=_raw "Finished:\s+(?<result>\w+)"
 | eval result=upper(result)
 | where result=="FAILURE"
 | rex field=source "/(?<job_id>\d+)/console$"
+| where isnotnull(job_id) AND job_id!=""
 | eval src_orig=coalesce(source, host)
 | eval src_try=replace(src_orig, "/\\d+/console$|/console$", "")
 | eval src_tmp=if(src_try==src_orig, replace(src_orig, "/[^/]+/[^/]+$", ""), src_try)
@@ -292,6 +299,22 @@ index={self.config.index} "Finished:" {source_filter_subsearch} earliest=-{minut
         
         logger.info(f"Querying Splunk for failed builds (last {minutes} mins, simple={simple_query})")
         results = self._search(query.strip())
+
+        # Fallback path: if fast direct filter returns nothing, retry with source
+        # subsearch to avoid false negatives caused by term placement in non-final
+        # log lines.
+        if simple_query and not results and self.config.search_filter:
+            logger.info("Fast query returned 0 rows. Retrying with source subsearch fallback.")
+            fallback_query = f'''
+index={self.config.index} source="*/console" "Finished: FAILURE" {source_filter_subsearch} earliest=-{minutes}m latest=now
+| rex field=source "/(?<job_id>\d+)/console$"
+| where isnotnull(job_id) AND job_id!=""
+| eval src=coalesce(source, host)
+| stats count as failure_count BY host, src, job_id
+| sort -failure_count
+| head 100
+'''
+            results = self._search(fallback_query.strip())
         
         failures = []
         for row in results:
@@ -497,6 +520,8 @@ def get_splunk_connector() -> Optional[SplunkConnector]:
             log_tail_lines=int(os.environ.get("SPLUNK_LOG_TAIL_LINES", "500")),
             sync_interval_mins=int(os.environ.get("SPLUNK_SYNC_INTERVAL_MINS", "15")),
             verify_ssl=os.environ.get("SPLUNK_VERIFY_SSL", "false").lower() == "true",
+            timeout=int(os.environ.get("SPLUNK_TIMEOUT", "60")),
+            source_subsearch_limit=int(os.environ.get("SPLUNK_SOURCE_SUBSEARCH_LIMIT", "1000")),
         )
         
         if splunk_config.enabled:

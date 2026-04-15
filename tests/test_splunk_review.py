@@ -196,7 +196,7 @@ class TestSplunkConnector:
         assert failures[1].failure_count == 2
 
     @patch.object(SplunkConnector, '_search')
-    def test_get_failed_builds_uses_source_subsearch_filter(self, mock_search):
+    def test_get_failed_builds_uses_source_subsearch_fallback(self, mock_search):
         config = SplunkConfig(
             enabled=True,
             url="https://splunk.test.com:8089",
@@ -205,12 +205,18 @@ class TestSplunkConnector:
             search_filter="xomecd/my-lib",
         )
         connector = SplunkConnector(config)
-        mock_search.return_value = []
+        # First fast query returns 0 rows, fallback returns 1 row
+        mock_search.side_effect = [
+            [],
+            [{"host": "jenkins1", "src": "/job/pipeline1", "job_id": "100", "failure_count": "1"}],
+        ]
 
-        connector.get_failed_builds(minutes=15, simple_query=True)
+        failures = connector.get_failed_builds(minutes=15, simple_query=True)
+        assert len(failures) == 1
+        assert mock_search.call_count == 2
 
-        called_query = mock_search.call_args[0][0]
-        assert '[ search index=jenkins_console "xomecd/my-lib" earliest=-15m | fields source | dedup source ]' in called_query
+        fallback_query = mock_search.call_args_list[1][0][0]
+        assert '[ search index=jenkins_console source="*/console" "xomecd/my-lib" earliest=-15m latest=now | fields source | dedup source | head 1000 | return 1000 source ]' in fallback_query
     
     @patch.object(SplunkConnector, '_search')
     def test_get_build_log(self, mock_search):
