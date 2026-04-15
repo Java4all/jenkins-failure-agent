@@ -1942,7 +1942,7 @@ def create_app(config: Config) -> FastAPI:
     
     @app.post("/splunk/sync")
     async def sync_splunk_failures(
-        minutes: int = None,
+        minutes: Optional[int] = None,
         analyze: bool = True,
         api_key: str = Depends(verify_api_key)
     ):
@@ -1950,7 +1950,7 @@ def create_app(config: Config) -> FastAPI:
         Sync failed builds from Splunk.
         
         Args:
-            minutes: Look back N minutes (default: SPLUNK_SYNC_INTERVAL_MINS)
+            minutes: Look back N minutes (omit to use SPLUNK_SYNC_INTERVAL_MINS, default 15)
             analyze: Run AI analysis on each failure
         """
         from .splunk_connector import get_splunk_connector
@@ -1960,11 +1960,26 @@ def create_app(config: Config) -> FastAPI:
         if not connector:
             raise HTTPException(status_code=400, detail="Splunk integration not enabled")
         
+        lookback_minutes = (
+            minutes if minutes is not None else connector.config.sync_interval_mins
+        )
+        logger.info(
+            "Splunk sync: lookback_minutes=%s (query param=%s, SPLUNK_SYNC_INTERVAL_MINS=%s)",
+            lookback_minutes,
+            minutes,
+            connector.config.sync_interval_mins,
+        )
+        
         # Get failed builds with logs
         failures = connector.get_failed_builds_with_logs(minutes)
         
         if not failures:
-            return {"synced": 0, "message": "No failed builds found"}
+            return {
+                "synced": 0,
+                "message": "No failed builds found",
+                "lookback_minutes": lookback_minutes,
+                "sync_interval_mins_config": connector.config.sync_interval_mins,
+            }
         
         queue = get_review_queue()
         results = []
@@ -2011,11 +2026,13 @@ def create_app(config: Config) -> FastAPI:
             "synced": len(results),
             "total_failures": len(failures),
             "items": results,
+            "lookback_minutes": lookback_minutes,
+            "sync_interval_mins_config": connector.config.sync_interval_mins,
         }
     
     @app.get("/splunk/failures")
     async def get_splunk_failures(
-        minutes: int = None,
+        minutes: Optional[int] = None,
         api_key: str = Depends(verify_api_key)
     ):
         """Get failed builds from Splunk (without syncing to queue)."""
@@ -2025,11 +2042,16 @@ def create_app(config: Config) -> FastAPI:
         if not connector:
             raise HTTPException(status_code=400, detail="Splunk integration not enabled")
         
+        lookback_minutes = (
+            minutes if minutes is not None else connector.config.sync_interval_mins
+        )
         failures = connector.get_failed_builds(minutes)
         
         return {
             "failures": [f.to_dict() for f in failures],
             "total": len(failures),
+            "lookback_minutes": lookback_minutes,
+            "sync_interval_mins_config": connector.config.sync_interval_mins,
         }
     
     # =========================================================================
