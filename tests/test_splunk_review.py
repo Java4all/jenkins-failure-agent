@@ -194,6 +194,23 @@ class TestSplunkConnector:
         assert failures[0].host == "jenkins1"
         assert failures[0].job_id == "100"
         assert failures[1].failure_count == 2
+
+    @patch.object(SplunkConnector, '_search')
+    def test_get_failed_builds_uses_source_subsearch_filter(self, mock_search):
+        config = SplunkConfig(
+            enabled=True,
+            url="https://splunk.test.com:8089",
+            token="test-token",
+            index="jenkins_console",
+            search_filter="xomecd/my-lib",
+        )
+        connector = SplunkConnector(config)
+        mock_search.return_value = []
+
+        connector.get_failed_builds(minutes=15, simple_query=True)
+
+        called_query = mock_search.call_args[0][0]
+        assert '[ search index=jenkins_console "xomecd/my-lib" | fields source | dedup source ]' in called_query
     
     @patch.object(SplunkConnector, '_search')
     def test_get_build_log(self, mock_search):

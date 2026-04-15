@@ -90,6 +90,21 @@ class SplunkConnector:
         self.session.headers.update({
             "Authorization": f"Bearer {config.token}",
         })
+
+    def _build_source_filter_subsearch(self) -> str:
+        """
+        Build a source-based subsearch filter.
+
+        Why: the source/library marker is often present on checkout/compile lines,
+        not on the final "Finished: ..." line. Filtering by source avoids false zero
+        results when a plain text filter is applied to the outer search event.
+        """
+        if not self.config.search_filter:
+            return ""
+        return (
+            f'[ search index={self.config.index} "{self.config.search_filter}" '
+            '| fields source | dedup source ]'
+        )
     
     def _search(self, query: str, max_results: int = 1000) -> List[Dict[str, Any]]:
         """
@@ -246,29 +261,31 @@ class SplunkConnector:
         if minutes is None:
             minutes = self.config.sync_interval_mins
         
-        filter_clause = ""
-        if self.config.search_filter:
-            filter_clause = f'"{self.config.search_filter}"'
+        source_filter_subsearch = self._build_source_filter_subsearch()
         
         if simple_query:
-            # Simple query - just find "Finished: FAILURE" lines directly
+            # Simple query - fast path with source-based filtering
             query = f'''
-index={self.config.index} "Finished: FAILURE" {filter_clause} earliest=-{minutes}m
+index={self.config.index} "Finished: FAILURE" {source_filter_subsearch} earliest=-{minutes}m
 | rex field=source "/(?<job_id>\d+)/console$"
-| stats count as failure_count BY host, source, job_id
-| rename source as src
+| eval src=coalesce(source, host)
+| stats count as failure_count BY host, src, job_id
 | sort -failure_count
 | head 100
 '''
         else:
-            # Complex query with regex extraction (slower)
+            # Complex query with result extraction and source normalization
             query = f'''
-index={self.config.index} "Finished:" {filter_clause} earliest=-{minutes}m
+index={self.config.index} "Finished:" {source_filter_subsearch} earliest=-{minutes}m
 | rex field=_raw "Finished:\s+(?<result>\w+)"
+| eval result=upper(result)
 | where result=="FAILURE"
 | rex field=source "/(?<job_id>\d+)/console$"
-| stats count as failure_count BY host, source, job_id
-| rename source as src
+| eval src_orig=coalesce(source, host)
+| eval src_try=replace(src_orig, "/\\d+/console$|/console$", "")
+| eval src_tmp=if(src_try==src_orig, replace(src_orig, "/[^/]+/[^/]+$", ""), src_try)
+| eval src=replace(replace(src_tmp, "/job/[a-z]{2}(?:-[a-z]+)*-\\d+", ""), "/+", "/")
+| stats count as failure_count BY host, src, job_id
 | sort -failure_count
 | head 100
 '''
