@@ -350,7 +350,8 @@ def create_app(config: Config) -> FastAPI:
                 )
             
             # =========================================================
-            # Only fetch and parse logs for FAILURE or UNSTABLE builds
+            # Fetch logs for non-success builds (FAILURE, UNSTABLE, etc.).
+            # "Latest failed" without a build number uses FAILURE only (not UNSTABLE); see JenkinsClient.
             # =========================================================
             
             # Fetch console log

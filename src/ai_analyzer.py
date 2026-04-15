@@ -1013,6 +1013,7 @@ class AIAnalyzer:
                 "failed_stage": str(data.get("failed_stage", "")) if data.get("failed_stage") else None,
                 "primary_error": root_cause_summary,  # Use already-sanitized value
                 "confidence": confidence,
+                "jenkins_build_result": build_info.status,
             },
             root_cause=root_cause,
             recommendations=recommendations,

@@ -106,6 +106,8 @@ def convert_rc_result_to_analysis_result(
         "failed_stage": parsed_log.failed_stage if parsed_log else None,
         "confidence": rc_result.confidence,
         "tier": tier,
+        # Explicit Jenkins result: FAILURE vs UNSTABLE (tests/quality) — avoids conflating the two
+        "jenkins_build_result": build_info.status,
     }
 
     if hasattr(rc_result, "failing_tool") and rc_result.failing_tool:
@@ -372,37 +374,14 @@ class HybridAnalyzer:
                 skip_reason="Build was manually aborted",
             )
         
-        # Req 14.6: UNSTABLE builds - lightweight scan for serious issues
+        # UNSTABLE: always run RC analysis (tests/quality gates); do not skip as "non-critical".
+        # Automatic "latest build" selection uses FAILURE-only (see JenkinsClient.get_latest_failed_build).
         if status == "UNSTABLE":
-            logger.info(f"UNSTABLE build detected - performing lightweight scan")
-            
-            # Req 14.6a: Check for serious issues only
-            serious_issues = self._scan_for_serious_issues(parsed_log) if parsed_log else False
-            
-            if not serious_issues:
-                # Req 14.6b: No serious issues found
-                # Req 18.6: If user_hint provided, do targeted search
-                if user_hint:
-                    logger.info(f"UNSTABLE build with user hint - will do targeted search")
-                    # Mark as UNSTABLE in build_info for labeling
-                    return None  # Proceed with analysis using hint
-                
-                # Req 14.6c: Return cautious response
-                logger.info(f"UNSTABLE build with no critical errors detected - skipping analysis")
-                return HybridAnalysisResult(
-                    mode=AnalysisMode.ITERATIVE,
-                    result=None,
-                    skipped=True,
-                    skip_reason="Build is unstable but no critical errors were detected. "
-                               "This often means tests passed but with warnings, or quality gates weren't met. "
-                               "If you believe there's a real issue, please provide a hint about what you expected "
-                               "using --hint or the hint field in the UI.",
-                )
-            else:
-                # Req 14.6a: Serious issues found - proceed but log it
-                logger.info(f"UNSTABLE build with serious issues detected - proceeding with analysis")
+            logger.info(
+                "UNSTABLE build — running RC analysis (Jenkins UNSTABLE: e.g. failing tests, not hard FAILURE)"
+            )
         
-        # Req 14.1: Only proceed for FAILURE or UNSTABLE (with issues)
+        # Req 14.1: Only proceed for FAILURE or UNSTABLE
         if status not in ("FAILURE", "UNSTABLE", None):
             logger.warning(f"Unexpected build status: {status}")
             return HybridAnalysisResult(
@@ -413,63 +392,6 @@ class HybridAnalyzer:
             )
         
         return None  # Proceed with analysis
-    
-    def _scan_for_serious_issues(self, parsed_log: ParsedLog) -> bool:
-        """
-        Lightweight scan for serious issues in UNSTABLE builds (Req 14.6).
-        
-        Only returns True for REAL serious issues, not noise.
-        Returns True if serious issues found.
-        """
-        # Check for stack traces - these are always serious
-        if parsed_log.stack_traces:
-            logger.debug(f"Found {len(parsed_log.stack_traces)} stack traces - serious issue")
-            return True
-        
-        # Serious error categories that warrant investigation
-        serious_categories = {
-            FailureCategory.COMPILATION_ERROR,
-            FailureCategory.INFRASTRUCTURE,
-            FailureCategory.PERMISSION,
-            FailureCategory.CREDENTIAL_ERROR,
-            FailureCategory.GROOVY_LIBRARY,
-            FailureCategory.GROOVY_CPS,
-            FailureCategory.GROOVY_SANDBOX,
-            FailureCategory.GROOVY_SERIALIZATION,
-            FailureCategory.PLUGIN_ERROR,
-        }
-        
-        for error in parsed_log.errors:
-            if error.category in serious_categories:
-                logger.debug(f"Found serious error category: {error.category}")
-                return True
-        
-        # Only check for VERY specific serious patterns (not generic ones)
-        serious_patterns = [
-            'exception:',
-            'fatal error',
-            'fatal:',
-            'build failure',
-            'compilation failed',
-            'unable to resolve',
-            'could not find',
-            'permission denied',
-            'access denied',
-            'authentication failed',
-            'connection refused',
-            'timeout',
-        ]
-        
-        for error in parsed_log.errors:
-            error_lower = error.line.lower()
-            for pattern in serious_patterns:
-                if pattern in error_lower:
-                    logger.debug(f"Found serious pattern '{pattern}' in: {error.line[:100]}")
-                    return True
-        
-        # No serious issues found
-        logger.debug("No serious issues found in UNSTABLE build")
-        return False
     
     def _check_parsed_log(self, parsed_log: ParsedLog) -> Optional[HybridAnalysisResult]:
         """
@@ -658,8 +580,9 @@ class HybridAnalyzer:
         if skip_result:
             return skip_result
         
-        # Requirement 14.8: Check for actual errors (skip if user_hint provided)
-        if not user_hint:
+        # Requirement 14.8: Check for actual errors (skip if user_hint provided).
+        # UNSTABLE often has few console "errors" but failing tests — still run RC analysis.
+        if not user_hint and build_info.status != "UNSTABLE":
             skip_result = self._check_parsed_log(parsed_log)
             if skip_result:
                 return skip_result

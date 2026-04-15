@@ -368,10 +368,13 @@ class JenkinsClient:
     
     def get_latest_failed_build(self, job_name: str) -> Optional[int]:
         """
-        Find the most recent failed or unstable build for a job.
-        
+        Find the most recent **FAILURE** build for a job (hard pipeline failure).
+
+        UNSTABLE builds (e.g. failing tests while the pipeline completes) are **not** included.
+        To analyze a specific UNSTABLE build, pass its build number explicitly in the API request.
+
         Returns:
-            Build number of the latest failed build, or None if no failures found.
+            Build number of the latest FAILURE build, or None if none found.
         """
         job_path = self._job_path(job_name)
         
@@ -379,24 +382,19 @@ class JenkinsClient:
             # Get job info with build list
             data = self._get_json(f"/job/{job_path}/api/json")
             
-            # Check lastFailedBuild first (most efficient)
+            # Jenkins API: last failed pipeline result (excludes UNSTABLE-only)
             last_failed = data.get("lastFailedBuild")
             if last_failed and last_failed.get("number"):
                 return last_failed["number"]
             
-            # Check lastUnstableBuild
-            last_unstable = data.get("lastUnstableBuild")
-            if last_unstable and last_unstable.get("number"):
-                return last_unstable["number"]
-            
-            # Fall back to scanning builds list
+            # Fall back to scanning builds list for FAILURE only
             builds = data.get("builds", [])
             for build in builds[:20]:  # Check last 20 builds
                 build_num = build.get("number")
                 if build_num:
                     try:
                         build_info = self.get_build_info(job_name, build_num)
-                        if build_info.status in ("FAILURE", "UNSTABLE"):
+                        if build_info.status == "FAILURE":
                             return build_num
                     except Exception:
                         continue

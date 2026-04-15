@@ -1233,7 +1233,13 @@ RULES:
             job_info = f"JOB: {build_info.get('job_name', 'unknown')} #{build_info.get('build_number', '?')}"
             status = build_info.get('status', '')
             if status == 'UNSTABLE':
-                job_info += " (UNSTABLE BUILD)"
+                job_info += (
+                    " — Jenkins result: UNSTABLE "
+                    "(typically failing tests, flaky tests, or quality gates; pipeline may have completed). "
+                    "Do not treat this the same as a hard FAILURE unless the log shows a pipeline error."
+                )
+            elif status == 'FAILURE':
+                job_info += " — Jenkins result: FAILURE (pipeline error or failed stage)."
             parts.append(job_info)
         
         # Requirement 18.4: USER CONTEXT section (placed early, before error context)
