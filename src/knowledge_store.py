@@ -889,50 +889,79 @@ class KnowledgeStore:
     # Tool Identification & Error Matching
     # =========================================================================
     
-    def identify_tool(self, query: str) -> List[Tuple[ToolDefinition, float]]:
-        """
-        Identify tools that match a command or log line.
-        
-        Args:
-            query: Command string or log line
-            
-        Returns:
-            List of (ToolDefinition, confidence) tuples, sorted by confidence
-        """
+    def _sample_log_for_kb_match(self, log_text: str, max_chars: int = 12000) -> str:
+        """Head + tail sample so long Jenkins logs still surface early and late tool signals."""
+        if not log_text:
+            return ""
+        if len(log_text) <= max_chars:
+            return log_text
+        half = max_chars // 2
+        return (
+            log_text[:half]
+            + "\n...[middle omitted for KB matching]...\n"
+            + log_text[-half:]
+        )
+    
+    def _identify_tool_on_fragment(self, query: str) -> List[Tuple[ToolDefinition, float]]:
+        """Score tools against a single text fragment (shared by identify_tool)."""
         tools = self.list_tools()
         matches = []
         
         for tool in tools:
-            # Load full tool with patterns
             full_tool = self.get_tool(tool_id=tool.id)
             if not full_tool:
                 continue
             
             confidence = 0.0
             
-            # Check command patterns
             if full_tool.matches_command(query):
                 confidence = max(confidence, 0.9)
             
-            # Check log signatures
             if full_tool.matches_log_line(query):
                 confidence = max(confidence, 0.8)
             
-            # Check simple name/alias match
             query_lower = query.lower()
-            if full_tool.name.lower() in query_lower:
+            # Word-style match reduces false positives on short substrings
+            name_l = full_tool.name.lower()
+            if len(name_l) >= 3 and re.search(rf"\b{re.escape(name_l)}\b", query_lower):
                 confidence = max(confidence, 0.95)
+            elif len(name_l) >= 3 and name_l in query_lower:
+                confidence = max(confidence, 0.88)
             for alias in full_tool.aliases:
-                if alias.lower() in query_lower:
+                al = alias.lower()
+                if len(al) >= 3 and re.search(rf"\b{re.escape(al)}\b", query_lower):
                     confidence = max(confidence, 0.85)
+                elif len(al) >= 3 and al in query_lower:
+                    confidence = max(confidence, 0.78)
             
             if confidence > 0:
                 matches.append((full_tool, confidence))
         
-        # Sort by confidence descending
         matches.sort(key=lambda x: x[1], reverse=True)
-        
         return matches
+    
+    def identify_tool(self, query: str) -> List[Tuple[ToolDefinition, float]]:
+        """
+        Identify tools that match a command or log line.
+        
+        Long logs are sampled (head + tail) so matches are not tail-only.
+        """
+        if not query:
+            return []
+        
+        if len(query) <= 8000:
+            return self._identify_tool_on_fragment(query)
+        
+        # Merge best scores from head and tail so early commands are not missed
+        merged: Dict[Any, Tuple[ToolDefinition, float]] = {}
+        for fragment in (query[:4000], query[-4000:]):
+            for tool, conf in self._identify_tool_on_fragment(fragment):
+                key = tool.id if tool.id is not None else ("name", tool.name)
+                if key not in merged or conf > merged[key][1]:
+                    merged[key] = (tool, conf)
+        out = list(merged.values())
+        out.sort(key=lambda x: x[1], reverse=True)
+        return out
     
     def match_error(self, error_text: str, tool_name: str = None) -> List[Tuple[ToolError, ToolDefinition, float]]:
         """
@@ -1202,11 +1231,23 @@ class KnowledgeStore:
         Returns:
             Formatted context string for AI prompt
         """
-        # Identify relevant tools
-        tool_matches = self.identify_tool(log_text)[:limit]
+        sampled = self._sample_log_for_kb_match(log_text)
+        # Identify relevant tools (identify_tool already head+tail-merges very long input)
+        tool_matches = self.identify_tool(sampled)[:limit]
         
         if not tool_matches:
+            logger.debug(
+                "KB audit: identify_tool matched no tools (raw_len=%s sampled_len=%s)",
+                len(log_text) if log_text else 0,
+                len(sampled) if sampled else 0,
+            )
             return ""
+        
+        logger.info(
+            "KB audit: identify_tool -> %s (limit=%s)",
+            [(t.name, round(c, 3)) for t, c in tool_matches],
+            limit,
+        )
         
         sections = ["## INTERNAL TOOLS CONTEXT ##\n"]
         
@@ -1214,8 +1255,15 @@ class KnowledgeStore:
             sections.append(self.format_tool_context_for_prompt(tool))
             sections.append("")
         
-        # Check for matching errors
-        error_matches = self.match_error(log_text)[:3]
+        # Check for matching errors (same sampled text)
+        error_matches = self.match_error(sampled)[:3]
+        if error_matches:
+            logger.info(
+                "KB audit: match_error -> %s",
+                [(e.code, getattr(tool, "name", "?"), round(c, 3)) for e, tool, c in error_matches],
+            )
+        else:
+            logger.debug("KB audit: match_error -> none")
         
         if error_matches:
             sections.append("## KNOWN ERROR PATTERNS ##\n")

@@ -14,7 +14,13 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional, Tuple
 from enum import Enum
 
+from .failure_fingerprint import FailureFingerprint, merge_retriable_with_kb
+
 logger = logging.getLogger("jenkins-agent.rc-analyzer")
+
+# Cap injected prompt sections so few-shot + KB stay within model context alongside logs
+FEW_SHOT_PROMPT_MAX_CHARS = 6000
+INTERNAL_KB_PROMPT_MAX_CHARS = 6000
 
 
 @dataclass
@@ -531,7 +537,9 @@ class RCAnalysisResult:
     signature_mismatches: List[SignatureMismatch] = field(default_factory=list)
     # Issue 1: Add failing tool/command context
     failing_tool: Optional[Dict[str, Any]] = None
-    
+    failure_fingerprint: Optional[FailureFingerprint] = None
+    retriable_policy: str = ""
+
     def to_dict(self) -> Dict[str, Any]:
         result = {
             "root_cause": self.root_cause,
@@ -545,6 +553,10 @@ class RCAnalysisResult:
         # Include failing tool context if available
         if self.failing_tool:
             result["failing_tool"] = self.failing_tool
+        if self.failure_fingerprint:
+            result["failure_fingerprint"] = self.failure_fingerprint.to_dict()
+        if self.retriable_policy:
+            result["retriable_policy"] = self.retriable_policy
         return result
 
 
@@ -804,8 +816,17 @@ RULES:
         # Knowledge store confidence boosting (Phase 3)
         # If we matched a known error from internal tools, boost confidence
         knowledge_matched_error = self._check_knowledge_store_errors(rc_context, parsed_log)
+
+        model_retriable = bool(best_result.is_retriable)
+        if matched_failure_pattern:
+            model_retriable = model_retriable or bool(matched_failure_pattern.get("is_retriable", False))
+
+        kb_retriable: Optional[bool] = None
+        kb_match_confidence = 0.0
         if knowledge_matched_error:
             error_info, tool_info, match_confidence = knowledge_matched_error
+            kb_retriable = bool(getattr(error_info, "retriable", False))
+            kb_match_confidence = float(match_confidence)
             if final_confidence < match_confidence:
                 logger.info(f"Boosting confidence from {final_confidence} to {match_confidence} "
                            f"due to known error: {error_info.code} from tool {tool_info.name}")
@@ -820,24 +841,44 @@ RULES:
             if not best_result.fix and error_info.fix:
                 best_result.fix = error_info.fix
                 logger.info(f"Using knowledge store fix: {error_info.fix[:100]}...")
-        
+
+        merged_retriable = merge_retriable_with_kb(
+            model_retriable, kb_retriable, kb_match_confidence
+        )
+        if kb_retriable is None:
+            retriable_policy = "model_only"
+        elif kb_match_confidence >= 0.75:
+            retriable_policy = f"kb_high_trust(conf={kb_match_confidence:.2f})"
+        else:
+            retriable_policy = f"conservative_and(conf={kb_match_confidence:.2f})"
+
+        failure_fp: Optional[FailureFingerprint] = None
+        if rc_context and getattr(rc_context, "fingerprint", None):
+            failure_fp = rc_context.fingerprint
+
         final_result = RCAnalysisResult(
             root_cause=best_result.root_cause,
             confidence=final_confidence,
             category=final_category,
-            is_retriable=best_result.is_retriable if best_result.is_retriable else matched_failure_pattern.get('is_retriable', False) if matched_failure_pattern else False,
+            is_retriable=merged_retriable,
             fix=best_result.fix,
             iterations_used=len(iterations),
             source_files_fetched=source_files_fetched,
             all_iterations=iterations,
             signature_mismatches=signature_mismatches,
             failing_tool=failing_tool,
+            failure_fingerprint=failure_fp,
+            retriable_policy=retriable_policy,
         )
         
         # Log final result (Requirement 8.4)
-        logger.info(f"RC analysis complete: iterations={final_result.iterations_used}, "
-                   f"confidence={final_result.confidence}, "
-                   f"root_cause={final_result.root_cause[:200]}...")
+        logger.info(
+            "RC analysis complete: iterations=%s confidence=%s retriable_policy=%s root_cause=%s...",
+            final_result.iterations_used,
+            final_result.confidence,
+            final_result.retriable_policy,
+            final_result.root_cause[:200],
+        )
         
         return final_result
     
@@ -1256,15 +1297,24 @@ RULES:
             trace = parsed_log.method_execution_trace
             parts.append("\n" + trace.format_for_prompt())
         
-        # Few-shot examples from feedback store (Requirement 15.5)
-        few_shot_context = self._get_few_shot_examples(rc_context, parsed_log)
-        if few_shot_context:
-            parts.append("\n" + few_shot_context)
-        
-        # Internal tools knowledge from knowledge store (Phase 3)
         internal_tools_context = self._get_internal_tools_knowledge(rc_context, parsed_log)
+        few_shot_context = self._get_few_shot_examples(rc_context, parsed_log)
+        
+        # Knowledge base (curated) before few-shot feedback — clearer conflict policy
+        if internal_tools_context or few_shot_context:
+            parts.append(
+                "\n## KNOWLEDGE PRIORITY\n"
+                "Sections marked INTERNAL TOOLS / KNOWN ERROR PATTERNS come from your org knowledge base. "
+                "Few-shot examples below come from past user feedback. "
+                "If remediation steps conflict, prefer the knowledge base for internal tool-specific errors "
+                "(named tools, error codes, org runbooks); use few-shot for similar generic failures.\n"
+            )
         if internal_tools_context:
             parts.append("\n" + internal_tools_context)
+        
+        # Few-shot examples from feedback store (Requirement 15.5)
+        if few_shot_context:
+            parts.append("\n" + few_shot_context)
         
         # Signature mismatch context (Requirement 7.3) - add early for visibility
         if mismatch_context:
@@ -1382,7 +1432,15 @@ RULES:
                 return ""
             
             # Format for prompt (Req 15.8)
-            return store.format_few_shot_prompt(similar)
+            text = store.format_few_shot_prompt(similar)
+            if len(text) > FEW_SHOT_PROMPT_MAX_CHARS:
+                logger.info(
+                    "Few-shot section truncated: %s -> %s chars",
+                    len(text),
+                    FEW_SHOT_PROMPT_MAX_CHARS,
+                )
+                return text[: FEW_SHOT_PROMPT_MAX_CHARS] + "\n[... truncated ...]"
+            return text
             
         except Exception as e:
             logger.debug(f"Could not get few-shot examples: {e}")
@@ -1435,6 +1493,15 @@ RULES:
             
             if knowledge_context:
                 logger.info(f"Found internal tools knowledge ({len(knowledge_context)} chars)")
+                if len(knowledge_context) > INTERNAL_KB_PROMPT_MAX_CHARS:
+                    logger.info(
+                        "Internal KB section truncated: %s -> %s chars",
+                        len(knowledge_context),
+                        INTERNAL_KB_PROMPT_MAX_CHARS,
+                    )
+                    knowledge_context = (
+                        knowledge_context[:INTERNAL_KB_PROMPT_MAX_CHARS] + "\n[... truncated ...]"
+                    )
             
             return knowledge_context
             

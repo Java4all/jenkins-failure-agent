@@ -1,6 +1,10 @@
 """
 Iterative Root Cause Analyzer
 
+**Legacy / alternate path:** Prefer `RCAnalyzer` with `HybridAnalyzer` (iterative mode) for
+production analysis. This module implements an older agentic loop with `DeepRCFinder` and is
+kept for compatibility; it is not wired into the main `/analyze` flow.
+
 Agentic investigation loop that:
 1. Smart extract error context from log
 2. Ask AI to analyze

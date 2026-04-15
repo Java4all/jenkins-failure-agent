@@ -1,15 +1,17 @@
-"""
+﻿"""
 FastAPI server for Jenkins Failure Analysis Agent.
 Provides HTTP endpoints for integration with Jenkins webhooks.
 """
 
 import logging
+import uuid
 import requests
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks
+from starlette.requests import Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -74,6 +76,7 @@ class AnalyzeResponse(BaseModel):
     status: str = "completed"  # "completed", "no_analysis_needed", "in_progress"
     skip_reason: str = ""
     tool_calls_made: int = 0
+    correlation_id: str = ""
 
 
 class HealthResponse(BaseModel):
@@ -118,7 +121,16 @@ def create_app(config: Config) -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["X-Correlation-ID"],
     )
+
+    @app.middleware("http")
+    async def correlation_id_middleware(http_request: Request, call_next):
+        cid = http_request.headers.get("x-correlation-id") or str(uuid.uuid4())
+        http_request.state.correlation_id = cid
+        response = await call_next(http_request)
+        response.headers["X-Correlation-ID"] = cid
+        return response
     
     # Initialize clients
     jenkins_client = JenkinsClient(config.jenkins)
@@ -261,7 +273,8 @@ def create_app(config: Config) -> FastAPI:
     
     @app.post("/analyze")
     async def analyze_build(
-        request: AnalyzeRequest,
+        analyze_request: AnalyzeRequest,
+        http_request: Request,
         background_tasks: BackgroundTasks,
         _: bool = Depends(verify_api_key)
     ):
@@ -273,11 +286,17 @@ def create_app(config: Config) -> FastAPI:
         Results are automatically posted to Jenkins build description and PR comments.
         """
         try:
+            correlation_id = getattr(http_request.state, "correlation_id", "") or ""
+            logger.info(
+                "Analyze job=%s correlation_id=%s",
+                analyze_request.job,
+                correlation_id,
+            )
             # Determine build number
-            build_number = request.build
-            if request.latest_failed or not build_number:
+            build_number = analyze_request.build
+            if analyze_request.latest_failed or not build_number:
                 # Find latest failed build
-                build_number = jenkins_client.get_latest_failed_build(request.job)
+                build_number = jenkins_client.get_latest_failed_build(analyze_request.job)
                 if not build_number:
                     raise HTTPException(
                         status_code=404,
@@ -285,7 +304,7 @@ def create_app(config: Config) -> FastAPI:
                     )
             
             # Get build info
-            build_info = jenkins_client.get_build_info(request.job, build_number)
+            build_info = jenkins_client.get_build_info(analyze_request.job, build_number)
             
             # =========================================================
             # Requirement 14.1: Check build status BEFORE log parsing
@@ -293,38 +312,41 @@ def create_app(config: Config) -> FastAPI:
             
             # Req 14.3: Build still in progress
             if build_info.building:
-                logger.info(f"Build {request.job}#{build_number} is still running - skipping analysis")
+                logger.info(f"Build {analyze_request.job}#{build_number} is still running - skipping analysis")
                 return AnalyzeResponse(
                     success=True,
-                    job=request.job,
+                    job=analyze_request.job,
                     build=build_number,
                     status="no_analysis_needed",
                     skip_reason="Build is still in progress",
                     analysis_mode="none",
+                    correlation_id=correlation_id,
                 )
             
             # Req 14.2: Build succeeded
             if build_info.status == "SUCCESS":
-                logger.info(f"Build {request.job}#{build_number} succeeded - no failure to analyze")
+                logger.info(f"Build {analyze_request.job}#{build_number} succeeded - no failure to analyze")
                 return AnalyzeResponse(
                     success=True,
-                    job=request.job,
+                    job=analyze_request.job,
                     build=build_number,
                     status="no_analysis_needed",
                     skip_reason="Build succeeded",
                     analysis_mode="none",
+                    correlation_id=correlation_id,
                 )
             
             # Req 14.4: Build was aborted
             if build_info.status == "ABORTED":
-                logger.info(f"Build {request.job}#{build_number} was aborted - skipping analysis")
+                logger.info(f"Build {analyze_request.job}#{build_number} was aborted - skipping analysis")
                 return AnalyzeResponse(
                     success=True,
-                    job=request.job,
+                    job=analyze_request.job,
                     build=build_number,
                     status="no_analysis_needed",
                     skip_reason="Build was manually aborted",
                     analysis_mode="none",
+                    correlation_id=correlation_id,
                 )
             
             # =========================================================
@@ -332,7 +354,7 @@ def create_app(config: Config) -> FastAPI:
             # =========================================================
             
             # Fetch console log
-            console_log = jenkins_client.get_console_log(request.job, build_number)
+            console_log = jenkins_client.get_console_log(analyze_request.job, build_number)
             
             # Parse logs
             parsed_log = log_parser.parse(console_log)
@@ -347,13 +369,13 @@ def create_app(config: Config) -> FastAPI:
                 logger.warning("=== DEBUG PARSE: NO tool_invocations found by LogParser!")
             
             # Get test results
-            test_results = jenkins_client.get_test_results(request.job, build_number)
+            test_results = jenkins_client.get_test_results(analyze_request.job, build_number)
             
             # Git analysis (if workspace provided)
             git_analysis = None
-            if git_analyzer and request.workspace:
+            if git_analyzer and analyze_request.workspace:
                 try:
-                    git_analysis = git_analyzer.analyze(request.workspace)
+                    git_analysis = git_analyzer.analyze(analyze_request.workspace)
                 except Exception as e:
                     logger.warning(f"Git analysis failed: {e}")
             
@@ -365,15 +387,15 @@ def create_app(config: Config) -> FastAPI:
             if github_client:
                 try:
                     # Determine project repo and ref
-                    project_repo = request.project_repo
-                    project_ref = request.project_ref or "main"
+                    project_repo = analyze_request.project_repo
+                    project_ref = analyze_request.project_ref or "main"
                     
                     # Try to infer repo from job name if not provided
                     if not project_repo:
                         # Check if we have a mapping in config
                         project_mappings = getattr(config.github, 'project_mappings', {})
-                        if request.job in project_mappings:
-                            project_repo = project_mappings[request.job]
+                        if analyze_request.job in project_mappings:
+                            project_repo = project_mappings[analyze_request.job]
                     
                     # Fetch code
                     fetch_result = github_client.fetch_for_analysis(
@@ -403,10 +425,10 @@ def create_app(config: Config) -> FastAPI:
             # Use hybrid analyzer (Requirement 5):
             # - mode="iterative" (default): multi-call iterative RC analysis
             # - mode="deep": full MCP tool agent investigation
-            deep_mode = request.mode == "deep"
+            deep_mode = analyze_request.mode == "deep"
             
             # Req 18.8: Truncate user_hint to 500 characters
-            user_hint = request.user_hint
+            user_hint = analyze_request.user_hint
             if user_hint and len(user_hint) > 500:
                 logger.debug(f"User hint truncated from {len(user_hint)} to 500 characters")
                 user_hint = user_hint[:500]
@@ -420,7 +442,7 @@ def create_app(config: Config) -> FastAPI:
                 jenkinsfile_content=jenkinsfile_content,
                 library_sources=library_sources,
                 deep=deep_mode,
-                pr_url=request.pr_url,
+                pr_url=analyze_request.pr_url,
                 user_hint=user_hint,
             )
             
@@ -428,11 +450,12 @@ def create_app(config: Config) -> FastAPI:
             if hybrid_result.skipped:
                 return AnalyzeResponse(
                     success=True,
-                    job=request.job,
+                    job=analyze_request.job,
                     build=build_number,
                     status="no_analysis_needed",
                     skip_reason=hybrid_result.skip_reason,
                     analysis_mode=hybrid_result.mode.value,
+                    correlation_id=correlation_id,
                 )
             
             # Get the result
@@ -446,7 +469,7 @@ def create_app(config: Config) -> FastAPI:
             
             # Generate report if requested
             report_url = None
-            if request.generate_report:
+            if analyze_request.generate_report:
                 generated = report_generator.generate(result, ["json", "markdown"])
                 report_url = generated.get("markdown")
             
@@ -458,7 +481,7 @@ def create_app(config: Config) -> FastAPI:
             pr_comment_posted = False
             
             # 1. Update Jenkins build description
-            if request.update_jenkins_description and config.reporter.update_jenkins_description:
+            if analyze_request.update_jenkins_description and config.reporter.update_jenkins_description:
                 try:
                     description = jenkins_client.format_analysis_description(
                         root_cause=result.root_cause.summary,
@@ -469,28 +492,28 @@ def create_app(config: Config) -> FastAPI:
                         recommendations=[r.action for r in result.recommendations[:3]]
                     )
                     jenkins_description_updated = jenkins_client.set_build_description(
-                        request.job, build_number, description
+                        analyze_request.job, build_number, description
                     )
                     if jenkins_description_updated:
-                        logger.info(f"Updated Jenkins description for {request.job}#{build_number}")
+                        logger.info(f"Updated Jenkins description for {analyze_request.job}#{build_number}")
                 except Exception as e:
                     logger.warning(f"Failed to update Jenkins description: {e}")
             
             # 2. Post to PR/MR
-            if request.post_to_pr and config.reporter.post_to_pr and scm_client:
+            if analyze_request.post_to_pr and config.reporter.post_to_pr and scm_client:
                 pr_info = None
                 
                 # Try to get PR info from request
-                if request.pr_url:
-                    pr_info = scm_client.extract_pr_info_from_url(request.pr_url)
-                    if pr_info and request.pr_sha:
-                        pr_info.sha = request.pr_sha
+                if analyze_request.pr_url:
+                    pr_info = scm_client.extract_pr_info_from_url(analyze_request.pr_url)
+                    if pr_info and analyze_request.pr_sha:
+                        pr_info.sha = analyze_request.pr_sha
                 
                 if pr_info:
                     try:
                         # Format comment
                         comment = format_pr_comment(
-                            job_name=request.job,
+                            job_name=analyze_request.job,
                             build_number=build_number,
                             build_url=build_info.url,
                             root_cause=result.root_cause.summary,
@@ -527,7 +550,7 @@ def create_app(config: Config) -> FastAPI:
                         logger.warning(f"Failed to post PR comment: {e}")
             
             # 3. Send Slack notification if requested
-            if request.notify_slack and config.notifications.slack.get("enabled"):
+            if analyze_request.notify_slack and config.notifications.slack.get("enabled"):
                 background_tasks.add_task(
                     send_slack_notification,
                     config.notifications.slack,
@@ -535,7 +558,7 @@ def create_app(config: Config) -> FastAPI:
                 )
             
             # Store result
-            result_key = f"{request.job}:{build_number}"
+            result_key = f"{analyze_request.job}:{build_number}"
             result_dict = result_to_dict(result)
             analysis_results[result_key] = result_dict
             
@@ -557,7 +580,7 @@ def create_app(config: Config) -> FastAPI:
             
             return {
                 "success": True,
-                "job": request.job,
+                "job": analyze_request.job,
                 "build": build_number,
                 "category": result.failure_analysis.get("category", "UNKNOWN"),
                 "tier": result.failure_analysis.get("tier", "unknown"),
@@ -578,6 +601,7 @@ def create_app(config: Config) -> FastAPI:
                 "analysis_mode": analysis_mode,
                 "iterations_used": iterations_used,
                 "tool_calls_made": tool_calls_made,
+                "correlation_id": correlation_id,
                 # Include full analysis data
                 **result_to_dict(result)
             }
@@ -1804,6 +1828,8 @@ def create_app(config: Config) -> FastAPI:
                         job_name=failure.job_name,
                         log_parser_config=vars(config.parsing),
                         from_splunk_console=True,
+                        agent_config=config,
+                        github_client=github_client,
                     )
                 except Exception as e:
                     logger.error(f"Analysis failed for {failure.job_name}#{failure.job_id}: {e}")

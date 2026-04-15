@@ -28,6 +28,155 @@ from .ai_analyzer import (
 logger = logging.getLogger("jenkins-agent.hybrid")
 
 
+def is_pipeline_level_error(error_text: str) -> bool:
+    """
+    True if the error text looks like a Jenkins pipeline-level failure (not only shell output).
+    Used when selecting a related failing_tool from tool invocations.
+    """
+    if not error_text:
+        return False
+    pipeline_error_patterns = [
+        r"Could not find credentials entry with ID",
+        r"Credentials .+ not found",
+        r"No such DSL method",
+        r"Timeout .+ exceeded",
+        r"Script approval required",
+        r"RejectedAccessException",
+        r"CpsCallableInvocation",
+        r"WorkflowScript:",
+        r"No signature of method",
+        r"Cannot invoke method .+ on null",
+        r"MissingPropertyException",
+        r"CredentialNotFoundException",
+    ]
+    for pattern in pipeline_error_patterns:
+        if re.search(pattern, error_text, re.IGNORECASE):
+            return True
+    return False
+
+
+def find_tool_by_identifier_for_error(error_text: str, tool_invocations: list) -> Optional[dict]:
+    """
+    Find a tool invocation whose command references an identifier quoted in the error text.
+    """
+    if not error_text or not tool_invocations:
+        return None
+    identifier_patterns = [
+        r"'([A-Za-z0-9_-]{4,})'",
+        r'"([A-Za-z0-9_-]{4,})"',
+        r"/([A-Za-z0-9_-]{4,})(?:\s|$)",
+    ]
+    identifiers = set()
+    for pattern in identifier_patterns:
+        for match in re.finditer(pattern, error_text):
+            identifiers.add(match.group(1))
+    if not identifiers:
+        return None
+    for tool in reversed(tool_invocations):
+        command = tool.command_line if hasattr(tool, "command_line") else tool.get("command_line", "")
+        for identifier in identifiers:
+            if identifier in command:
+                if hasattr(tool, "to_dict"):
+                    return tool.to_dict()
+                return tool
+    return None
+
+
+def convert_rc_result_to_analysis_result(
+    rc_result,
+    build_info: BuildInfo,
+    parsed_log: ParsedLog,
+) -> AnalysisResult:
+    """
+    Convert RCAnalysisResult to AnalysisResult (shared by HybridAnalyzer and Splunk/snippet path).
+    """
+    category = rc_result.category or "UNKNOWN"
+    raw_tier = CATEGORY_TO_TIER.get(category, FailureTier.UNKNOWN)
+    tier = raw_tier.value if isinstance(raw_tier, FailureTier) else str(raw_tier)
+
+    logger.info(
+        "convert_rc_result: failing_tool=%s tool_invocations=%s",
+        bool(getattr(rc_result, "failing_tool", None)),
+        len(parsed_log.tool_invocations) if parsed_log and getattr(parsed_log, "tool_invocations", None) else 0,
+    )
+
+    failure_analysis: Dict[str, Any] = {
+        "category": category,
+        "primary_error": rc_result.root_cause[:2000] if rc_result.root_cause else "",
+        "failed_stage": parsed_log.failed_stage if parsed_log else None,
+        "confidence": rc_result.confidence,
+        "tier": tier,
+    }
+
+    if hasattr(rc_result, "failing_tool") and rc_result.failing_tool:
+        failure_analysis["failing_tool"] = rc_result.failing_tool
+
+    primary_error = rc_result.root_cause if rc_result.root_cause else ""
+    pipe_err = is_pipeline_level_error(primary_error)
+
+    if "failing_tool" not in failure_analysis and parsed_log and getattr(parsed_log, "tool_invocations", None):
+        tool_invocations = parsed_log.tool_invocations
+        if pipe_err and tool_invocations:
+            matched_tool = find_tool_by_identifier_for_error(primary_error, tool_invocations)
+            if matched_tool:
+                failure_analysis["failing_tool"] = matched_tool
+        elif tool_invocations:
+            for tool in reversed(tool_invocations):
+                has_error = tool.exit_code and tool.exit_code != 0
+                has_error_output = any(
+                    "error" in line.lower() or "fail" in line.lower() or "fatal" in line.lower()
+                    for line in (tool.output_lines or [])
+                )
+                if has_error or has_error_output:
+                    failure_analysis["failing_tool"] = tool.to_dict()
+                    break
+            if "failing_tool" not in failure_analysis and tool_invocations:
+                failure_analysis["failing_tool"] = tool_invocations[-1].to_dict()
+
+    metadata: Dict[str, Any] = {}
+    if "failing_tool" in failure_analysis:
+        metadata["failing_tool"] = failure_analysis["failing_tool"]
+
+    fp = getattr(rc_result, "failure_fingerprint", None)
+    if fp is not None:
+        metadata["failure_fingerprint"] = fp.to_dict()
+    retriable_policy = getattr(rc_result, "retriable_policy", "") or ""
+    if retriable_policy:
+        metadata["retriable_policy"] = retriable_policy
+
+    if parsed_log and getattr(parsed_log, "tool_invocations", None):
+        failure_analysis["tool_invocations"] = [t.to_dict() for t in parsed_log.tool_invocations]
+
+    return AnalysisResult(
+        build_info={
+            "job": build_info.job_name,
+            "build_number": build_info.build_number,
+            "status": build_info.status,
+            "duration": build_info.duration_str,
+        },
+        failure_analysis=failure_analysis,
+        root_cause=RootCause(
+            summary=rc_result.root_cause,
+            details=rc_result.root_cause,
+            confidence=rc_result.confidence,
+            category=category,
+            tier=tier,
+            fix=rc_result.fix or "",
+        ),
+        retry_assessment=RetryAssessment(
+            is_retriable=rc_result.is_retriable,
+            confidence=rc_result.confidence,
+            reason=rc_result.root_cause[:100] if rc_result.root_cause else "",
+        ),
+        recommendations=[
+            Recommendation(priority="HIGH", action=rc_result.fix, rationale=rc_result.root_cause[:100])
+        ]
+        if rc_result.fix
+        else [],
+        metadata=metadata,
+    )
+
+
 class AnalysisMode(str, Enum):
     """Analysis mode - simplified to two options per Requirement 5.7."""
     ITERATIVE = "iterative"   # Multi-call iterative RC analysis (default)
@@ -567,7 +716,9 @@ class HybridAnalyzer:
                 logger.info(f"Found {len(tool_invocations)} tool invocations: {[t.tool_name for t in tool_invocations]}")
             else:
                 logger.warning("No tool_invocations found in parsed_log")
-            rc_context = rc_finder.find(console_log_snippet or "", tool_invocations)
+            rc_context = rc_finder.find(
+                console_log_snippet or "", tool_invocations, parsed_log
+            )
             if rc_context.related_tool:
                 logger.info(f"RC context has related_tool: {rc_context.related_tool.get('tool_name')}")
             else:
@@ -686,104 +837,7 @@ class HybridAnalyzer:
     
     def _rc_result_to_analysis_result(self, rc_result, build_info: BuildInfo, parsed_log: ParsedLog) -> AnalysisResult:
         """Convert RCAnalysisResult to AnalysisResult format."""
-        category = rc_result.category or "UNKNOWN"
-        tier = CATEGORY_TO_TIER.get(category, "unknown")
-        
-        # DEBUG: Check what we have
-        logger.info(f"=== DEBUG _rc_result: rc_result.failing_tool = {rc_result.failing_tool is not None if hasattr(rc_result, 'failing_tool') else 'no attr'}")
-        logger.info(f"=== DEBUG _rc_result: parsed_log.tool_invocations = {len(parsed_log.tool_invocations) if hasattr(parsed_log, 'tool_invocations') and parsed_log.tool_invocations else 0}")
-        
-        # Build failure_analysis with failing_tool if available
-        failure_analysis = {
-            "category": category,
-            "primary_error": rc_result.root_cause[:2000] if rc_result.root_cause else "",
-            "failed_stage": parsed_log.failed_stage,
-            "confidence": rc_result.confidence,
-            "tier": tier,
-        }
-        
-        # Include failing tool info for UI display
-        if hasattr(rc_result, 'failing_tool') and rc_result.failing_tool:
-            failure_analysis["failing_tool"] = rc_result.failing_tool
-            logger.info(f"=== DEBUG _rc_result: Added failing_tool from rc_result: {rc_result.failing_tool.get('tool_name', 'unknown')}")
-        
-        # FALLBACK: If no specific failing_tool but we have tool_invocations,
-        # find the most likely failing tool
-        primary_error = rc_result.root_cause if rc_result.root_cause else ""
-        is_pipeline_error = self._is_pipeline_level_error(primary_error)
-        
-        if "failing_tool" not in failure_analysis and parsed_log and hasattr(parsed_log, 'tool_invocations'):
-            tool_invocations = parsed_log.tool_invocations
-            logger.info(f"=== DEBUG _rc_result: FALLBACK checking tool_invocations: {len(tool_invocations) if tool_invocations else 0}")
-            
-            if is_pipeline_error and tool_invocations:
-                # For pipeline errors, find tool that references the same identifier
-                # E.g., credentials error mentions 'CI_GB-SVC-SHPE-PRD', find aws command using it
-                matched_tool = self._find_tool_by_identifier(primary_error, tool_invocations)
-                if matched_tool:
-                    failure_analysis["failing_tool"] = matched_tool
-                    logger.info(f"=== DEBUG _rc_result: FALLBACK matched tool by identifier: {matched_tool.get('tool_name', 'unknown')}")
-                # If no match, don't show any failing_tool (better than showing unrelated command)
-            elif tool_invocations:
-                # For regular errors, find tool with non-zero exit or error output
-                for tool in reversed(tool_invocations):  # Check last tools first
-                    has_error = tool.exit_code and tool.exit_code != 0
-                    has_error_output = any(
-                        'error' in line.lower() or 'fail' in line.lower() or 'fatal' in line.lower()
-                        for line in (tool.output_lines or [])
-                    )
-                    if has_error or has_error_output:
-                        failure_analysis["failing_tool"] = tool.to_dict()
-                        logger.info(f"=== DEBUG _rc_result: FALLBACK using tool {tool.tool_name} as failing_tool")
-                        break
-                
-                # If still no failing tool, just use the last one
-                if "failing_tool" not in failure_analysis and tool_invocations:
-                    last_tool = tool_invocations[-1]
-                    failure_analysis["failing_tool"] = last_tool.to_dict()
-                    logger.info(f"=== DEBUG _rc_result: FALLBACK using last tool {last_tool.tool_name} as failing_tool")
-        
-        # Build metadata
-        metadata = {}
-        if "failing_tool" in failure_analysis:
-            metadata["failing_tool"] = failure_analysis["failing_tool"]
-        
-        # Include ALL tool invocations for UI display
-        if parsed_log and hasattr(parsed_log, 'tool_invocations') and parsed_log.tool_invocations:
-            failure_analysis["tool_invocations"] = [
-                t.to_dict() for t in parsed_log.tool_invocations
-            ]
-            logger.info(f"=== DEBUG _rc_result: Added {len(parsed_log.tool_invocations)} tool_invocations to failure_analysis")
-        else:
-            logger.warning("=== DEBUG _rc_result: NO tool_invocations to add!")
-        
-        logger.info(f"=== DEBUG _rc_result: Final failure_analysis keys: {list(failure_analysis.keys())}")
-        
-        return AnalysisResult(
-            build_info={
-                "job_name": build_info.job_name,
-                "build_number": build_info.build_number,
-                "status": build_info.status,
-            },
-            failure_analysis=failure_analysis,
-            root_cause=RootCause(
-                summary=rc_result.root_cause,
-                details=rc_result.root_cause,  # Keep details as root cause summary
-                confidence=rc_result.confidence,
-                category=category,
-                tier=tier,
-                fix=rc_result.fix or "",  # Set fix field
-            ),
-            retry_assessment=RetryAssessment(
-                is_retriable=rc_result.is_retriable,
-                confidence=rc_result.confidence,
-                reason=rc_result.root_cause[:100] if rc_result.root_cause else "",
-            ),
-            recommendations=[
-                Recommendation(priority="HIGH", action=rc_result.fix, rationale=rc_result.root_cause[:100])
-            ] if rc_result.fix else [],
-            metadata=metadata,
-        )
+        return convert_rc_result_to_analysis_result(rc_result, build_info, parsed_log)
     
     def _investigation_to_analysis_result(self, investigation, build_info: BuildInfo, parsed_log: ParsedLog) -> AnalysisResult:
         """Convert Investigation result to AnalysisResult format."""
@@ -917,71 +971,3 @@ class HybridAnalyzer:
             ),
             iterations_used=0,
         )
-    
-    def _is_pipeline_level_error(self, error_text: str) -> bool:
-        """
-        Check if error is a Jenkins pipeline-level error (not from shell command).
-        
-        Note: Even for pipeline errors, we should still try to find related tools
-        that reference the same identifiers (e.g., credential ID used in AWS command).
-        This method is used to avoid picking RANDOM unrelated tools as failing_tool.
-        """
-        if not error_text:
-            return False
-        
-        pipeline_error_patterns = [
-            r"Could not find credentials entry with ID",
-            r"Credentials .+ not found",
-            r"No such DSL method",
-            r"Timeout .+ exceeded",
-            r"Script approval required",
-            r"RejectedAccessException",
-            r"CpsCallableInvocation",
-            r"WorkflowScript:",
-            r"No signature of method",
-            r"Cannot invoke method .+ on null",
-            r"MissingPropertyException",
-            r"CredentialNotFoundException",
-        ]
-        
-        for pattern in pipeline_error_patterns:
-            if re.search(pattern, error_text, re.IGNORECASE):
-                return True
-        
-        return False
-    
-    def _find_tool_by_identifier(self, error_text: str, tool_invocations: list) -> dict:
-        """
-        Find a tool invocation that references the same identifier as in the error.
-        
-        Example: Error mentions 'CI_GB-SVC-SHPE-PRD', find the aws command that uses it.
-        """
-        if not error_text or not tool_invocations:
-            return None
-        
-        # Extract identifiers from error (quoted strings, paths, IDs)
-        # Pattern matches: 'ID', "ID", /path/ID, ID-with-dashes
-        identifier_patterns = [
-            r"'([A-Za-z0-9_-]{4,})'",  # Single quoted
-            r'"([A-Za-z0-9_-]{4,})"',  # Double quoted
-            r'/([A-Za-z0-9_-]{4,})(?:\s|$)',  # Path component
-        ]
-        
-        identifiers = set()
-        for pattern in identifier_patterns:
-            for match in re.finditer(pattern, error_text):
-                identifiers.add(match.group(1))
-        
-        if not identifiers:
-            return None
-        
-        # Find tool that references any of these identifiers
-        for tool in reversed(tool_invocations):  # Check last tools first
-            command = tool.command_line if hasattr(tool, 'command_line') else tool.get('command_line', '')
-            for identifier in identifiers:
-                if identifier in command:
-                    if hasattr(tool, 'to_dict'):
-                        return tool.to_dict()
-                    return tool
-        
-        return None

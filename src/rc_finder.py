@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Dict, Any
 from enum import Enum
 
+from .failure_fingerprint import FailureFingerprint
+
 # Import PipelineLineType for line classification (Req 20.6)
 try:
     from .log_parser import PipelineLineType
@@ -71,6 +73,12 @@ class RootCauseContext:
     # Requirement 17.5: Related tool invocation
     related_tool: Optional[Dict[str, Any]] = None
     
+    # When LogParser primary error vs tail-focused finder disagree (early SCM/Git, etc.)
+    reconciliation_note: str = ""
+    
+    # Structured line alignment (finder vs parser); exposed in API metadata
+    fingerprint: Optional[FailureFingerprint] = None
+    
     # Summary for AI
     def get_ai_prompt_context(self) -> str:
         """Generate focused context for AI analysis."""
@@ -80,6 +88,11 @@ class RootCauseContext:
             parts.append(f"FAILED STAGE: {self.failed_stage}")
         if self.failed_method:
             parts.append(f"FAILED METHOD: {self.failed_method}")
+        if self.reconciliation_note:
+            parts.append("\n" + "=" * 50)
+            parts.append("RECONCILIATION (LogParser vs error focus)")
+            parts.append("=" * 50)
+            parts.append(self.reconciliation_note)
         
         # Requirement 17.5, 17.6: Include tool context
         if self.related_tool:
@@ -237,7 +250,12 @@ class RootCauseFinder:
         self.context_after = self.config.get('context_after', self.CONTEXT_AFTER)
         self.method_prefix = self.config.get('method_execution_prefix', '')
     
-    def find(self, log: str, tool_invocations: Optional[List[Any]] = None) -> RootCauseContext:
+    def find(
+        self,
+        log: str,
+        tool_invocations: Optional[List[Any]] = None,
+        parsed_log: Optional[Any] = None,
+    ) -> RootCauseContext:
         """
         Find root cause context from log.
         
@@ -245,6 +263,8 @@ class RootCauseFinder:
             log: The log content to analyze
             tool_invocations: Optional list of ToolInvocation objects from LogParser
                               (Requirement 17.5)
+            parsed_log: Optional ParsedLog — when set, reconciles tail-focused error with
+                        LogParser's primary error and boosts early SCM/Git signals.
         
         Returns RootCauseContext with focused, relevant data for AI analysis.
         """
@@ -263,8 +283,13 @@ class RootCauseFinder:
         error_idx, error_line, error_score = self._find_error_line(lines, search_start)
         
         if error_idx >= 0:
-            context.error_line_number = error_idx
-            context.error_line = error_line
+            new_idx, new_line, note, fp = self._reconcile_primary_error_line(
+                lines, error_idx, error_score, parsed_log
+            )
+            context.error_line_number = new_idx
+            context.error_line = new_line
+            context.reconciliation_note = note
+            context.fingerprint = fp
         else:
             # Fallback: use last non-empty line as "error"
             for i in range(len(lines) - 1, -1, -1):
@@ -640,6 +665,101 @@ class RootCauseFinder:
         normalized = re.sub(r'\s+', ' ', normalized).strip()
         return normalized
     
+    def _early_scm_signal_score(self, line: str) -> int:
+        """Score lines that indicate checkout / SCM / Git failure (often in early log)."""
+        if not line or not line.strip():
+            return 0
+        patterns = [
+            (r"(?i)couldn'?t find any revision", 10),
+            (r"(?i)could not find any revision", 10),
+            (r"(?i)gitexception", 10),
+            (r"(?i)unable to checkout", 9),
+            (r"(?i)checkout failed", 9),
+            (r"(?i)fatal:.*(git|remote|repository)", 9),
+            (r"(?i)hudson\.plugins\.git", 9),
+            (r"(?i)revision.*not found", 8),
+            (r"(?i)repository.*not found", 8),
+            (r"(?i)authentication failed.*git", 7),
+            (r"(?i)error fetching remote", 8),
+        ]
+        best = 0
+        for pat, weight in patterns:
+            if re.search(pat, line):
+                best = max(best, weight)
+        return best
+    
+    def _reconcile_primary_error_line(
+        self,
+        lines: List[str],
+        finder_idx: int,
+        finder_score: int,
+        parsed_log: Optional[Any],
+    ) -> Tuple[int, str, str, FailureFingerprint]:
+        """
+        Align tail-focused finder with LogParser's first error when early SCM signals warrant it.
+        Returns (line_index, line_text, reconciliation_note, fingerprint).
+        """
+        n = len(lines)
+        fp = FailureFingerprint(
+            finder_primary_line_1based=finder_idx + 1 if 0 <= finder_idx < n else 0,
+            chosen_primary_line_1based=finder_idx + 1 if 0 <= finder_idx < n else 0,
+            chosen_source="finder",
+            aligned=True,
+        )
+        if n == 0 or finder_idx < 0 or finder_idx >= n:
+            return finder_idx, lines[finder_idx] if 0 <= finder_idx < n else "", "", fp
+        finder_line = lines[finder_idx]
+        if parsed_log is None:
+            return finder_idx, finder_line, "", fp
+        errs = getattr(parsed_log, "errors", None) or []
+        if not errs:
+            return finder_idx, finder_line, "", fp
+        pe = errs[0]
+        pi = getattr(pe, "line_number", 0) - 1
+        fp.parser_primary_line_1based = pi + 1 if pi >= 0 else None
+        if pi < 0 or pi >= n:
+            return finder_idx, finder_line, "", fp
+        pline = lines[pi]
+        early = self._early_scm_signal_score(pline)
+        # Strong early SCM in first third; finder on last third — prefer early
+        if early >= 9 and pi < n // 3 and finder_idx >= 2 * n // 3:
+            note = (
+                f"Using LogParser's first error (line {pi + 1}) over tail-focused line ({finder_idx + 1}): "
+                "strong SCM/checkout/Git signal early in the log."
+            )
+            fp.chosen_primary_line_1based = pi + 1
+            fp.chosen_source = "parser_early_scm"
+            fp.aligned = abs(pi - finder_idx) <= 2
+            fp.note = note
+            return pi, pline, note, fp
+        # Parser much earlier with solid SCM signal
+        if (
+            early >= 7
+            and pi < finder_idx
+            and (finder_idx - pi) > max(25, n // 10)
+        ):
+            note = (
+                f"LogParser first error (line {pi + 1}) precedes tail focus (line {finder_idx + 1}); "
+                "checkout/SCM issues may cause later failures—investigate both."
+            )
+            fp.chosen_primary_line_1based = pi + 1
+            fp.chosen_source = "parser_precedes_tail"
+            fp.aligned = False
+            fp.note = note
+            return pi, pline, note, fp
+        if abs(pi - finder_idx) <= 2:
+            fp.aligned = True
+            fp.chosen_primary_line_1based = finder_idx + 1
+            return finder_idx, finder_line, "", fp
+        note = (
+            f"LogParser highlights line {pi + 1}; focused context centers on line {finder_idx + 1}. "
+            "Consider both if the failure chain spans stages."
+        )
+        fp.chosen_source = "finder_with_note"
+        fp.aligned = False
+        fp.note = note
+        return finder_idx, finder_line, note, fp
+    
     def _find_error_line(self, lines: List[str], start_idx: int) -> Tuple[int, str, int]:
         """
         Find the primary error line, searching from end.
@@ -650,10 +770,11 @@ class RootCauseFinder:
         best_line = ""
         best_score = 0
         
+        n_lines = len(lines)
         # Search backwards from end
-        for i in range(len(lines) - 1, start_idx - 1, -1):
+        for i in range(n_lines - 1, start_idx - 1, -1):
             line = lines[i]
-            score = self._score_error_line(line)
+            score = self._score_error_line(line, line_index=i, n_lines=n_lines)
             
             # Prioritize later lines (closer to end) with same score
             if score > best_score:
@@ -663,17 +784,23 @@ class RootCauseFinder:
         
         return best_idx, best_line, best_score
     
-    def _score_error_line(self, line: str) -> int:
-        """Score how likely this line is the primary error."""
+    def _score_error_line(self, line: str, line_index: int = 0, n_lines: int = 1) -> int:
+        """Score how likely this line is the primary error (multi-signal: pattern + early SCM position)."""
         if not line.strip():
             return 0
         
         score = 0
-        line_lower = line.lower()
-        
         for pattern, weight in self.ERROR_PATTERNS:
             if re.search(pattern, line, re.IGNORECASE):
                 score = max(score, weight)
+        
+        scm = self._early_scm_signal_score(line)
+        if scm >= 7 and n_lines > 20:
+            score += min(scm, 10)
+            # Boost strong early-log SCM even if tail search would otherwise win later
+            pos = line_index / max(n_lines - 1, 1)
+            if pos < 0.35:
+                score += 4
         
         return score
     

@@ -12,7 +12,7 @@ from typing import List, Dict, Any, Optional
 from enum import Enum
 from openai import OpenAI
 
-from .config import AIConfig
+from .config import AIConfig, Config
 from .log_parser import ParsedLog, FailureCategory
 from .git_analyzer import GitAnalysis
 from .jenkins_client import BuildInfo, TestResult
@@ -272,15 +272,22 @@ class AIAnalyzer:
         job_name: str = "splunk-import",
         log_parser_config: Optional[Dict[str, Any]] = None,
         from_splunk_console: bool = False,
+        agent_config: Optional[Config] = None,
+        github_client: Any = None,
     ) -> AnalysisResult:
         """
-        Analyze a raw console log snippet (e.g. from Splunk) using the same pipeline
-        as the main /analyze path: LogParser + RootCauseFinder context + LLM.
+        Analyze a raw console log snippet (e.g. from Splunk).
+
+        When ``agent_config`` is provided and ``rc_analyzer.enabled`` is True, uses the same
+        iterative RC stack as ``/analyze`` (RootCauseFinder + RCAnalyzer + KB/few-shot).
+        Otherwise falls back to a single-shot ``analyze()`` call (legacy).
         """
         from .log_parser import LogParser
 
+        start_time = time.time()
         parser = LogParser(log_parser_config or {})
         parsed_log = parser.parse(log_snippet)
+        tool_inv = getattr(parsed_log, "tool_invocations", None)
 
         build_info = BuildInfo(
             job_name=job_name or "splunk-import",
@@ -290,12 +297,74 @@ class AIAnalyzer:
             timestamp=datetime.utcnow(),
             duration_ms=0,
         )
-        return self.analyze(
+
+        use_rc = agent_config is not None and getattr(
+            getattr(agent_config, "rc_analyzer", None), "enabled", True
+        )
+
+        if use_rc:
+            try:
+                from .rc_finder import RootCauseFinder
+                from .rc_analyzer import RCAnalyzer
+                from .groovy_analyzer import GroovyAnalyzer
+                from .hybrid_analyzer import convert_rc_result_to_analysis_result
+
+                rc_finder = RootCauseFinder(
+                    {"method_execution_prefix": agent_config.parsing.method_execution_prefix or ""}
+                )
+                rc_context = rc_finder.find(log_snippet, tool_inv, parsed_log)
+                rc_analyzer = RCAnalyzer(
+                    ai_analyzer=self,
+                    github_client=github_client,
+                    groovy_analyzer=GroovyAnalyzer(),
+                    config=agent_config.rc_analyzer,
+                    method_prefix=agent_config.parsing.method_execution_prefix or "",
+                )
+                rc_result = rc_analyzer.analyze(
+                    parsed_log=parsed_log,
+                    rc_context=rc_context,
+                    build_info={
+                        "job_name": build_info.job_name,
+                        "build_number": build_info.build_number,
+                        "status": build_info.status,
+                    },
+                    jenkinsfile_content=None,
+                    library_sources=None,
+                    user_hint=None,
+                )
+                result = convert_rc_result_to_analysis_result(rc_result, build_info, parsed_log)
+                if not hasattr(result, "metadata") or result.metadata is None:
+                    result.metadata = {}
+                result.metadata["analysis_path"] = "rc_iterative"
+                if from_splunk_console and log_snippet:
+                    result = self._adjust_splunk_confidence(result, log_snippet)
+                result.analysis_duration_ms = int((time.time() - start_time) * 1000)
+                result.model_used = self.model
+                raw_iters = getattr(rc_result, "all_iterations", None) or []
+                if raw_iters:
+                    result.raw_ai_response = "\n---\n".join(
+                        (getattr(it, "raw_response", "") or "") for it in raw_iters[-3:]
+                    )
+                else:
+                    result.raw_ai_response = getattr(rc_result, "root_cause", "") or ""
+                return result
+            except Exception as e:
+                import logging
+
+                logging.getLogger("jenkins-agent.ai").warning(
+                    "RC-equivalent snippet analysis failed, falling back to single-shot: %s", e
+                )
+
+        result = self.analyze(
             build_info,
             parsed_log,
             console_log_snippet=log_snippet,
             console_snippet_origin="splunk" if from_splunk_console else None,
         )
+        if not hasattr(result, "metadata") or result.metadata is None:
+            result.metadata = {}
+        result.metadata.setdefault("analysis_path", "single_shot_fallback")
+        return result
     
     def analyze(
         self,
@@ -519,7 +588,8 @@ class AIAnalyzer:
                 'context_after': 15,
             })
             
-            rc_context = finder.find(console_log_snippet)
+            tool_invocations = getattr(parsed_log, "tool_invocations", None) if parsed_log else None
+            rc_context = finder.find(console_log_snippet, tool_invocations, parsed_log)
             
             # Add the focused context from RC Finder
             parts.append(rc_context.get_ai_prompt_context())
@@ -629,6 +699,19 @@ class AIAnalyzer:
         
         raise RuntimeError(f"AI analysis failed after {self.config.max_retries} attempts: {last_error}")
     
+    def _normalize_llm_json_payload(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Coerce common JSON shape drift from the LLM before extracting fields."""
+        if not isinstance(data, dict):
+            return {}
+        fix = data.get("fix")
+        if fix is not None and not isinstance(fix, dict):
+            data["fix"] = {"action": str(fix), "file": "", "code": ""}
+        elif isinstance(fix, dict):
+            for key in ("action", "file", "code"):
+                if key in fix and fix[key] is not None and not isinstance(fix[key], str):
+                    fix[key] = str(fix[key])
+        return data
+    
     def _parse_response(
         self, 
         response: str, 
@@ -663,6 +746,8 @@ class AIAnalyzer:
         except json.JSONDecodeError:
             # If JSON parsing fails, create result from parsed_log directly
             return self._create_fallback_from_log(response, build_info, parsed_log)
+        
+        data = self._normalize_llm_json_payload(data)
         
         # Extract from simple format
         category = data.get("category", "UNKNOWN")
@@ -1000,12 +1085,14 @@ def result_to_dict(result: AnalysisResult) -> Dict[str, Any]:
             }
             for rec in result.recommendations
         ],
-        "metadata": {
-            "analysis_duration_ms": result.analysis_duration_ms,
-            "model_used": result.model_used,
-        }
     }
-    
+    meta: Dict[str, Any] = {
+        "analysis_duration_ms": result.analysis_duration_ms,
+        "model_used": result.model_used,
+    }
+    meta.update(result.metadata or {})
+    output["metadata"] = meta
+
     # Include retry assessment if present
     if result.retry_assessment:
         output["retry_assessment"] = {
