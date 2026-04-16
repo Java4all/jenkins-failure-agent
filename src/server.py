@@ -2154,6 +2154,54 @@ def create_app(config: Config) -> FastAPI:
         )
         
         return {"status": "approved", "item_id": item_id}
+
+    @app.post("/review-queue/{item_id}/analyze")
+    async def analyze_review_item(
+        item_id: int,
+        api_key: str = Depends(verify_api_key)
+    ):
+        """
+        Run (or re-run) RC analysis for one review queue item on demand.
+        Uses existing analyze_snippet flow with the stored log snippet.
+        """
+        from .review_queue import get_review_queue
+
+        queue = get_review_queue()
+        item = queue.get(item_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="Item not found")
+        if not item.log_snippet:
+            raise HTTPException(status_code=400, detail="No log snippet available for analysis")
+
+        try:
+            analysis_result = ai_analyzer.analyze_snippet(
+                item.log_snippet,
+                job_name=item.job_name,
+                log_parser_config=vars(config.parsing),
+                from_splunk_console=True,
+                agent_config=config,
+                github_client=github_client,
+            )
+        except Exception as e:
+            logger.error(f"On-demand review analysis failed for item {item_id}: {e}")
+            raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)[:200]}")
+
+        ai_fix_text = (analysis_result.root_cause.fix or "").strip()
+        if not ai_fix_text and analysis_result.recommendations:
+            ai_fix_text = (analysis_result.recommendations[0].action or "").strip()
+
+        queue.update_ai_analysis(
+            item_id=item_id,
+            ai_root_cause=analysis_result.root_cause.summary or "",
+            ai_fix=ai_fix_text,
+            ai_confidence=analysis_result.root_cause.confidence or 0.0,
+            ai_category=analysis_result.root_cause.category or "",
+        )
+        updated = queue.get(item_id)
+        return {
+            "status": "analyzed",
+            "item": updated.to_dict() if updated else item.to_dict(),
+        }
     
     @app.post("/review-queue/{item_id}/reject")
     async def reject_review_item(

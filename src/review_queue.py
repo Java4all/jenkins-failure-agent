@@ -242,6 +242,27 @@ class ReviewQueue:
             )
             conn.commit()
             return cursor.rowcount > 0
+
+    def update_ai_analysis(
+        self,
+        item_id: int,
+        ai_root_cause: str = "",
+        ai_fix: str = "",
+        ai_confidence: float = 0.0,
+        ai_category: str = "",
+    ) -> bool:
+        """Update AI analysis fields for an existing queue item."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE review_queue
+                SET ai_root_cause = ?, ai_fix = ?, ai_confidence = ?, ai_category = ?
+                WHERE id = ?
+                """,
+                (ai_root_cause, ai_fix, ai_confidence, ai_category, item_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
     
     def delete(self, item_id: int) -> bool:
         """Delete item from queue."""

@@ -385,6 +385,22 @@ class TestReviewQueue:
         assert updated.confirmed_root_cause == "Actual root cause"
         assert updated.confirmed_fix == "Actual fix"
         assert updated.reviewed_at is not None
+
+    def test_update_ai_analysis(self, queue):
+        item = queue.add(host="h", job_name="j", job_id="2")
+        ok = queue.update_ai_analysis(
+            item.id,
+            ai_root_cause="New AI RC",
+            ai_fix="New AI fix",
+            ai_confidence=0.91,
+            ai_category="CONFIGURATION",
+        )
+        assert ok is True
+        updated = queue.get(item.id)
+        assert updated.ai_root_cause == "New AI RC"
+        assert updated.ai_fix == "New AI fix"
+        assert abs(updated.ai_confidence - 0.91) < 0.0001
+        assert updated.ai_category == "CONFIGURATION"
     
     def test_delete(self, queue):
         item = queue.add(host="h", job_name="j", job_id="1")

@@ -2737,6 +2737,7 @@
             const [splunkStatus, setSplunkStatus] = useState(null);
             const [loading, setLoading] = useState(true);
             const [syncing, setSyncing] = useState(false);
+            const [analyzingItemId, setAnalyzingItemId] = useState(null);
             const [selectedItem, setSelectedItem] = useState(null);
             const [editMode, setEditMode] = useState(false);
             const [editData, setEditData] = useState({});
@@ -2832,6 +2833,28 @@
                     }
                 } catch (e) {
                     console.error('Delete failed:', e);
+                }
+            };
+
+            const analyzeItem = async (itemId) => {
+                setAnalyzingItemId(itemId);
+                try {
+                    const res = await fetch(`${API_BASE}/review-queue/${itemId}/analyze`, {
+                        method: 'POST'
+                    });
+                    const data = await res.json().catch(() => ({}));
+                    if (res.ok) {
+                        loadData();
+                        if (selectedItem?.id === itemId && data.item) {
+                            setSelectedItem(data.item);
+                        }
+                    } else {
+                        alert(`Analyze failed: ${data.detail || 'Unknown error'}`);
+                    }
+                } catch (e) {
+                    alert(`Analyze error: ${e.message}`);
+                } finally {
+                    setAnalyzingItemId(null);
                 }
             };
             
@@ -2988,6 +3011,18 @@
                                             <div className="flex items-center gap-2 ml-4">
                                                 {item.status === 'pending' && (
                                                     <>
+                                                        <button
+                                                            onClick={(e) => { e.stopPropagation(); analyzeItem(item.id); }}
+                                                            disabled={analyzingItemId === item.id}
+                                                            className="p-2 text-purple-400 hover:bg-purple-500/20 rounded disabled:opacity-50"
+                                                            title="Run RC analysis now"
+                                                        >
+                                                            {analyzingItemId === item.id ? (
+                                                                <i className="fas fa-spinner fa-spin"></i>
+                                                            ) : (
+                                                                <i className="fas fa-brain"></i>
+                                                            )}
+                                                        </button>
                                                         <button 
                                                             onClick={(e) => { e.stopPropagation(); approveItem(item.id); }}
                                                             className="p-2 text-green-400 hover:bg-green-500/20 rounded"
