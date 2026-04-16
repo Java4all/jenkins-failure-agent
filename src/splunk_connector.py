@@ -408,6 +408,57 @@ index={self.config.index} source="*/console" "Finished: FAILURE" {source_filter_
         
         logger.info(f"Found {len(failures)} failed builds")
         return failures
+
+    def get_failed_builds_with_inline_snippets(self, minutes: int = None) -> List[FailedBuild]:
+        """
+        Fast-path single Splunk query: return failed builds and compact log snippets.
+
+        This avoids N per-build follow-up searches during sync. It keeps the same
+        host/src/job_id identity fields used by existing RC flow.
+        """
+        if minutes is None:
+            minutes = self.config.sync_interval_mins
+
+        source_filter_subsearch = self._build_source_filter_subsearch(minutes)
+        # Use the same source-filter approach from current fallback path.
+        filter_fragment = source_filter_subsearch if source_filter_subsearch else ""
+        max_lines = max(10, self.config.log_signal_lines)
+        query = f'''
+index={self.config.index} "Finished:" {filter_fragment} earliest=-{minutes}m latest=now
+| rex field=_raw "Finished:\\s+(?<result>\\w+)"
+| eval result=upper(result)
+| where result=="FAILURE"
+| rex field=source "/(?<job_id>\\d+)/console$"
+| where isnotnull(job_id) AND job_id!=""
+| eval src_orig=coalesce(source, host)
+| eval src_try=replace(src_orig, "/\\d+/console$|/console$", "")
+| eval src_tmp=if(src_try==src_orig, replace(src_orig, "/[^/]+/[^/]+$", ""), src_try)
+| eval src=replace(replace(src_tmp, "/job/[a-z]{{2}}(?:-[a-z]+)*-\\d+", ""), "/+", "/")
+| eval interesting=if(match(_raw, "(?i)error|exception|fatal|script returned exit code|permission denied|not found|unable to checkout revision|couldn'?t find any revision to build"), _raw, null())
+| stats count as failure_count values(interesting) as signal_lines BY host, src, job_id
+| eval signal_lines=mvfilter(isnotnull(signal_lines))
+| eval signal_lines=mvindex(signal_lines, 0, {max_lines - 1})
+| eval log_snippet=mvjoin(signal_lines, "\\n")
+| sort src, job_id
+| head 100
+'''
+        logger.info("Querying Splunk (single-pass) for failed builds with inline snippets (last %s mins)", minutes)
+        rows = self._search(query.strip())
+
+        failures: List[FailedBuild] = []
+        for row in rows:
+            snippet = row.get("log_snippet") or ""
+            failures.append(
+                FailedBuild(
+                    host=row.get("host", ""),
+                    src=row.get("src", ""),
+                    job_id=row.get("job_id", ""),
+                    failure_count=int(row.get("failure_count", 1)),
+                    log_snippet=snippet[: self.config.log_snippet_max_chars],
+                )
+            )
+        logger.info("Found %s failed builds (single-pass inline snippets)", len(failures))
+        return failures
     
     def test_simple_search(self, minutes: int = 15) -> Dict[str, Any]:
         """
@@ -512,7 +563,7 @@ index={self.config.index} host="{host}" source="*/{job_id}/console"
         combined = "\n\n".join(sections)
         return combined[: self.config.log_snippet_max_chars]
     
-    def get_failed_builds_with_logs(self, minutes: int = None) -> List[FailedBuild]:
+    def get_failed_builds_with_logs(self, minutes: int = None, deep_fetch: bool = False) -> List[FailedBuild]:
         """
         Get failed builds with log snippets.
         
@@ -522,15 +573,16 @@ index={self.config.index} host="{host}" source="*/{job_id}/console"
         Returns:
             List of FailedBuild with log_snippet populated
         """
+        if not deep_fetch:
+            return self.get_failed_builds_with_inline_snippets(minutes)
+
         failures = self.get_failed_builds(minutes)
-        
         for failure in failures:
             try:
                 failure.log_snippet = self.get_build_log(failure.host, failure.job_id)
             except Exception as e:
                 logger.error(f"Failed to fetch log for {failure.host}/{failure.job_id}: {e}")
                 failure.log_snippet = ""
-        
         return failures
     
     def test_connection(self) -> Dict[str, Any]:

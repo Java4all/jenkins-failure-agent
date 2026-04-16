@@ -13,6 +13,7 @@ This release completes **operational workflows** around the Training Pipeline (i
 | **Training restore** | `POST /training/restore` — re-import prior **JSONL** (OpenAI-style) or **JSON** bundle exports into `training.db` (UTF-8, 50 MB cap). Duplicates skipped via content hash. UI: **Restore from export** on the Training tab. |
 | **Training examples CRUD** | `GET /training/examples` (paginated), `GET/PATCH/DELETE /training/examples/{id}`. UI table: filter by source, pagination, edit modal, delete with confirm. |
 | **Declarative stages** | New `src/pipeline_stages.py` — parses `[Pipeline] stage` + name line, respects `[Pipeline] // stage`, handles leading timestamps; avoids treating the `{ (name)` label line as legacy-only duplicate. `log_parser` / `rc_finder` use shared finder for **failed stage** metadata. |
+| **Splunk sync fast path** | `src/splunk_connector.py` now supports single-pass failed-build retrieval with inline snippets (`get_failed_builds_with_inline_snippets`) to reduce one-by-one per-build Splunk queries during review sync. |
 | **Tests** | `tests/test_pipeline_stages.py`; expanded `tests/test_training_pipeline.py` (restore round-trip, CRUD, pagination). |
 
 ### API summary (Training)
@@ -26,6 +27,16 @@ DELETE /training/examples/{id}
 ```
 
 Existing endpoints (`/training/jobs`, `/training/stats`, `make backup` / `make restore` for full volume) are unchanged.
+
+### API summary (Splunk sync behavior)
+
+```
+POST /splunk/sync?minutes=...&analyze=true&deep_fetch=false
+GET  /splunk/failures?minutes=...&with_logs=false&deep_fetch=false
+```
+
+- Default path is now **fast single-query sync** for logs/snippets.
+- Set `deep_fetch=true` to use legacy per-build follow-up log queries (slower, higher Splunk load).
 
 ### Documentation
 

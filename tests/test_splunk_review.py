@@ -249,6 +249,46 @@ class TestSplunkConnector:
         assert "Error: Test failed" in log
         assert mock_search.call_count == 2
 
+    @patch.object(SplunkConnector, '_search')
+    def test_get_failed_builds_with_inline_snippets_single_query(self, mock_search):
+        config = SplunkConfig(
+            enabled=True,
+            url="https://splunk.test.com:8089",
+            token="test-token",
+            search_filter="xomecd/my-lib",
+        )
+        connector = SplunkConnector(config)
+        mock_search.return_value = [
+            {
+                "host": "jenkins1",
+                "src": "/job/pipeline1",
+                "job_id": "100",
+                "failure_count": "1",
+                "log_snippet": "fatal: checkout failed\\nERROR: Couldn't find any revision to build",
+            }
+        ]
+        failures = connector.get_failed_builds_with_inline_snippets(minutes=15)
+        assert len(failures) == 1
+        assert "checkout failed" in failures[0].log_snippet
+        assert mock_search.call_count == 1
+        query = mock_search.call_args[0][0]
+        assert "values(interesting) as signal_lines" in query
+
+    @patch.object(SplunkConnector, 'get_failed_builds_with_inline_snippets')
+    @patch.object(SplunkConnector, 'get_build_log')
+    @patch.object(SplunkConnector, 'get_failed_builds')
+    def test_get_failed_builds_with_logs_fast_default(
+        self, mock_get_failed, mock_get_build_log, mock_inline
+    ):
+        config = SplunkConfig(enabled=True, url="https://splunk.test.com:8089", token="test-token")
+        connector = SplunkConnector(config)
+        mock_inline.return_value = [FailedBuild(host="h", src="/job/a", job_id="1", log_snippet="x")]
+        failures = connector.get_failed_builds_with_logs(minutes=15)
+        assert len(failures) == 1
+        mock_inline.assert_called_once()
+        mock_get_failed.assert_not_called()
+        mock_get_build_log.assert_not_called()
+
 
 # =============================================================================
 # Review Queue Tests

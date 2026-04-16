@@ -1944,6 +1944,7 @@ def create_app(config: Config) -> FastAPI:
     async def sync_splunk_failures(
         minutes: Optional[int] = None,
         analyze: bool = True,
+        deep_fetch: bool = False,
         api_key: str = Depends(verify_api_key)
     ):
         """
@@ -1952,6 +1953,7 @@ def create_app(config: Config) -> FastAPI:
         Args:
             minutes: Look back N minutes (omit to use SPLUNK_SYNC_INTERVAL_MINS, default 15)
             analyze: Run AI analysis on each failure
+            deep_fetch: If true, run per-build follow-up log queries (slower, legacy path)
         """
         from .splunk_connector import get_splunk_connector
         from .review_queue import get_review_queue
@@ -1971,7 +1973,7 @@ def create_app(config: Config) -> FastAPI:
         )
         
         # Get failed builds with logs
-        failures = connector.get_failed_builds_with_logs(minutes)
+        failures = connector.get_failed_builds_with_logs(minutes, deep_fetch=deep_fetch)
         
         if not failures:
             return {
@@ -1979,6 +1981,7 @@ def create_app(config: Config) -> FastAPI:
                 "message": "No failed builds found",
                 "lookback_minutes": lookback_minutes,
                 "sync_interval_mins_config": connector.config.sync_interval_mins,
+                "deep_fetch": deep_fetch,
             }
         
         queue = get_review_queue()
@@ -2028,11 +2031,14 @@ def create_app(config: Config) -> FastAPI:
             "items": results,
             "lookback_minutes": lookback_minutes,
             "sync_interval_mins_config": connector.config.sync_interval_mins,
+            "deep_fetch": deep_fetch,
         }
     
     @app.get("/splunk/failures")
     async def get_splunk_failures(
         minutes: Optional[int] = None,
+        with_logs: bool = False,
+        deep_fetch: bool = False,
         api_key: str = Depends(verify_api_key)
     ):
         """Get failed builds from Splunk (without syncing to queue)."""
@@ -2045,13 +2051,19 @@ def create_app(config: Config) -> FastAPI:
         lookback_minutes = (
             minutes if minutes is not None else connector.config.sync_interval_mins
         )
-        failures = connector.get_failed_builds(minutes)
+        failures = (
+            connector.get_failed_builds_with_logs(minutes, deep_fetch=deep_fetch)
+            if with_logs
+            else connector.get_failed_builds(minutes)
+        )
         
         return {
             "failures": [f.to_dict() for f in failures],
             "total": len(failures),
             "lookback_minutes": lookback_minutes,
             "sync_interval_mins_config": connector.config.sync_interval_mins,
+            "with_logs": with_logs,
+            "deep_fetch": deep_fetch,
         }
     
     # =========================================================================
