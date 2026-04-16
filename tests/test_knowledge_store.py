@@ -224,6 +224,26 @@ class TestKnowledgeStore:
         # Verify
         retrieved = store.get_tool(tool_id=tool_id)
         assert retrieved.description == "New description"
+
+    @pytest.mark.unit
+    def test_update_tool_persists_aliases_and_patterns(self, temp_db):
+        """Test update_tool persists aliases and command/env patterns."""
+        store = KnowledgeStore(db_path=temp_db)
+
+        tool_id = store.add_tool(ToolDefinition(name="a2l", description="Old"))
+        updated_tool = ToolDefinition(
+            name="a2l",
+            description="New",
+            aliases=["a2l-cli", "deploy-cli"],
+            patterns_commands=["a2l deploy", "a2l rollback"],
+            patterns_env_vars=["A2L_TOKEN", "A2L_ENV"],
+        )
+        store.update_tool(tool_id, updated_tool)
+
+        retrieved = store.get_tool(tool_id=tool_id)
+        assert retrieved.aliases == ["a2l-cli", "deploy-cli"]
+        assert retrieved.patterns_commands == ["a2l deploy", "a2l rollback"]
+        assert retrieved.patterns_env_vars == ["A2L_TOKEN", "A2L_ENV"]
     
     @pytest.mark.unit
     def test_delete_tool(self, temp_db):

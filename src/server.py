@@ -1135,6 +1135,22 @@ def create_app(config: Config) -> FastAPI:
         
         # Parse updated data (same as add)
         tool_obj = tool_data.get("tool", tool_data)
+        patterns_obj = tool_obj.get("patterns", {}) or {}
+        deps = tool_obj.get("dependencies", {}) or {}
+
+        # UI edit modal currently sends flat fields; support both flat and nested payloads.
+        patterns_commands = patterns_obj.get(
+            "commands",
+            tool_obj.get("patterns_commands", existing.patterns_commands),
+        )
+        patterns_log_signatures = patterns_obj.get(
+            "log_signatures",
+            tool_obj.get("patterns_log_signatures", existing.patterns_log_signatures),
+        )
+        patterns_env_vars = patterns_obj.get(
+            "env_vars",
+            tool_obj.get("patterns_env_vars", existing.patterns_env_vars),
+        )
         tool = ToolDefinition(
             name=tool_obj.get("name", existing.name),
             aliases=tool_obj.get("aliases", existing.aliases),
@@ -1144,9 +1160,9 @@ def create_app(config: Config) -> FastAPI:
             owner=tool_obj.get("owner", existing.owner),
             docs_url=tool_obj.get("docs_url", existing.docs_url),
             source_repo=tool_obj.get("source_repo", existing.source_repo),
-            patterns_commands=tool_obj.get("patterns", {}).get("commands", existing.patterns_commands),
-            patterns_log_signatures=tool_obj.get("patterns", {}).get("log_signatures", existing.patterns_log_signatures),
-            patterns_env_vars=tool_obj.get("patterns", {}).get("env_vars", existing.patterns_env_vars),
+            patterns_commands=patterns_commands,
+            patterns_log_signatures=patterns_log_signatures,
+            patterns_env_vars=patterns_env_vars,
             added_by=existing.added_by,
             source_file=existing.source_file,
             confidence=tool_obj.get("metadata", {}).get("confidence", existing.confidence),
@@ -1169,7 +1185,6 @@ def create_app(config: Config) -> FastAPI:
             ))
         
         # Parse dependencies
-        deps = tool_obj.get("dependencies", {})
         tool.dependencies_tools = deps.get("tools", [])
         tool.dependencies_services = deps.get("services", [])
         tool.dependencies_credentials = deps.get("credentials", [])
