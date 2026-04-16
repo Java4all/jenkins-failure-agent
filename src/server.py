@@ -2170,12 +2170,36 @@ def create_app(config: Config) -> FastAPI:
         item = queue.get(item_id)
         if not item:
             raise HTTPException(status_code=404, detail="Item not found")
-        if not item.log_snippet:
-            raise HTTPException(status_code=400, detail="No log snippet available for analysis")
+        # Always fetch fresh focused log context on click.
+        # Quick sync is intentionally lightweight; on-demand RC should gather
+        # interesting lines from the full build event stream for this item.
+        from .splunk_connector import get_splunk_connector
+
+        connector = get_splunk_connector()
+        log_text = ""
+        if connector:
+            try:
+                log_text = connector.get_build_log(item.host, item.job_id) or ""
+            except Exception as e:
+                logger.error(
+                    "Failed to fetch log for review item %s (%s#%s): %s",
+                    item_id,
+                    item.job_name,
+                    item.job_id,
+                    e,
+                )
+        if not log_text:
+            # Last-resort fallback to queued snippet if deep fetch returns empty.
+            log_text = item.log_snippet or ""
+        if not log_text:
+            raise HTTPException(
+                status_code=400,
+                detail="No log data available for analysis (Splunk fetch returned empty)",
+            )
 
         try:
             analysis_result = ai_analyzer.analyze_snippet(
-                item.log_snippet,
+                log_text,
                 job_name=item.job_name,
                 log_parser_config=vars(config.parsing),
                 from_splunk_console=True,
